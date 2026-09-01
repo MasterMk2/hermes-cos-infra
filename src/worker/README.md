@@ -50,21 +50,95 @@ Coding Agent (fixture / 将来: claude-code 等) → evidence → IMPLEMENTATION
   - 任意 image / mount / command / path / container args はbridgeが拒否(実測)
 - worker image は immutable version tag(:latest禁止)
 
-## Resource
+## Resource Budget (Pi 4)
 
-- Worker: memory 1250m / memory-swap同値(swap使わない) / cpu 2 / pids 256
-- 同時実行 job 数: 1(one job at a time)
+```text
+Pi RAM ≈ 4GB total
+Hermes container limit ≈ 2GB
+Worker container      ≈ 1.25GB (memory-swap 同値 = swap無効)
+Test container        ≈ 1.25GB (agent containerと同一limits)
+```
+
+- Worker と test container を同時に高負荷稼働させない設計を維持
+- 同時実行 job 数 = 1 (concurrency=1, bridge が busy を返す)
 - OOM: bridgeが docker inspect OOMKilled を検出 → job failed(COMPLETEDにしない)
 - 再起動後: cron watchdog(@reboot + 毎分)がbridgeを自動起動
+
+## Network Egress Policy (F.1.1-Pi.2)
+
+実Coding Agent接続後も、Worker の outbound Internet は**完全遮断しない**:
+
+```text
+Worker has outbound network access required for:
+- LLM provider API (coding agent がモデルを呼ぶため)
+- explicitly permitted dependency resolution (allowlistされた依存解決のみ)
+
+Worker has no published inbound port.
+```
+
+- Worker は LAN 上の他サービス(Hermes dashboard/API 含む)に依存しない
+- Hermes 側から Worker への経路は bridge.sock (Unix domain socket) のみ
+- egress の絞り込み(ドメイン allowlist / proxy)は将来の強化候補
+
+## Socket Authority — Residual Risk (F.1.1-Pi.2)
+
+`bridge.sock` へのアクセスは allowlist 済み coding operation の実行権限を
+与える。Hermes container 内で prompt injection 等が成立した場合でも:
+
+- arbitrary repo path 不可(repo_id allowlist のみ)
+- arbitrary command 不可(agent command は bridge config にのみ存在)
+- arbitrary image 不可(immutable version tag)
+- arbitrary mount / container args 不可(unexpected_fields で reject)
+
+ただし **allowlist 済み repository への job 起動自体は可能**。これを
+明示的な residual risk として記録する。影響範囲は bridge config の
+registry に登録された repo の job worktree に限定され、個人 data tree
+(`/opt/data`, `/srv/hermes`, home)は Worker から不存在(実測)。
+
+## Dashboard / API TLS TODO (F.1.1-Pi.2)
+
+現在の Hermes dashboard/API は **LAN-only HTTP**。今回 HTTPS/TLS 導入は
+Scope 外とし、勝手な新 port / proxy は導入しない。将来の hardening:
+
+```text
+Future hardening: SSH tunnel or TLS reverse proxy
+```
 
 ## Job Lifecycle
 
 NEW → QUEUED → DISPATCHING → RUNNING → AGENT_STOPPED → VALIDATING →
 IMPLEMENTATION_ACCEPTED (review_status=WAITING_REVIEW) → [Phase F.2 review] → COMPLETED
-/ CONTINUE_REQUIRED / WAITING_HUMAN / INTERRUPTED / FAILED / CANCELLED
+/ CONTINUE_REQUIRED / WAITING_HUMAN / INTERRUPTED / FAILED / FAILED_TO_START / CANCELLED
 
 - INTERRUPTED: supervisor再起動やbridge到達不能時。jobは保存され、
   job_continue で再採用(re-adopt)できる(実測済み)
+- FAILED_TO_START: runner spawn 失敗。job_continue で再試行可能(M7)
+- CANCELLED: terminal intent。cancel 後に VALIDATING / ACCEPTED へ進まない
+  (cancel_requested_at を永続化、finalize は cancelled を上書きしない)
+- canonical changed set = git diff (base_sha...HEAD) UNION porcelain
+  (staged/unstaged/untracked)。agent が commit しても検査対象は消えない
+
+## PiSandboxWorkerAdapter — Production Default (F.1.1-Pi.2)
+
+PiSandboxWorkerAdapter は production の既定 transport である
+(F.1.1-Pi.2 で確定)。local-fixture adapter は開発/test 専用で、
+production implementation job には使用しない(MCP 層でガード済み)。
+
+## Deployed Compose Source of Truth (F.1.1-Pi.2)
+
+```text
+実機 Pi に deploy されているのは: src/docker-compose.hermes.yaml
+  - image は digest pin 済み (nousresearch/hermes-agent@sha256:d07e...)
+  - bridge-sock dir mount を含む唯一の運用定義
+
+repository 内の他の compose は template / snapshot:
+  - docker-compose.yaml        … 初期 setup 用 template (:latest 記載)
+  - docker-compose-stageB.yaml … stage B 移行時の template (:latest 記載)
+```
+
+`:latest` が template に残るのは「digest pin 前の初期取得用」の意味のみ。
+template を実機に適用する際は必ず digest pin に更新すること。
+実機 compose を不用意に変更しない。
 
 ## Manual Commands(管理者)
 

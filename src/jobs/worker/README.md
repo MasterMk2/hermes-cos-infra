@@ -23,12 +23,20 @@ Worker Rootは `~hermes-worker/hermes-worker/`。Coding Agentが触るのはこ�
 ## 2. workerctl 設置
 
 `workerctl_server.py` を `~hermes-worker/hermes-worker/bin/workerctl` として
-置き、実行権限を付与:
+置き、実行権限を付与。**F.1.1-Pi.2 からは canonical secret pattern module
+`security_patterns.py` も同じ bin/ にコピーする必要がある**
+(pattern は単一ソースで管理、drift は regression test で検出):
 
 ```bash
 sudo -u hermes-worker cp workerctl_server.py ~hermes-worker/hermes-worker/bin/workerctl
+sudo -u hermes-worker cp ../../security_patterns.py ~hermes-worker/hermes-worker/bin/security_patterns.py
 sudo -u hermes-worker chmod +x ~hermes-worker/hermes-worker/bin/workerctl
 ```
+
+- `security_patterns.py` が workerctl と同じディレクトリに無いと起動しない
+- 内部コマンド (`_run_job`) は SSH 表面からは呼べない
+  (SSH_ORIGINAL_COMMAND 存在時に reject)。detached runner の内部呼び出し
+  のみが使用する(M4)
 
 ## 3. 設定(config/worker.json)
 

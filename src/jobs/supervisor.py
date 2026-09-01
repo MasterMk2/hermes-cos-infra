@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
-"""Supervisor state machine for the Coding Worker loop (Phase F.1.1).
+"""Supervisor state machine for the Coding Worker loop (Phase F.1.1-Pi.2).
 
 Core principle (unchanged): an agent run finishing NEVER completes a job.
 State lives in jobs.db so any crashed supervisor can be reconciled.
 
-Phase F.1.1 changes (supervision logic preserved):
-  - execution goes through transport adapters (local-fixture for test repos
-    only; remote restricted-SSH worker for production)
-  - lifecycle correction: deterministic acceptance now yields
-    IMPLEMENTATION_ACCEPTED (+ review_status=WAITING_REVIEW) instead of
-    COMPLETED. COMPLETED is reserved for the Phase F.2 independent review.
-  - deterministic secret scanning of diffs before acceptance
-  - remote-worker reconciliation: unreachable worker -> INTERRUPTED (job is
-    never treated as completed by loss of connection)
+Phase F.1.1-Pi.2 hardening (behaviour-preserving unless noted):
+  - H1: a test_command criterion passes ONLY when the registered test was
+    executed and exited 0. NOT_RUN/UNKNOWN/MISSING/ERROR/TIMEOUT/BLOCKED
+    can never satisfy acceptance.
+  - H2: canonical changed-file set = committed diff vs base_sha UNION
+    working-tree changes (staged/untracked included). Commits no longer
+    make changes invisible to scope validation / secret scan.
+  - H4: cancellation is persistent terminal intent; re-checked after the
+    agent returns, after validation, and enforced via CAS on acceptance.
+  - M1: per-job max_attempts is honoured (global config is only a fallback).
+  - M2: dispatch uses a compare-and-set claim (no double runner).
+  - M3: supervisor never scans a fake "diff" (json of changed-file names);
+    bridge/workerctl secret scans are authoritative for sandbox jobs.
+  - M6: progress signature hashes base/head sha, canonical changed names,
+    diff hash, tests status and unmet criteria ids (not just file counts).
+  - M7: git state unknown is fail-closed (dispatch refused, WAITING_HUMAN);
+    spawn failure -> FAILED_TO_START (retryable), never stuck QUEUED.
+  - M8: AGENT_STOPPED goes through transition(); timestamps coherent.
 
 Repository allowlist remains human-managed: the supervisor refuses
 repository names that are not allowlisted and never registers new paths.
@@ -22,16 +31,18 @@ It never pushes, merges, or creates PRs.
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# canonical secret-pattern module lives at the src/ level (see security_patterns.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jobs_db
 import transport
 from jobs_db import log
+from security_patterns import SECRET_PATTERNS, scan_text, is_env_file
 from transport import WorkerUnconfigured
 
 CONFIG_PATH = Path(__file__).resolve().parent / "worker_config.json"
@@ -50,21 +61,16 @@ def repo_cfg(name):
 
 
 # ── deterministic secret scanning (pattern ids only, never values) ──────
-SECRET_PATTERNS = [
-    ("private_key_header", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("github_pat", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b")),
-    ("openai_like_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
-    ("credential_assignment", re.compile(
-        r"(?i)\b(api[_-]?key|secret|passwd|password|token)\b\s*[=:]\s*"
-        r"[\"']?[A-Za-z0-9_\-+/]{20,}")),
-]
+# F.1.1-Pi.2 (Item 30): patterns live in security_patterns.py (single source).
+# F.1.1-Pi.2 (M3): the supervisor NEVER scans a fake "diff" — for sandbox
+# jobs the bridge/workerctl scan of the real worktree diff is authoritative
+# (merged via result["secret_scan"]); locally we only scan canonical
+# changed-file contents read from the fixture worktree.
 
-
-def _changed_file_texts(repo_path, before_sha, changed_files, max_bytes=200_000):
+def _changed_file_texts(repo_path, changed_files, max_bytes=200_000):
     texts = []
     for f in changed_files:
-        if f.lower().endswith(".env") or f == ".env":
+        if is_env_file(f):
             texts.append((".env_added:" + f, ""))
             continue
         p = Path(repo_path) / f
@@ -76,24 +82,18 @@ def _changed_file_texts(repo_path, before_sha, changed_files, max_bytes=200_000)
     return texts
 
 
-def secret_scan(repo_path, before_sha, changed_files, diff_text=None):
+def secret_scan(repo_path, changed_files):
     """Returns list of pattern ids found (empty = clean). Never reports values."""
     hits = set()
     for f in changed_files or []:
-        if f.lower().endswith(".env") or Path(f).name == ".env":
+        if is_env_file(f):
             hits.add("env_file_added")
-    scanned = []
     if repo_path and Path(repo_path).exists():
-        scanned = _changed_file_texts(repo_path, before_sha, changed_files)
-    elif diff_text:
-        scanned = [("diff", diff_text[:200_000])]
-    for name, text in scanned:
-        if name.startswith(".env_added"):
-            hits.add("env_file_added")
-            continue
-        for pid, rx in SECRET_PATTERNS:
-            if rx.search(text):
-                hits.add(pid)
+        for name, text in _changed_file_texts(repo_path, changed_files or []):
+            if name.startswith(".env_added"):
+                hits.add("env_file_added")
+                continue
+            hits |= scan_text(text)
     return sorted(hits)
 
 
@@ -103,23 +103,76 @@ def _git(repo_path, *args):
     )
 
 
+class GitStateUnknown(RuntimeError):
+    """F.1.1-Pi.2 (M7): git state could not be determined — fail closed."""
+
+
 def git_state(repo_path):
-    branch = _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    sha = _git(repo_path, "rev-parse", "HEAD").stdout.strip()
-    dirty = bool(_git(repo_path, "status", "--porcelain").stdout.strip())
-    return branch, sha, dirty
+    """(branch, sha, dirty). Raises GitStateUnknown on any failure — the
+    supervisor must never treat 'unknown' as 'clean' (M7 fail-closed)."""
+    rb = _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    rs = _git(repo_path, "rev-parse", "HEAD")
+    rst = _git(repo_path, "status", "--porcelain")
+    sha = rs.stdout.strip()
+    if rb.returncode != 0 or rs.returncode != 0 or rst.returncode != 0 or not sha:
+        detail = ((rb.stderr or "") + (rs.stderr or "") + (rst.stderr or "")).strip()
+        raise GitStateUnknown(
+            f"git state unknown for {repo_path}: "
+            f"{(detail or 'no error output')[:200]}")
+    return rb.stdout.strip(), sha, bool(rst.stdout.strip())
+
+
+def parse_porcelain_z(data):
+    """Parse `git status --porcelain -z` output (Item 44: NUL-separated, no
+    quoted-path / ' -> ' string parsing). Rename/copy entries carry the
+    DESTINATION path in the first field; we keep the destination only."""
+    files = set()
+    fields = (data or "").split("\0")
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        xy, path = entry[:2], entry[3:]
+        if not path:
+            continue
+        if xy and xy[0] in "RC" and i < len(fields):
+            i += 1  # skip the original-path field
+        files.add(path)
+    return files
+
+
+def canonical_diff(repo_path, base_sha, max_bytes=2_000_000):
+    """Bounded canonical diff bytes vs base (for hashing only, M6)."""
+    if not base_sha:
+        return b""
+    r = _git(repo_path, "diff", f"{base_sha}...HEAD")
+    if r.returncode != 0:
+        raise GitStateUnknown(
+            f"git diff vs base failed: {(r.stderr or '')[:200]}")
+    return r.stdout.encode("utf-8", "replace")[:max_bytes]
 
 
 def changed_files_since(repo_path, before_sha):
-    if not before_sha:
-        return []
-    out = _git(repo_path, "diff", "--name-only", before_sha).stdout
-    staged = _git(repo_path, "status", "--porcelain").stdout
-    files = set(l.strip() for l in out.splitlines() if l.strip())
-    for line in staged.splitlines():
-        if len(line) > 3:
-            files.add(line[3:].strip())
-    return sorted(f for f in files if f)
+    """H2 canonical changed-file set:
+      git diff --name-only <base>...HEAD  UNION  git status --porcelain
+    so committed, staged, unstaged and untracked changes are all visible,
+    even when the working tree is clean after an agent commit.
+    Raises GitStateUnknown on git failure (fail-closed, M7)."""
+    files = set()
+    if before_sha:
+        r = _git(repo_path, "diff", "--name-only", "-z", f"{before_sha}...HEAD")
+        if r.returncode != 0:
+            raise GitStateUnknown(
+                f"git diff vs base failed: {(r.stderr or '')[:200]}")
+        files |= {f for f in r.stdout.split("\0") if f}
+    rst = _git(repo_path, "status", "--porcelain", "-z")
+    if rst.returncode != 0:
+        raise GitStateUnknown(
+            f"git status failed: {(rst.stderr or '')[:200]}")
+    files |= parse_porcelain_z(rst.stdout)
+    return sorted(files)
 
 
 def worker_offline():
@@ -177,15 +230,62 @@ def build_prompt(job, rcfg, prev_run=None, validation=None, behavior=None):
     return "\n".join(lines) + "\n"
 
 
+def acceptance_decision(validation, tests_status):
+    """H1 acceptance gate — the single place that decides acceptance.
+
+    All deterministic criteria must PASS. Additionally, when any criterion
+    has kind `test_command`, the registered test must have been EXECUTED and
+    exited 0 (tests_status == PASS). NOT_RUN / UNKNOWN / MISSING / ERROR /
+    TIMEOUT / BLOCKED are always UNMET (no silent bypass)."""
+    if not validation or not all(a.get("status") == "PASS" for a in validation):
+        return False
+    kinds = {a.get("verification") for a in validation}
+    if "test_command" in kinds and tests_status != "PASS":
+        return False
+    return True
+
+
+def test_criterion_required(job):
+    """True when the job's acceptance criteria include kind=test_command."""
+    return any(
+        (a.get("verification") or {}).get("kind") == "test_command"
+        for a in (job.get("acceptance_criteria") or [])
+    )
+
+
 def progress_signature(job, run):
+    """M6: no-progress signature over content, not just counts.
+
+    Inputs: base sha, HEAD sha, canonical changed-file NAMES, diff hash,
+    tests status, passing criteria ids and unmet criteria ids. Two runs that
+    touch the same number of files with different content produce different
+    signatures. Only hashes are stored — never file contents."""
+    job = job or {}
+    run = run or {}
+    acceptance = job.get("acceptance_results") or []
     raw = json.dumps({
-        "git": run.get("git_after"),
+        "base": run.get("git_before"),
+        "head": run.get("git_after"),
+        "files": sorted(job.get("git_changed_files") or []),
+        "diff": run.get("diff_hash"),
         "tests": job.get("tests_status"),
-        "pass": sorted(a["id"] for a in job.get("acceptance_results", [])
-                       if a.get("status") == "PASS"),
-        "files": len(job.get("git_changed_files") or []),
+        "pass": sorted(a["id"] for a in acceptance if a.get("status") == "PASS"),
+        "unmet": sorted(a["id"] for a in acceptance if a.get("status") != "PASS"),
     }, sort_keys=True)
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+def _runner_start_ticks(pid):
+    """Linux process start time (field 22 of /proc/<pid>/stat), or None when
+    unavailable. Used so a recycled PID is never mistaken for our runner."""
+    if os.name != "posix":
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read().decode()
+        return data[data.rindex(")") + 2:].split()[19]
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _spawn_runner(job_id):
@@ -196,8 +296,28 @@ def _spawn_runner(job_id):
             [sys.executable, str(Path(__file__).resolve()), job_id],
             stdout=fh, stderr=fh, start_new_session=True,
         )
-    pid_file.write_text(str(proc.pid))
+    # Item 45: persist PID + process start time (JSON). A stale pid file
+    # whose PID was reused by an unrelated process must not look alive.
+    pid_file.write_text(json.dumps({
+        "pid": proc.pid, "start_ticks": _runner_start_ticks(proc.pid),
+    }))
     return proc.pid
+
+
+def read_runner_pid_file(job_id):
+    """Returns (pid, start_ticks) — tolerant of legacy plain-pid pidfiles."""
+    pid_file = jobs_db.LOGS_DIR / f"runner-{job_id}.pid"
+    if not pid_file.exists():
+        return None, None
+    try:
+        raw = pid_file.read_text().strip()
+        try:
+            data = json.loads(raw)
+            return int(data["pid"]), data.get("start_ticks")
+        except (ValueError, TypeError, KeyError):
+            return int(raw), None
+    except (OSError, ValueError):
+        return None, None
 
 
 def dispatch_job(job_id):
@@ -220,8 +340,20 @@ def dispatch_job(job_id):
                            next_action="provide external worker / fix agent kind")
         return {"job_id": job_id, "status": "WAITING_HUMAN",
                 "note": str(exc)[:200]}
-    jobs_db.transition(job_id, "QUEUED")
-    pid = _spawn_runner(job_id)
+    # F.1.1-Pi.2 (M2): CAS claim — exactly one dispatcher may own the job.
+    # Two concurrent dispatch_job calls race here; only one CAS succeeds.
+    if not jobs_db.cas_status(job_id, "DISPATCHING",
+                              jobs_db.DISPATCHABLE_STATUSES):
+        return {"error": "already_claimed", "job_id": job_id,
+                "status": jobs_db.get_job(job_id)["status"]}
+    try:
+        pid = _spawn_runner(job_id)
+    except Exception as exc:  # M7: never leave the job stuck QUEUED/DISPATCHING
+        jobs_db.transition(job_id, "FAILED_TO_START",
+                           failure_reason=f"runner spawn failed: {exc}"[:300])
+        log(job_id, None, "error", f"runner spawn failed: {exc}"[:300])
+        return {"job_id": job_id, "status": "FAILED_TO_START",
+                "note": str(exc)[:200]}
     log(job_id, None, "info", f"dispatched detached runner pid={pid}")
     return {"job_id": job_id, "status": "DISPATCHING", "runner_pid": pid}
 
@@ -241,22 +373,29 @@ def _worker_job_alive(job):
         return None
 
 
-def _pid_alive(pid):
+def _pid_alive(pid, start_ticks=None):
     """True only if the pid exists AND is not a zombie (reaped-but-unwaited
-    runners must count as dead)."""
+    runners must count as dead). When `start_ticks` is known, a recycled PID
+    running unrelated code also counts as dead (Item 45)."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as fh:
-            data = fh.read().decode()
-        state = data[data.rindex(")") + 2:].split()[0]
-        return state != "Z"
-    except (OSError, ValueError, IndexError):
-        return True
+    if os.name == "posix":
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                data = fh.read().decode()
+            fields = data[data.rindex(")") + 2:].split()
+            state = fields[0]
+            if state == "Z":
+                return False
+            if start_ticks is not None and fields[19] != str(start_ticks):
+                return False  # PID was reused by a different process
+        except (OSError, ValueError, IndexError):
+            return True
+    return True
 
 
 def reconcile():
@@ -266,12 +405,12 @@ def reconcile():
         if job["status"] not in ("RUNNING", "DISPATCHING", "VALIDATING",
                                  "AGENT_STOPPED"):
             continue
-        pid_file = jobs_db.LOGS_DIR / f"runner-{job['job_id']}.pid"
+        pid, start_ticks = read_runner_pid_file(job["job_id"])
         alive = False
-        if pid_file.exists():
+        if pid is not None:
             try:
-                alive = _pid_alive(int(pid_file.read_text().strip()))
-            except (ValueError, ProcessLookupError, PermissionError):
+                alive = _pid_alive(pid, start_ticks)
+            except (ProcessLookupError, PermissionError):
                 alive = False
         if alive:
             out.append({"job_id": job["job_id"], "was": job["status"],
@@ -339,7 +478,7 @@ def run_job_loop(job_id):
     """The detached job driver: dispatch agent runs until accepted or stopped."""
     cfg = load_config()
     limits = cfg.get("limits", {})
-    max_attempts = limits.get("max_attempts", 6)
+    global_max_attempts = limits.get("max_attempts", 6)
     agent_timeout = limits.get("agent_timeout_s", 1200)
     test_timeout = limits.get("test_timeout_s", 600)
     no_progress_limit = limits.get("no_progress_strikes", 2)
@@ -371,7 +510,15 @@ def run_job_loop(job_id):
 
     before_sha = None
     if repo_path is not None:
-        branch, sha, dirty = git_state(repo_path)
+        # M7 fail-closed: unknown git state must never be read as clean.
+        try:
+            branch, sha, dirty = git_state(repo_path)
+        except GitStateUnknown as exc:
+            jobs_db.transition(job_id, "WAITING_HUMAN", failure_reason=str(exc)[:300])
+            jobs_db.update_job(job_id, needs_human=1,
+                               next_action="resolve git state, then job_continue")
+            log(job_id, None, "error", f"git state unknown; dispatch refused: {exc}"[:300])
+            return 1
         jobs_db.update_job(job_id, git_before_sha=sha, git_dirty_before=int(dirty))
         if dirty:
             jobs_db.transition(job_id, "WAITING_HUMAN",
@@ -403,6 +550,9 @@ def run_job_loop(job_id):
         if job["status"] in ("CANCELLED", "WAITING_HUMAN", "COMPLETED",
                              "IMPLEMENTATION_ACCEPTED", "INTERRUPTED"):
             break
+        # M1: per-job max_attempts wins; the global config is only the
+        # fallback for legacy fixtures whose job row lacks the value.
+        max_attempts = job.get("max_attempts") or global_max_attempts
         if job["attempt"] >= max_attempts:
             jobs_db.transition(job_id, "WAITING_HUMAN",
                                failure_reason=f"attempt limit {max_attempts} reached")
@@ -434,6 +584,16 @@ def run_job_loop(job_id):
             jobs_db.update_job(job_id, needs_human=1,
                                next_action="configure external worker")
             log(job_id, run_id, "warn", "worker unconfigured during run")
+            break
+
+        # H4: cancellation is terminal intent. Re-read it as the FIRST thing
+        # after the agent returns — never let a cancelled job advance to
+        # VALIDATING / IMPLEMENTATION_ACCEPTED just because the loop is here.
+        if jobs_db.cancel_requested(job_id):
+            jobs_db.update_run(run_id, finished_at=jobs_db.now_iso(),
+                               result_summary="cancelled during agent run")
+            log(job_id, run_id, "info",
+                "cancel detected after agent stop; validation skipped")
             break
 
         if result.get("status") in ("REJECTED", "BUSY"):
@@ -468,9 +628,23 @@ def run_job_loop(job_id):
         changed = result.get("changed_files")
         head_sha = None
         dirty2 = None
+        diff_hash = result.get("diff_hash")
         if adapter.name == "local-fixture" and repo_path is not None:
-            branch2, head_sha, dirty2 = git_state(repo_path)
-            changed = changed_files_since(repo_path, before_sha)
+            try:
+                # H2: canonical set (committed + staged + unstaged + untracked)
+                changed = changed_files_since(repo_path, before_sha)
+                _, head_sha, dirty2 = git_state(repo_path)
+                diff_hash = hashlib.sha1(
+                    canonical_diff(repo_path, before_sha)).hexdigest()[:16]
+            except GitStateUnknown as exc:
+                jobs_db.update_run(run_id, finished_at=jobs_db.now_iso())
+                jobs_db.transition(job_id, "WAITING_HUMAN",
+                                   failure_reason=str(exc)[:300])
+                jobs_db.update_job(job_id, needs_human=1,
+                                   next_action="resolve git state, then job_continue")
+                log(job_id, run_id, "error",
+                    f"git state unknown after agent run: {exc}"[:300])
+                break
         else:
             head_sha = result.get("head_sha")
         summary = (result.get("stdout_tail") or "").strip().splitlines() or [""]
@@ -480,11 +654,13 @@ def run_job_loop(job_id):
             run_id, finished_at=jobs_db.now_iso(), exit_code=result.get("exit_code"),
             timed_out=int(result.get("timed_out") or 0), stdout_path=str(out_path),
             stderr_path=str(err_path), result_summary=summary,
-            git_before=before_sha, git_after=head_sha,
+            git_before=before_sha, git_after=head_sha, diff_hash=diff_hash,
         )
-        # AGENT_STOPPED: the run ended. This is NOT completion.
+        # AGENT_STOPPED: the run ended. This is NOT completion. (M8: audited
+        # state change goes through transition(), never a raw status update.)
+        jobs_db.transition(job_id, "AGENT_STOPPED")
         jobs_db.update_job(
-            job_id, status="AGENT_STOPPED", result_summary=summary,
+            job_id, result_summary=summary,
             exit_code=result.get("exit_code"), timed_out=int(result.get("timed_out") or 0),
             git_after_sha=head_sha,
             git_dirty_after=dirty2 if dirty2 is not None else 0,
@@ -507,13 +683,19 @@ def run_job_loop(job_id):
         else:
             validation, tests_status, tests_summary = [], "NOT_RUN", None
 
-        # deterministic secret scan of the diff (before any acceptance)
-        diff_text = None
-        if adapter.name != "local-fixture":
-            diff_text = json.dumps(changed or [])
-        scan_hits = set(secret_scan(repo_path if repo_path else None,
-                                    before_sha if repo_path else None,
-                                    changed or [], diff_text=diff_text))
+        # H4: cancelled while validating? Re-check before writing anything.
+        if jobs_db.cancel_requested(job_id):
+            jobs_db.update_job(job_id, acceptance_results=validation,
+                               tests_status=tests_status, tests_summary=tests_summary)
+            log(job_id, run_id, "info", "cancel detected during validation; skip")
+            break
+
+        # deterministic secret scan (before any acceptance).
+        # M3: no synthetic diff scanning. For sandbox jobs the bridge /
+        # workerctl already scanned the real worktree diff (authoritative);
+        # its pattern ids arrive via result["secret_scan"]. The supervisor
+        # only reads canonical changed-file contents for local fixture jobs.
+        scan_hits = set(secret_scan(repo_path, changed or []))
         scan_hits.update(result.get("secret_scan") or [])
         if scan_hits:
             jobs_db.update_job(job_id, acceptance_results=validation,
@@ -529,12 +711,20 @@ def run_job_loop(job_id):
         jobs_db.update_job(job_id, acceptance_results=validation,
                            tests_status=tests_status, tests_summary=tests_summary)
 
-        all_pass = bool(validation) and all(a["status"] == "PASS" for a in validation) \
-            and tests_status in ("PASS", "NOT_RUN")
+        # H1: test_command criteria require an executed, exiting-0 registered
+        # test. NOT_RUN (or any non-PASS tests_status) can never accept.
+        all_pass = acceptance_decision(validation, tests_status)
 
         if all_pass:
+            # H4: final guard — claim acceptance with CAS from VALIDATING so a
+            # concurrent job_cancel (which sets CANCELLED) can never be
+            # overwritten by IMPLEMENTATION_ACCEPTED.
+            if not jobs_db.cas_status(job_id, "IMPLEMENTATION_ACCEPTED",
+                                      ("VALIDATING",)):
+                log(job_id, run_id, "info",
+                    "acceptance lost the CAS race (cancel/other owner); not accepted")
+                break
             # deterministic implementation acceptance — NOT completion.
-            jobs_db.transition(job_id, "IMPLEMENTATION_ACCEPTED")
             jobs_db.update_job(job_id, review_status="WAITING_REVIEW",
                                next_action="independent review (Phase F.2)",
                                needs_human=0, no_progress_strikes=0,

@@ -20,6 +20,7 @@ agent kinds (fixture only):
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 HERMES_BIN = "/opt/hermes/.venv/bin/hermes"
@@ -41,7 +42,9 @@ def run_agent(agent, cwd, prompt, timeout_s):
     if agent in ("fixture-local-hermes", "hermes-cli"):
         argv = [HERMES_BIN, "--ignore-rules", "--yolo", "-z", prompt]
     elif agent == "simulated":
-        argv = ["python3", SIM_AGENT, prompt]
+        # sys.executable (not the POSIX-only "python3") so the fixture runs
+        # identically on the Pi and on any dev machine running the tests
+        argv = [sys.executable, SIM_AGENT, prompt]
     else:
         return {"exit_code": None, "timed_out": False,
                 "stdout": "", "stderr": f"unknown agent kind: {agent}"}

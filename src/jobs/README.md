@@ -12,13 +12,60 @@ Hermes (Supervisor)
     job_status / job_continue / job_validate / job_cancel / job_reconcile
 jobs.db (SQLite, canonical state)
   ↓ detached runner (supervisor_runner.py, crash-safe)
-Agent Run (hermes-cli: hermes -z --ignore-rules --yolo, cwd=repository)
-  ↓ stdout/stderr → logs/, git before/after, changed files
+Agent Run (fixture agents: simulated / fixture-local-hermes、cwd=repository)
+  ↓ stdout/stderr → logs/, git base→HEAD diff + working tree, canonical changed files
 Validator (deterministic, agent自己申告を信用しない)
-  ├─ all criteria PASS → ACCEPTED → COMPLETED
+  ├─ all criteria PASS → IMPLEMENTATION_ACCEPTED (review_status=WAITING_REVIEW)
   └─ incomplete → CONTINUE_REQUIRED → continuation prompt → next run
        (attempt limit / no-progress で停止 → WAITING_HUMAN)
 ```
+
+## F.1.1-Pi.2 Hardening (2026-09-01)
+
+外部レビューで発見された高優先度バグの修正。動作は
+`hermes-cos-infra/tests/` (83 tests) で回帰検証済み。
+
+- **H1 test-not-run bypass 修正**: `test_command` criterion は
+  「登録済み test command が実際に実行され、exit 0」のときのみ PASS。
+  `NOT_RUN / UNKNOWN / MISSING / ERROR / TIMEOUT / BLOCKED` は常に UNMET。
+  job_create 時にも相関を強制(test criterion があるのに tests_command
+  無し → reject `test_command_required_for_test_criterion`)。
+- **H2 committed changes 可視化**: job worktree には作成時に `base_sha`
+  を記録し、changed files の canonical set は
+  `git diff --name-only <base>...HEAD` **UNION** `git status --porcelain -z`
+  (staged/unstaged/untracked 含む)。Agent が commit して working tree が
+  clean になっても、scope validation / secret scan / evidence は空振りしない。
+  porcelain は `-z`(NUL 区切り)でパースし、quoted path / rename に対応。
+- **H4 cancellation 永続化**: `job_cancel` は terminal intent。
+  `cancel_requested_at` を jobs.db に記録し、Supervisor は agent 返還後・
+  validation 後・acceptance write 前に再確認、acceptance は CAS
+  (`UPDATE ... WHERE status='VALIDATING'`)。bridge/workerctl の worker
+  thread も finalize 時に cancelled を上書き禁止。
+- **H5 job_validate guard**: pi-sandbox/remote job への手動ローカル
+  validation は `validation_must_run_via_worker_adapter` で reject。
+  reject 時は acceptance_results / status / evidence を一切変更しない。
+- **M1**: per-job `max_attempts` を優先(global config は legacy NULL のみ
+  fallback)。
+- **M2**: dispatch は CAS claim (`already_claimed` で二重 runner 排除)。
+- **M3**: Supervisor は偽 diff (changed-files の JSON) を scan しない。
+  sandbox job の secret scan は bridge/workerctl が authoritative。
+- **M6**: progress signature は base/head sha、canonical changed file 名、
+  diff hash、tests status、unmet criteria id から生成(同名数でも diff が
+  変われば progress 扱い)。内容は DB に保存せず hash のみ。
+- **M7**: git state 不明は fail-closed(`WAITING_HUMAN`、dirty=false 扱い
+  禁止)。runner spawn 失敗は `FAILED_TO_START`(job_continue で再試行可)。
+- **M8**: `AGENT_STOPPED` 等の状態変更はすべて `transition()` 経由で
+  event_log に監査跡を残す。`finished_at` は terminal execution states
+  (IMPLEMENTATION_ACCEPTED / FAILED / CANCELLED / COMPLETED)で記録、
+  `implementation_finished_at` は AGENT_STOPPED で記録。
+- **Item 43**: `artifact_contains` は bounded read(超過時
+  `artifact_too_large`)。
+- **Item 45**: runner pid file は PID + process start time(JSON)。
+  PID 再利用による誤 reconcile を防止。
+- **Item 46**: timestamp は UTC ISO-8601 に統一(新規書き込みから)。
+
+Secret patterns は `src/security_patterns.py` に単一化(supervisor /
+bridge / workerctl 間の drift は `tests/test_security_patterns.py` で検出)。
 
 ## Layout
 
@@ -30,10 +77,11 @@ Validator (deterministic, agent自己申告を信用しない)
 | artifacts/ | 将来の成果物 |
 | supervisor.py | state machine + continuation logic |
 | validator.py | deterministic acceptance evaluation |
-| agents_local.py | agent execution (hermes-cli / simulated fixture) |
+| agents_local.py | agent execution (fixture agents / simulated) |
 | test_fixtures/sim_agent.py | deterministic test agent (fixture repoのみ) |
 | worker_config.json | worker設定 + repository allowlist(人間管理) |
-| worker/ | remote worker transport seam (SSH + workerctl、未接続) |
+| worker/ | remote worker transport seam (SSH + workerctl) |
+| ../tests/ | hardening 回帰テスト (unittest) |
 
 ## Lifecycle
 
@@ -86,8 +134,11 @@ SSH制限検証: `worker/validate_ssh.sh`。
 - dirty repositoryはdispatch前にWAITING_HUMAN(既存変更を勝手にcommit/resetしない)
 - Job毎に専用local branch `hermes/job-<id>`。main/masterへの直接commitなし
 - git push / PR / merge / deployは本Phaseでは実装・実行しない
-- worker agentは`--ignore-rules`で最小context(SOUL/MEMORY/AGENTSを注入しない)、
-  Personal Memory / LINE / Event DBはpromptへ含めない
+- **個人context隔離は container / filesystem boundary による**
+  (Runtime Audit のとおり `--ignore-rules` は個人context注入を止めない。
+  旧前提「--ignore-rules gives personal-context isolation」は訂正済み。
+  Production jobの実行境界は PiSandboxWorkerAdapter / bridge コンテナ)
+- worker agent の prompt に Personal Memory / LINE / Event DB は含めない
 - prompt/logへsecretを出力しない
 
 ## Remote Worker (transport seam, 未接続)

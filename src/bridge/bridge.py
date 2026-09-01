@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host Coding Bridge (Phase F.1.1-Pi).
+"""Host Coding Bridge (Phase F.1.1-Pi.2).
 
 A small, strictly-typed RPC bridge on a Unix socket. The Hermes container
  talks to the worker container ONLY through this bridge; it never touches
@@ -22,35 +22,45 @@ Security model:
   - container: cap-drop ALL, no-new-privileges, read-only rootfs,
     tmpfs /tmp, memory/cpu/pids limits, fixed uid, no published ports
   - one job at a time
+
+F.1.1-Pi.2 hardening:
+  - H1: test_command criteria PASS only when the registered test ran (exit 0)
+  - H2: worktree base_sha is recorded at job_start; the canonical changed
+    set = committed diff vs base UNION porcelain changes (staged/unstaged/
+    untracked) so agent commits can never hide changes from scans
+  - H3: agent stdout is drained by a reader thread; the supervision loop
+    wakes every poll interval (watchdog works for silent agents)
+  - H4: cancellation is terminal — finalize never overwrites 'cancelled'
+  - M7: git state unknown at job_start is fail-closed (job refused)
 """
 
+import hashlib
 import json
 import os
+import queue
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))  # canonical security_patterns module (src/ level)
+from security_patterns import SECRET_PATTERNS, scan_text, is_env_file
+
 CONFIG_PATH = ROOT / "bridge" / "config.json"
 SOCK = ROOT / "bridge-sock" / "bridge.sock"
 LOG = ROOT / "logs" / "bridge.log"
 
-SECRET_PATTERNS = [
-    ("private_key_header", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("github_pat", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b")),
-    ("openai_like_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
-    ("authorization_header", re.compile(r"(?i)\bauthorization\b\s*[:=]\s*\S+")),
-    ("credential_assignment", re.compile(
-        r"(?i)\b(api[_-]?key|secret|passwd|password|token)\b\s*[=:]\s*"
-        r"[\"']?[A-Za-z0-9_\-+/]{20,}")),
-]
-
 JOB_FIELDS = {"job_id", "repo_id", "agent", "prompt", "tests_command",
               "acceptance_criteria", "timeout_s"}
+
+# Item 43: bounded reads for artifact-based criteria.
+ARTIFACT_MAX_BYTES = 1_000_000
+# Item 43/M6: bounded diff body for hashing.
+DIFF_MAX_BYTES = 2_000_000
 
 
 def cfg():
@@ -113,13 +123,63 @@ def _wt_path(worktree, rel):
     return p
 
 
-def changed_files(worktree):
+def parse_porcelain_z(data):
+    """Item 44: NUL-separated porcelain parsing (no quoted-path / ' -> '
+    string splitting). Rename entries: first field is the destination path."""
     files = set()
-    st = docker_run_git(worktree, "status", "--porcelain")
-    for line in (st.stdout or "").splitlines():
-        if len(line) > 3:
-            files.add(line[3:].strip())
+    fields = (data or "").split("\0")
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        xy, path = entry[:2], entry[3:]
+        if not path:
+            continue
+        if xy and xy[0] in "RC" and i < len(fields):
+            i += 1  # skip original-path field
+        files.add(path)
+    return files
+
+
+def canonical_changed_files(worktree, base_sha):
+    """H2: canonical changed-file set.
+      committed diff (base...HEAD) UNION working-tree changes
+    (staged + unstaged + untracked). Commits can no longer hide changes.
+    Raises on git failure — the caller must fail closed, not assume clean."""
+    files = set()
+    if base_sha:
+        r = docker_run_git(worktree, "diff", "--name-only", "-z",
+                           f"{base_sha}...HEAD")
+        if r.returncode != 0:
+            raise RuntimeError(f"git diff vs base failed: {(r.stderr or '')[:200]}")
+        files |= {f for f in (r.stdout or "").split("\0") if f}
+    st = docker_run_git(worktree, "status", "--porcelain", "-z")
+    if st.returncode != 0:
+        raise RuntimeError(f"git status failed: {(st.stderr or '')[:200]}")
+    files |= parse_porcelain_z(st.stdout or "")
     return sorted(files)
+
+
+def worktree_base_sha(repo_path):
+    """M7 fail-closed: resolve the base sha at worktree creation, or raise."""
+    r = subprocess.run(["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+                       capture_output=True, text=True, timeout=120)
+    sha = (r.stdout or "").strip()
+    if r.returncode != 0 or not sha:
+        raise RuntimeError(
+            f"git state unknown for {repo_path}: {(r.stderr or 'no output')[:200]}")
+    return sha
+
+
+def bounded_diff_hash(worktree, base_sha, max_bytes=DIFF_MAX_BYTES):
+    """M6: sha256 over the bounded canonical diff body (hash only, no bulk)."""
+    if not base_sha:
+        return None
+    r = docker_run_git(worktree, "diff", f"{base_sha}...HEAD")
+    body = (r.stdout or "").encode("utf-8", "replace")[:max_bytes]
+    return hashlib.sha256(body).hexdigest()[:16]
 
 
 def docker_run_git(worktree, *args):
@@ -131,7 +191,7 @@ def docker_run_git(worktree, *args):
 def secret_scan(worktree, files, max_bytes=200_000):
     hits = set()
     for f in files:
-        if f.lower().endswith(".env") or Path(f).name == ".env":
+        if is_env_file(f):
             hits.add("env_file_added")
             continue
         try:
@@ -142,15 +202,21 @@ def secret_scan(worktree, files, max_bytes=200_000):
         try:
             if p.is_file() and not p.is_symlink():
                 text = p.read_text(errors="replace")[:max_bytes]
-                for pid, rx in SECRET_PATTERNS:
-                    if rx.search(text):
-                        hits.add(pid)
+                hits |= scan_text(text)
         except OSError:
             continue
     return sorted(hits)
 
 
-def evaluate_criteria(criteria, repo_cfg, worktree):
+def evaluate_criteria(criteria, repo_cfg, worktree, tests_result=None,
+                      changed_files=None, artifact_max_bytes=ARTIFACT_MAX_BYTES):
+    """Deterministic criteria evaluation.
+
+    H1: kind=test_command passes ONLY when `tests_result` shows the
+    registered test was executed and exited 0 (status == PASS). When no test
+    command was registered/executed the criterion is FAIL (never a silent
+    'evaluated via allowlisted test run' bypass).
+    Item 43: artifact_contains reads are bounded (artifact_too_large)."""
     results = []
     for ac in criteria:
         kind = ac.get("verification", {}).get("kind")
@@ -173,19 +239,30 @@ def evaluate_criteria(criteria, repo_cfg, worktree):
                 else:
                     detail = f"file missing: {params.get('file')}"
             elif kind == "git_scope":
-                cf = changed_files(worktree)
+                # H2: always evaluate scope against the canonical changed set
+                cf = changed_files if changed_files is not None \
+                    else canonical_changed_files(worktree, None)
                 allowed = repo_cfg.get("allowed_paths") or []
                 extra = [f for f in cf if not any(f.startswith(a) for a in allowed)]
                 ok, detail = not extra, (f"changed={len(cf)} extra={extra}" if extra
                                          else f"changed={len(cf)} all in scope")
             elif kind == "artifact_contains":
                 p = _wt_path(worktree, params.get("path"))
-                ok = p.is_file() and params.get("text", "") in \
-                    p.read_text(errors="replace")
-                detail = f"contains={ok}"
+                if not p.is_file():
+                    ok, detail = False, "file missing"
+                elif p.stat().st_size > artifact_max_bytes:
+                    # Item 43: never unbounded-read huge artifacts
+                    ok, detail = False, f"artifact_too_large (> {artifact_max_bytes} bytes)"
+                else:
+                    ok = params.get("text", "") in \
+                        p.read_text(errors="replace")[:artifact_max_bytes]
+                    detail = f"contains={ok}"
             elif kind == "test_command":
-                ok, detail = True, "evaluated via allowlisted test run"
-        except (ValueError, SyntaxError, OSError) as exc:
+                # H1: executed registered test with exit 0 — or FAIL.
+                tstat = (tests_result or {}).get("status") or "NOT_RUN"
+                ok = tstat == "PASS"
+                detail = f"tests={tstat}"
+        except (ValueError, SyntaxError, OSError, RuntimeError) as exc:
             ok, detail = False, f"error: {exc}"
         results.append({"id": ac.get("id"), "description": ac.get("description"),
                         "verification": kind, "status": "PASS" if ok else "FAIL",
@@ -219,6 +296,119 @@ def worktree_max_mtime(worktree):
     return latest
 
 
+def _drain_output(stream, out_q):
+    """H3: reader thread body — pushes stdout lines into a queue so the
+    supervision loop NEVER blocks on a silent agent's readline()."""
+    try:
+        for line in iter(stream.readline, ""):
+            out_q.put(line)
+    except (ValueError, OSError):
+        pass
+    finally:
+        out_q.put(None)  # EOF sentinel
+
+
+def supervise_process(proc, *, mtime_fn=lambda: 0.0, timeout_s=1200,
+                      hang_watchdog_s=900, grace_s=300, stop_fn,
+                      cancelled_fn=None, poll_s=1.0):
+    """H3: non-blocking supervision loop (transport-agnostic core).
+
+    Guarantees:
+      - the loop wakes at least every `poll_s` seconds regardless of whether
+        the process produces output (silent agents included)
+      - each cycle re-checks: process alive, absolute timeout, output age,
+        worktree activity (mtime), cancellation
+      - on timeout/hang/cancel it invokes stop_fn() exactly once and waits
+      - returns (exit_status, timed_out, output_tail)
+
+    Reader thread + queue keeps readline() off the supervision path, so a
+    process that stops writing can no longer disable the watchdog."""
+    out_q = queue.Queue()
+    reader = threading.Thread(target=_drain_output, args=(proc.stdout, out_q),
+                              daemon=True)
+    reader.start()
+    started = time.time()
+    last_activity = time.time()
+    last_mtime = mtime_fn()
+    output_tail = ""
+    timed_out = False
+
+    def kill_and_wait():
+        try:
+            stop_fn()
+        except Exception as exc:
+            log(f"supervise stop_fn error: {type(exc).__name__}: {exc}")
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+                proc.wait(timeout=30)
+            except Exception:
+                pass
+
+    while True:
+        try:
+            item = out_q.get(timeout=poll_s)
+        except queue.Empty:
+            item = None
+        if item is not None:
+            if item is None:
+                # EOF: process stdout closed — drain the rest and finish
+                while True:
+                    try:
+                        extra = out_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if extra is None:
+                        break
+                    output_tail = (output_tail + extra)[-4000:]
+                break
+            output_tail = (output_tail + item)[-4000:]
+            last_activity = time.time()
+        alive = proc.poll() is None
+        if not alive and out_q.empty():
+            break
+        # worktree activity counts as progress even without stdout
+        try:
+            mtime = mtime_fn()
+            if mtime > last_mtime:
+                last_mtime = mtime
+                last_activity = time.time()
+        except OSError:
+            pass
+        elapsed = time.time() - started
+        # H4: a cancel recorded while running must stop the container now,
+        # not only after the agent happens to exit.
+        if cancelled_fn is not None and cancelled_fn():
+            timed_out = True
+            log("supervise: cancel requested; stopping process")
+            kill_and_wait()
+            break
+        if elapsed > timeout_s:
+            timed_out = True
+            log(f"supervise: absolute timeout after {int(elapsed)}s")
+            kill_and_wait()
+            break
+        if elapsed > grace_s and time.time() - last_activity > hang_watchdog_s:
+            timed_out = True
+            log(f"supervise: hang watchdog fired "
+                f"(no progress {int(time.time() - last_activity)}s)")
+            kill_and_wait()
+            break
+    # final drain of anything left in the queue
+    while True:
+        try:
+            extra = out_q.get_nowait()
+        except queue.Empty:
+            break
+        if extra is None:
+            continue
+        output_tail = (output_tail + extra)[-4000:]
+    return proc.poll() if proc.poll() is not None else proc.returncode, \
+        timed_out, output_tail
+
+
 def run_agent_container(job_id, repo_id, agent, prompt_file, timeout_s):
     c = cfg()
     name = f"hermes-cw-{job_id}"
@@ -237,47 +427,28 @@ def run_agent_container(job_id, repo_id, agent, prompt_file, timeout_s):
     started = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True)
-    last_activity = time.time()
-    last_mtime = worktree_max_mtime(worktree)
-    output_tail = ""
-    exit_status, timed_out, oom = None, False, False
-    while True:
-        try:
-            out = proc.stdout.readline() if proc.poll() is None else ""
-        except Exception:
-            out = ""
-        if out:
-            output_tail = (output_tail + out)[-4000:]
-            last_activity = time.time()
-        alive = proc.poll() is None
-        mtime = worktree_max_mtime(worktree)
-        if mtime > last_mtime:
-            last_mtime = mtime
-            last_activity = time.time()
-        elapsed = time.time() - started
-        if not alive:
-            exit_status = proc.returncode
-            break
-        if elapsed > timeout_s:
-            timed_out = True
-            subprocess.run(["docker", "stop", "-t", "10", name],
-                           capture_output=True, timeout=60)
-            proc.wait(timeout=60)
-            exit_status = proc.returncode
-            break
-        if elapsed > 300 and time.time() - last_activity > c.get("hang_watchdog_s", 900):
-            timed_out = True
-            log(f"{job_id}: hang watchdog fired (no progress {int(time.time()-last_activity)}s)")
-            subprocess.run(["docker", "stop", "-t", "10", name],
-                           capture_output=True, timeout=60)
-            proc.wait(timeout=60)
-            exit_status = proc.returncode
-            break
-        if int(elapsed) % 30 == 0:
-            time.sleep(1)
-        else:
-            time.sleep(2)
+
+    def _cancelled():
+        st = read_state(job_id)
+        return bool(st) and (st.get("state") == "cancelled"
+                             or bool(st.get("cancel_requested_at")))
+
+    def _stop():
+        subprocess.run(["docker", "stop", "-t", "10", name],
+                       capture_output=True, timeout=60)
+
+    exit_status, timed_out, output_tail = supervise_process(
+        proc,
+        mtime_fn=lambda: worktree_max_mtime(worktree),
+        timeout_s=timeout_s,
+        hang_watchdog_s=c.get("hang_watchdog_s", 900),
+        grace_s=300,
+        stop_fn=_stop,
+        cancelled_fn=_cancelled,
+        poll_s=1.0,
+    )
     insp = docker("inspect", name, timeout=30)
+    oom = False
     if insp.returncode == 0:
         try:
             st = json.loads(insp.stdout)[0]["State"]
@@ -319,12 +490,45 @@ def run_test_container(job_id, repo_cfg, tests_command):
         docker("rm", "-f", name, timeout=60)
 
 
+def _is_cancelled_state(st):
+    """H4: cancellation is terminal intent — once recorded, finalization can
+    never promote the job to finished/failed."""
+    return bool(st) and (st.get("state") == "cancelled"
+                         or bool(st.get("cancel_requested_at")))
+
+
+def _commit_terminal_state(job_id, st, new_state, note=None, error=None):
+    """H4 CAS-style final write: re-reads the persisted state and refuses to
+    overwrite 'cancelled' (a cancel may have landed while the worker thread
+    was finishing). Returns the state actually persisted."""
+    cur = read_state(job_id) or {}
+    if _is_cancelled_state(cur) or _is_cancelled_state(st):
+        st["state"] = "cancelled"
+        st.setdefault("cancel_requested_at", cur.get("cancel_requested_at") or now())
+        if note:
+            st["note"] = note
+        if error:
+            st["error"] = error
+    else:
+        st["state"] = new_state
+        if note:
+            st["note"] = note
+        if error:
+            st["error"] = error
+    write_state(job_id, st)
+    return st["state"]
+
+
 def _job_worker(job_id, package):
     c = cfg()
     repo_cfg = c["repositories"][package["repo_id"]]
     worktree = ROOT / "worktrees" / job_id
     try:
         st = read_state(job_id) or {}
+        # H4: never resurrect a cancelled job into running
+        if _is_cancelled_state(st):
+            log(f"{job_id}: cancel already requested; not starting worker")
+            return
         st.update({"state": "running", "started_at": now()})
         write_state(job_id, st)
 
@@ -333,14 +537,20 @@ def _job_worker(job_id, package):
                                         ROOT / "jobs" / job_id / "prompt.txt",
                                         int(package.get("timeout_s") or
                                             c.get("agent_timeout_s", 1200)))
-        files = changed_files(worktree)
+        # H2: base_sha is recorded at worktree creation and never changes;
+        # the canonical changed set is committed-diff-vs-base UNION porcelain.
+        base_sha = st.get("base_sha")
+        files = canonical_changed_files(worktree, base_sha)
         scans = secret_scan(worktree, files)
         tests = run_test_container(job_id, repo_cfg, package["tests_command"]) \
             if package.get("tests_command") else {"status": "NOT_RUN", "summary": None}
-        criteria_results = evaluate_criteria(package.get("acceptance_criteria") or [],
-                                             repo_cfg, worktree)
+        # H1: test_command criteria are evaluated against the actual test run
+        criteria_results = evaluate_criteria(
+            package.get("acceptance_criteria") or [], repo_cfg, worktree,
+            tests_result=tests, changed_files=files)
         diff_stat = (docker_run_git(worktree, "diff", "--stat", "HEAD").stdout or "")[:2000]
         head = docker_run_git(worktree, "rev-parse", "HEAD")
+        diff_hash = bounded_diff_hash(worktree, base_sha)
         probes = None
         probes_file = ROOT / "jobs" / job_id / "probes.json"
         if probes_file.exists():
@@ -354,9 +564,11 @@ def _job_worker(job_id, package):
             "branch": f"hermes/job-{job_id}", "worktree_id": job_id,
             "worktree_path": str(worktree), "head_sha":
                 head.stdout.strip() if head.returncode == 0 else None,
+            "base_sha": base_sha,
             **agent_res,
             "changed_files": files,
             "diff_stat": diff_stat,
+            "diff_sha256": diff_hash,
             "test_summary": {"status": tests["status"], "summary": tests["summary"],
                              "criteria_results": criteria_results},
             "secret_scan": scans,
@@ -364,22 +576,23 @@ def _job_worker(job_id, package):
             "finished_at": now(),
         }
         st["evidence"] = evidence
-        if scans:
-            st["state"] = "finished"
-            st["note"] = "secret scan hits present"
-        elif agent_res.get("oom"):
-            st["state"] = "failed"
-            st["error"] = "worker container OOM killed"
+        # note: scans / OOM are recorded as evidence, but the terminal state
+        # decision itself must respect cancellation (H4).
+        note = "secret scan hits present" if scans else None
+        if agent_res.get("oom") and not scans:
+            _commit_terminal_state(job_id, st, "failed",
+                                   note=note, error="worker container OOM killed")
         else:
-            st["state"] = "finished"
-        write_state(job_id, st)
-        log(f"{job_id}: job finished state={st['state']} exit={agent_res['exit_status']}")
+            _commit_terminal_state(job_id, st, "finished", note=note)
+        log(f"{job_id}: job terminal state={st['state']} exit={agent_res['exit_status']}")
     except Exception as exc:  # durability: record, never leave state running
         st = read_state(job_id) or {}
-        st["state"] = "failed"
-        st["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
-        write_state(job_id, st)
-        log(f"{job_id}: EXCEPTION {st['error']}")
+        st = st if isinstance(st, dict) else {}
+        if "evidence" not in st:
+            st["evidence"] = st.get("evidence")
+        _commit_terminal_state(job_id, st, "failed",
+                               error=f"{type(exc).__name__}: {str(exc)[:300]}")
+        log(f"{job_id}: EXCEPTION {st.get('error')}"[:300])
 
 
 # ── actions ─────────────────────────────────────────────────────────────
@@ -437,7 +650,15 @@ def a_job_start(req):
 
     repo_path = Path(c["repositories"][repo_id]["path"])
     worktree = ROOT / "worktrees" / job_id
+    base_sha = None
     if not worktree.exists():
+        # H2/M7: the comparison base is resolved ONCE at worktree creation.
+        # Unknown git state is fail-closed (no job, no assumptions).
+        try:
+            base_sha = worktree_base_sha(repo_path)
+        except RuntimeError as exc:
+            log(f"{job_id}: refused job_start: {exc}"[:250])
+            return {"error": "git_state_unknown", "detail": str(exc)[:200]}
         branch = f"hermes/job-{job_id}"
         r = subprocess.run(
             ["git", "-C", str(repo_path), "worktree", "add", "-b", branch,
@@ -451,14 +672,22 @@ def a_job_start(req):
             # re-adopt: supervisor runner died; keep watching the live container
             return {"accepted": True, "job_id": job_id, "state": "running",
                     "readopted": True, "attempt": st.get("attempt", 1)}
+        # H4: a cancelled job is not silently re-adopted as running
+        if _is_cancelled_state(st):
+            return {"error": "job_cancelled", "job_id": job_id}
+        base_sha = st.get("base_sha")
 
     jd = job_dir(job_id)
     (jd / "prompt.txt").write_text(prompt)
     (jd / "prompt.txt").chmod(0o600)
-    write_state(job_id, {"job_id": job_id, "state": "running",
-                         "repo_id": repo_id, "agent": agent,
-                         "attempt": (read_state(job_id) or {}).get("attempt", 0) + 1,
-                         "created_at": now()})
+    st = read_state(job_id) or {}
+    write_state(job_id, {
+        "job_id": job_id, "state": "running",
+        "repo_id": repo_id, "agent": agent,
+        "base_sha": base_sha or st.get("base_sha"),
+        "attempt": st.get("attempt", 0) + 1,
+        "created_at": st.get("created_at") or now(),
+    })
     threading.Thread(target=_job_worker, args=(job_id, req), daemon=True).start()
     log(f"{job_id}: job started repo={repo_id} agent={agent}")
     return {"accepted": True, "job_id": job_id, "state": "running",
@@ -489,7 +718,11 @@ def a_job_cancel(req):
         return {"error": "unknown_job"}
     if st.get("state") == "running":
         docker("stop", "-t", "10", f"hermes-cw-{job_id}", timeout=60)
+    # H4: cancellation is terminal intent — stamp it persistently. The
+    # worker thread's finalize step can no longer write finished/failed.
     st["state"] = "cancelled"
+    if not st.get("cancel_requested_at"):
+        st["cancel_requested_at"] = now()
     write_state(job_id, st)
     return {"job_id": job_id, "state": "cancelled"}
 

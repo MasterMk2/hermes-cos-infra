@@ -9,6 +9,7 @@ to /jobs so the bridge can attach it to the evidence.
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -79,6 +80,17 @@ def main():
     def write(body):
         greeter.parent.mkdir(parents=True, exist_ok=True)
         greeter.write_text(body, encoding="utf-8")
+
+    # sleep:<seconds> — silent agent (no output, no writes) for watchdog /
+    # cancel regression tests (F.1.1-Pi.2 H3/H4).
+    if behavior.startswith("sleep"):
+        try:
+            secs = float(behavior.split(":", 1)[1])
+        except (IndexError, ValueError):
+            secs = 10.0
+        time.sleep(secs)
+        print("Done.")
+        return 0
 
     if behavior == "full":
         body = greeter.read_text() if greeter.exists() else ""

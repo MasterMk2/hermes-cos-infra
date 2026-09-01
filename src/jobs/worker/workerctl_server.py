@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""workerctl — Coding Worker control plane (Phase F.1.1).
+"""workerctl — Coding Worker control plane (Phase F.1.1-Pi.2).
 
 Runs ON the worker machine as the dedicated low-privilege `hermes-worker`
 account. Hermes reaches it ONLY over restricted SSH (forced command), never
@@ -29,8 +29,18 @@ Security model:
   - deterministic secret scan of the diff before evidence is returned
   - changed-file validation: any path escaping the worktree (../, absolute,
     symlinked out) is rejected and flagged
+
+F.1.1-Pi.2 hardening:
+  - M4: internal commands (_run_job) are rejected on the SSH surface —
+    SSH_ORIGINAL_COMMAND present => internal subcommands forbidden
+  - H1: test_command criteria PASS only when the allowlisted test ran (exit 0)
+  - H2: worktree base_sha recorded; canonical changed set = committed diff
+    vs base UNION porcelain (staged/unstaged/untracked)
+  - H4: finalization never overwrites 'cancelled' (terminal intent)
+  - Item 46: state timestamps are UTC ISO-8601
 """
 
+import hashlib
 import json
 import os
 import re
@@ -38,7 +48,13 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# canonical secret-pattern module must sit next to workerctl (deployment:
+# worker/README.md step 2) or on PYTHONPATH — pattern drift is forbidden.
+from security_patterns import SECRET_PATTERNS, scan_text, is_env_file
 
 WORKER_ROOT = Path(
     os.environ.get("HERMES_WORKER_ROOT", Path.home() / "hermes-worker")
@@ -48,15 +64,12 @@ JOBS_DIR = WORKER_ROOT / "jobs"
 LOGS_DIR = WORKER_ROOT / "logs"
 WORKTREES_DIR = WORKER_ROOT / "worktrees"
 
-SECRET_PATTERNS = [
-    ("private_key_header", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("github_pat", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b")),
-    ("openai_like_key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
-    ("credential_assignment", re.compile(
-        r"(?i)\b(api[_-]?key|secret|passwd|password|token)\b\s*[=:]\s*"
-        r"[\"']?[A-Za-z0-9_\-+/]{20,}")),
-]
+# M4: subcommands that only the local detached runner may invoke.
+INTERNAL_COMMANDS = {"_run_job"}
+
+# Item 43: bounded artifact reads for criteria evaluation.
+ARTIFACT_MAX_BYTES = 1_000_000
+DIFF_MAX_BYTES = 2_000_000
 
 
 def load_config():
@@ -86,12 +99,45 @@ def _safe_worktree_path(job_id, rel):
     return p
 
 
-def changed_files(worktree):
+def now_iso():
+    """Item 46: UTC ISO-8601 everywhere (no epoch floats in new writes)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_porcelain_z(data):
+    """Item 44: NUL-separated porcelain parsing. Rename entries: first field
+    is the destination path (kept), second is the original (skipped)."""
     files = set()
-    st = _git(worktree, "status", "--porcelain")
-    for line in st.stdout.splitlines():
-        if len(line) > 3:
-            files.add(line[3:].strip())
+    fields = (data or "").split("\0")
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        xy, path = entry[:2], entry[3:]
+        if not path:
+            continue
+        if xy and xy[0] in "RC" and i < len(fields):
+            i += 1
+        files.add(path)
+    return files
+
+
+def canonical_changed_files(worktree, base_sha):
+    """H2 canonical changed set: committed diff (base...HEAD) UNION
+    working-tree changes (staged/unstaged/untracked). Raises on git failure
+    (fail-closed — never treat unknown git state as 'no changes')."""
+    files = set()
+    if base_sha:
+        r = _git(worktree, "diff", "--name-only", "-z", f"{base_sha}...HEAD")
+        if r.returncode != 0:
+            raise RuntimeError(f"git diff vs base failed: {(r.stderr or '')[:200]}")
+        files |= {f for f in (r.stdout or "").split("\0") if f}
+    st = _git(worktree, "status", "--porcelain", "-z")
+    if st.returncode != 0:
+        raise RuntimeError(f"git status failed: {(st.stderr or '')[:200]}")
+    files |= parse_porcelain_z(st.stdout or "")
     return sorted(files)
 
 
@@ -109,23 +155,27 @@ def validate_changed_within_worktree(job_id, files):
 def secret_scan(worktree, files, max_bytes=200_000):
     hits = set()
     for f in files:
-        if f.lower().endswith(".env") or Path(f).name == ".env":
+        if is_env_file(f):
             hits.add("env_file_added")
             continue
         p = (Path(worktree) / f)
         try:
             if p.resolve().is_file() and not p.is_symlink():
                 text = p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
-                for pid, rx in SECRET_PATTERNS:
-                    if rx.search(text):
-                        hits.add(pid)
+                hits |= scan_text(text)
         except OSError:
             continue
     return sorted(hits)
 
 
-def evaluate_criteria(criteria, repo_cfg, worktree):
-    """Deterministic checks (same kinds as the supervisor validator)."""
+def evaluate_criteria(criteria, repo_cfg, worktree, tests_result=None,
+                      changed_files=None, artifact_max_bytes=ARTIFACT_MAX_BYTES):
+    """Deterministic checks (same kinds as the supervisor validator).
+
+    H1: kind=test_command passes ONLY when `tests_result` shows the
+    allowlisted test was executed and exited 0. Item 43: artifact_contains
+    reads are bounded (artifact_too_large). git_scope uses the canonical
+    changed set (H2)."""
     results = []
     for ac in criteria:
         kind = ac.get("verification", {}).get("kind")
@@ -147,19 +197,27 @@ def evaluate_criteria(criteria, repo_cfg, worktree):
                 else:
                     detail = f"file missing: {params.get('file')}"
             elif kind == "git_scope":
-                cf = changed_files(worktree)
+                cf = changed_files if changed_files is not None \
+                    else canonical_changed_files(worktree, None)
                 allowed = repo_cfg.get("allowed_paths") or []
                 extra = [f for f in cf if not any(f.startswith(a) for a in allowed)]
                 ok, detail = not extra, (f"changed={len(cf)} extra={extra}" if extra
                                          else f"changed={len(cf)} all in scope")
             elif kind == "artifact_contains":
                 p = _wt_path(worktree, params.get("path"))
-                ok = p.is_file() and params.get("text", "") in \
-                    p.read_text(encoding="utf-8", errors="replace")
-                detail = f"contains={ok}"
+                if not p.is_file():
+                    ok, detail = False, "file missing"
+                elif p.stat().st_size > artifact_max_bytes:
+                    ok, detail = False, f"artifact_too_large (> {artifact_max_bytes} bytes)"
+                else:
+                    ok = params.get("text", "") in \
+                        p.read_text(encoding="utf-8", errors="replace")[:artifact_max_bytes]
+                    detail = f"contains={ok}"
             elif kind == "test_command":
-                ok, detail = True, "evaluated via allowlisted test run"
-        except (ValueError, SyntaxError, OSError) as exc:
+                # H1: executed allowlisted test with exit 0 — or FAIL.
+                tstat = (tests_result or {}).get("status") or "NOT_RUN"
+                ok, detail = (tstat == "PASS"), f"tests={tstat}"
+        except (ValueError, SyntaxError, OSError, RuntimeError) as exc:
             ok, detail = False, f"error: {exc}"
         results.append({"id": ac.get("id"), "description": ac.get("description"),
                         "verification": kind, "status": "PASS" if ok else "FAIL",
@@ -219,24 +277,64 @@ def run_job_detached(job_id):
     (LOGS_DIR / f"job-{job_id}.pid").write_text(str(proc.pid))
 
 
+def _is_cancelled_state(st):
+    """H4: cancellation is terminal intent."""
+    return bool(st) and (st.get("state") == "cancelled"
+                         or bool(st.get("cancel_requested_at")))
+
+
+def _commit_terminal_state(job_id, state, new_state, error=None):
+    """H4 CAS-style final write: re-reads persisted state; a cancel that
+    landed while the runner was finishing is NEVER overwritten."""
+    cur = read_state(job_id) or {}
+    if _is_cancelled_state(cur) or _is_cancelled_state(state):
+        state["state"] = "cancelled"
+        state.setdefault("cancel_requested_at",
+                         cur.get("cancel_requested_at") or now_iso())
+    else:
+        state["state"] = new_state
+    if error:
+        state["error"] = error
+    state["finished_at"] = now_iso()
+    write_state(job_id, state)
+    return state["state"]
+
+
 def _run_job(job_id, package):
     cfg = load_config()
     repo_cfg = cfg["repositories"][package["repo_id"]]
     repo_path = Path(repo_cfg["path"]).resolve()
     worktree = WORKTREES_DIR / job_id
     state = read_state(job_id) or {"job_id": job_id, "state": "running",
-                                   "created_at": time.time()}
+                                   "created_at": now_iso()}
     state["state"] = "running"
     write_state(job_id, state)
     try:
+        # H2: base_sha is resolved once, at worktree creation, and stored in
+        # job state — later HEAD moves never change the comparison base.
+        base_sha = state.get("base_sha")
         if not worktree.exists():
+            # M7 fail-closed: refuse to run when git state is unknown
+            r = subprocess.run(["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+                               capture_output=True, text=True, timeout=120)
+            base_sha = (r.stdout or "").strip()
+            if r.returncode != 0 or not base_sha:
+                state["state"] = "failed"
+                state["error"] = ("git state unknown; worktree not created "
+                                  f"({(r.stderr or 'no output')[:200]})")
+                write_state(job_id, state)
+                return
             branch = f"hermes/job-{job_id}"
             subprocess.run(
                 ["git", "-C", str(repo_path), "worktree", "add", "-b", branch,
                  str(worktree)],
                 capture_output=True, text=True, timeout=120, check=True)
+            state["base_sha"] = base_sha
+            write_state(job_id, state)
+        if base_sha is None:
+            base_sha = state.get("base_sha")
         # dirty worktree from a previous attempt: refuse (no auto reset)
-        if changed_files(worktree) and state.get("evidence"):
+        if canonical_changed_files(worktree, base_sha) and state.get("evidence"):
             state["state"] = "failed"
             state["error"] = "worktree dirty from previous attempt"
             write_state(job_id, state)
@@ -258,21 +356,29 @@ def _run_job(job_id, package):
             o = exc.stdout or b""
             agent_out = (o.decode("utf-8", "replace") if isinstance(o, bytes) else o)
 
-        files = changed_files(worktree)
+        # H2: canonical set — commits by the agent stay visible
+        files = canonical_changed_files(worktree, base_sha)
         rejected = validate_changed_within_worktree(job_id, files)
         scans = secret_scan(worktree, files)
         tests = run_tests(worktree, package.get("tests_command"),
                           repo_cfg.get("test_commands"), 600)
-        criteria_results = evaluate_criteria(package.get("acceptance_criteria") or [],
-                                             repo_cfg, worktree)
+        # H1: criteria evaluated against the actual allowlisted test run
+        criteria_results = evaluate_criteria(
+            package.get("acceptance_criteria") or [], repo_cfg, worktree,
+            tests_result=tests, changed_files=files)
         diff_stat = _git(worktree, "diff", "--stat", "HEAD", "--", ".").stdout[:2000]
         head = _git(worktree, "rev-parse", "HEAD")
+        d = _git(worktree, "diff", f"{base_sha}...HEAD")
+        diff_hash = hashlib.sha256(
+            (d.stdout or "").encode("utf-8", "replace")[:DIFF_MAX_BYTES]
+        ).hexdigest()[:16] if base_sha else None
         evidence = {
             "job_id": job_id,
             "repo_id": package["repo_id"],
             "branch": f"hermes/job-{job_id}",
             "worktree_id": job_id,
             "worktree_path": str(worktree),
+            "base_sha": base_sha,
             "head_sha": head.stdout.strip() if head.returncode == 0 else None,
             "exit_status": exit_status,
             "timed_out": timed_out,
@@ -281,23 +387,24 @@ def _run_job(job_id, package):
             "changed_files": files,
             "changed_files_rejected": rejected,
             "diff_stat": diff_stat,
+            "diff_sha256": diff_hash,
             "test_summary": {"status": tests["status"], "summary": tests["summary"],
                              "criteria_results": criteria_results},
             "secret_scan": scans,
             "worktree_escape_rejected": bool(rejected),
-            "finished_at": time.time(),
+            "finished_at": now_iso(),
         }
         state["evidence"] = evidence
         if rejected:
-            state["state"] = "failed"
-            state["error"] = "worktree escape detected"
+            _commit_terminal_state(job_id, state, "failed",
+                                   error="worktree escape detected")
         else:
-            state["state"] = "finished" if not timed_out else "finished_timed_out"
-        write_state(job_id, state)
+            # H4: 'finished_timed_out' only when not cancelled
+            _commit_terminal_state(job_id, state,
+                                   "finished" if not timed_out else "finished_timed_out")
     except Exception as exc:  # noqa: BLE001 — worker durability: record, never crash silently
-        state["state"] = "failed"
-        state["error"] = f"{type(exc).__name__}: {exc}"
-        write_state(job_id, state)
+        _commit_terminal_state(job_id, state, "failed",
+                               error=f"{type(exc).__name__}: {exc}")
 
 
 def cmd_status():
@@ -324,6 +431,10 @@ def cmd_submit(package):
         out({"error": "bad_package_or_unknown_repo_id"})
         return
     st = read_state(job_id)
+    if st and _is_cancelled_state(st):
+        # H4: a cancelled job is not silently re-accepted
+        out({"accepted": False, "job_id": job_id, "state": "cancelled"})
+        return
     if st and st.get("state") == "running":
         out({"accepted": False, "job_id": job_id, "state": "already_running"})
         return
@@ -332,7 +443,7 @@ def cmd_submit(package):
     (JOBS_DIR / f"{job_id}-package.json").write_text(
         json.dumps(package, ensure_ascii=False), encoding="utf-8")
     write_state(job_id, {"job_id": job_id, "state": "queued",
-                         "attempt": attempt, "created_at": time.time()})
+                         "attempt": attempt, "created_at": now_iso()})
     run_job_detached(job_id)
     out({"accepted": True, "job_id": job_id, "state": "running", "attempt": attempt})
 
@@ -382,7 +493,11 @@ def cmd_job_cancel(job_id):
                 os.kill(int(pidf.read_text().strip()), 15)
             except (ValueError, ProcessLookupError, PermissionError):
                 pass
+    # H4: terminal intent, stamped persistently — the detached runner's
+    # finalize step can no longer write finished/failed over this.
     st["state"] = "cancelled"
+    if not st.get("cancel_requested_at"):
+        st["cancel_requested_at"] = now_iso()
     write_state(job_id, st)
     out({"job_id": job_id, "state": "cancelled"})
 
@@ -435,19 +550,28 @@ def cmd_selftest():
 
 def main():
     argv = sys.argv[1:]
+    via_ssh = False
     # SSH forced-command mode: the client sends "workerctl submit ..." while the
     # authorized_keys runs ".../workerctl request" — recover the real arguments.
     if argv and argv[0] == "request":
+        via_ssh = True
         original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
         parts = original.split()
         if parts and parts[0] == "workerctl":
             parts = parts[1:]
         argv = parts
+    elif os.environ.get("SSH_ORIGINAL_COMMAND"):
+        # invoked over the SSH surface by any other path — same restrictions
+        via_ssh = True
 
     if not argv:
         out({"error": "no_subcommand"})
         return
     cmd, rest = argv[0], argv[1:]
+    # M4: internal commands must never be reachable from the SSH surface.
+    if via_ssh and cmd in INTERNAL_COMMANDS:
+        out({"error": "internal_command_forbidden_over_ssh", "command": cmd})
+        return
     if cmd == "status":
         cmd_status()
     elif cmd == "submit" and rest and rest[0] == "-":

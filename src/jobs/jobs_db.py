@@ -26,7 +26,22 @@ STATUSES = [
     #  - COMPLETED is reserved for the Phase F.2 independent review
     #  - INTERRUPTED = remote worker unreachable; job preserved, never completed
     "IMPLEMENTATION_ACCEPTED", "INTERRUPTED",
+    # F.1.1-Pi.2 hardening (M7): runner spawn failure must not leave QUEUED.
+    # FAILED_TO_START is retryable (job_continue re-dispatches).
+    "FAILED_TO_START",
 ]
+
+# F.1.1-Pi.2 (M8): states where the implementation EXECUTION is over — even
+# though review (Phase F.2) may still be pending. finished_at is stamped here.
+TERMINAL_EXECUTION_STATES = {
+    "COMPLETED", "IMPLEMENTATION_ACCEPTED", "FAILED", "CANCELLED",
+}
+
+# F.1.1-Pi.2 (M2): statuses a (re)dispatch may legally claim the job from.
+DISPATCHABLE_STATUSES = (
+    "NEW", "QUEUED", "CONTINUE_REQUIRED", "WAITING_HUMAN", "AGENT_STOPPED",
+    "INTERRUPTED", "FAILED_TO_START",
+)
 
 JSON_FIELDS = {
     "acceptance_criteria", "acceptance_results", "git_changed_files",
@@ -78,7 +93,9 @@ def init_db():
           review_status TEXT DEFAULT 'NOT_STARTED',
           next_action TEXT, failure_reason TEXT,
           needs_human INTEGER DEFAULT 0,
-          no_progress_strikes INTEGER DEFAULT 0
+          no_progress_strikes INTEGER DEFAULT 0,
+          cancel_requested_at TEXT,
+          implementation_finished_at TEXT
         );
         CREATE TABLE IF NOT EXISTS runs (
           run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL,
@@ -89,7 +106,8 @@ def init_db():
           stdout_path TEXT, stderr_path TEXT,
           result_summary TEXT,
           git_before TEXT, git_after TEXT,
-          continuation_reason TEXT, progress_signature TEXT
+          continuation_reason TEXT, progress_signature TEXT,
+          diff_hash TEXT
         );
         CREATE TABLE IF NOT EXISTS event_log (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,8 +118,28 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id);
         """
     )
+    _ensure_columns(con)
     con.commit()
     con.close()
+
+
+def _ensure_columns(con):
+    """Additive-only migration (F.1.1-Pi.2). Never drops or rewrites data.
+
+    F.1.1-Pi.2 columns:
+      jobs.cancel_requested_at        (H4: cancellation is persistent intent)
+      jobs.implementation_finished_at (M8: implementation execution end)
+      runs.diff_hash                  (M6: canonical diff hash for progress)
+    Existing databases are upgraded in place; fresh databases already include
+    the columns via CREATE TABLE."""
+    jobs_cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "cancel_requested_at" not in jobs_cols:
+        con.execute("ALTER TABLE jobs ADD COLUMN cancel_requested_at TEXT")
+    if "implementation_finished_at" not in jobs_cols:
+        con.execute("ALTER TABLE jobs ADD COLUMN implementation_finished_at TEXT")
+    runs_cols = {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}
+    if "diff_hash" not in runs_cols:
+        con.execute("ALTER TABLE runs ADD COLUMN diff_hash TEXT")
 
 
 def _row_to_job(r):
@@ -192,10 +230,76 @@ def transition(job_id, new_status, failure_reason=None):
     fields = {"status": new_status}
     if failure_reason is not None:
         fields["failure_reason"] = failure_reason
-    if new_status == "COMPLETED":
+    # F.1.1-Pi.2 (M8): coherent lifecycle timestamps.
+    # finished_at = the execution phase ended (review may still be pending);
+    # implementation_finished_at = the agent run itself ended (AGENT_STOPPED).
+    # H4: cancellation stamps cancel_requested_at once, persistently.
+    if new_status == "CANCELLED":
+        prev = get_job(job_id) or {}
+        fields.setdefault("finished_at", now_iso())
+        if not prev.get("cancel_requested_at"):
+            fields["cancel_requested_at"] = now_iso()
+    elif new_status in TERMINAL_EXECUTION_STATES:
         fields["finished_at"] = now_iso()
+    if new_status == "AGENT_STOPPED":
+        fields["implementation_finished_at"] = now_iso()
+    if new_status == "RUNNING":
+        # a new attempt started: execution-phase stamps no longer apply
+        fields["finished_at"] = None
+        fields["implementation_finished_at"] = None
     update_job(job_id, **fields)
     log(job_id, None, "state", f"status -> {new_status}")
+
+
+def cas_status(job_id, new_status, allowed_from, **fields):
+    """F.1.1-Pi.2 (M2/H4): compare-and-set state transition.
+
+    Updates the job only when its current status is in `allowed_from`.
+    Returns True when this caller won the transition, False otherwise —
+    callers must treat False as "someone else owns the state now"
+    (e.g. concurrent dispatch, or the job was CANCELLED meanwhile)."""
+    if new_status not in STATUSES:
+        raise ValueError(f"unknown status {new_status}")
+    # M8: CAS paths get the same lifecycle timestamp coherence as
+    # transition() — cancellation stamps are terminal and permanent.
+    if new_status == "CANCELLED":
+        fields.setdefault("cancel_requested_at", now_iso())
+    if new_status in TERMINAL_EXECUTION_STATES:
+        fields.setdefault("finished_at", now_iso())
+    if new_status == "AGENT_STOPPED":
+        fields.setdefault("implementation_finished_at", now_iso())
+    if new_status == "RUNNING":
+        fields.setdefault("finished_at", None)
+        fields.setdefault("implementation_finished_at", None)
+    placeholders = ",".join("?" for _ in allowed_from)
+    if fields:
+        for f in list(fields):
+            if f in JSON_FIELDS:
+                fields[f] = json.dumps(fields[f], ensure_ascii=False)
+        fields["updated_at"] = now_iso()
+        assignments = ", ".join(f"{k}=?" for k in fields)
+        sql = (f"UPDATE jobs SET status=?, {assignments} WHERE job_id=? "
+               f"AND status IN ({placeholders})")
+        params = (new_status, *fields.values(), job_id, *allowed_from)
+    else:
+        sql = (f"UPDATE jobs SET status=?, updated_at=? WHERE job_id=? "
+               f"AND status IN ({placeholders})")
+        params = (new_status, now_iso(), job_id, *allowed_from)
+    con = connect()
+    try:
+        cur = con.execute(sql, params)
+        con.commit()
+        return cur.rowcount == 1
+    finally:
+        con.close()
+
+
+def cancel_requested(job_id):
+    """H4: True once the job entered CANCELLED (persistent terminal intent)."""
+    job = get_job(job_id)
+    return bool(job) and (
+        job["status"] == "CANCELLED" or bool(job.get("cancel_requested_at"))
+    )
 
 
 def create_run(job_id, attempt, agent, prompt_path, prompt_hash):

@@ -28,6 +28,10 @@ ID_SCHEMA = {
     "required": ["job_id"],
 }
 
+# F.1.1-Pi.2: deterministic verification kinds the supervisor understands.
+VERIFICATION_KINDS = {"file_exists", "function_exists", "test_command",
+                      "git_scope", "artifact_contains"}
+
 
 def _job_brief(job):
     return {
@@ -160,10 +164,27 @@ def _call(name, args):
         acs = args.get("acceptance_criteria") or []
         if not acs:
             return {"error": "acceptance_criteria_required"}
+        # F.1.1-Pi.2 (H1 creation-time): criteria structure is validated up
+        # front so a malformed criterion can never silently fail-open later.
+        for ac in acs:
+            if not ac.get("id") or not isinstance(ac.get("verification"), dict):
+                return {"error": "malformed_criterion",
+                        "detail": "each criterion needs id + verification{kind,params}"}
+            if ac["verification"].get("kind") not in VERIFICATION_KINDS:
+                return {"error": "unknown_verification_kind",
+                        "allowed": sorted(VERIFICATION_KINDS)}
         cmd = args.get("tests_command")
         if cmd and cmd not in (rcfg.get("test_commands") or []):
             return {"error": "test_command_not_allowlisted",
                     "allowed": rcfg.get("test_commands")}
+        # F.1.1-Pi.2 (H1 creation-time correlation): a test_command criterion
+        # is only satisfiable when the job registers an (allowlisted) test
+        # command. Reject creation instead of guaranteeing a UNMET criterion.
+        if any((ac.get("verification") or {}).get("kind") == "test_command"
+               for ac in acs) and not cmd:
+            return {"error": "test_command_required_for_test_criterion",
+                    "detail": "criterion kind=test_command requires job-level "
+                              "tests_command (must be allowlisted for the repository)"}
         agent = args.get("agent")
         allowed_agents = ("simulated", "fixture-local-hermes",
                           "pi-sandbox-fixture", "pi-sandbox-claude-code",
@@ -235,8 +256,9 @@ def _call(name, args):
         job = jobs_db.get_job(args.get("job_id", ""))
         if not job:
             return {"error": "not_found"}
+        # F.1.1-Pi.2 (M7): FAILED_TO_START is retryable.
         if job["status"] not in ("CONTINUE_REQUIRED", "WAITING_HUMAN", "AGENT_STOPPED",
-                                 "QUEUED", "NEW", "INTERRUPTED"):
+                                 "QUEUED", "NEW", "INTERRUPTED", "FAILED_TO_START"):
             return {"error": "not_resumable", "status": job["status"]}
         if job["attempt"] >= job["max_attempts"]:
             return {"error": "attempt_limit_reached", "attempt": job["attempt"]}
@@ -248,6 +270,24 @@ def _call(name, args):
         job = jobs_db.get_job(args.get("job_id", ""))
         if not job:
             return {"error": "not_found"}
+        # F.1.1-Pi.2 (H5): job_validate is adapter-aware. Local deterministic
+        # validation reads the LOCAL filesystem — meaningful only for
+        # local-fixture jobs. For pi-sandbox/remote jobs the worktree lives on
+        # the worker side; a local re-validation would fabricate false FAILs
+        # and overwrite worker-produced acceptance evidence. Reject WITHOUT
+        # mutating any state.
+        import transport as tmod
+        try:
+            adapter = tmod.get_adapter(job)
+        except Exception as exc:  # unconfigured remote etc. — still no mutation
+            return {"error": "validation_unavailable",
+                    "detail": f"no adapter to validate through: {exc}"[:200]}
+        if adapter.name != "local-fixture":
+            return {"error": "validation_must_run_via_worker_adapter",
+                    "adapter": adapter.name,
+                    "detail": "this job runs on a worker adapter; acceptance "
+                              "evidence comes from the worker run (job_result "
+                              "evidence), not from local filesystem validation"}
         rcfg = supervisor.repo_cfg(job["repository"])
         import validator as vmod
         results, tstat, tsum = vmod.evaluate(

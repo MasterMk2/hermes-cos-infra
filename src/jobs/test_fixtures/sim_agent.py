@@ -10,6 +10,7 @@ supervisor's "agent stop != completion" behaviour can be tested.
 """
 
 import sys
+import time
 from pathlib import Path
 
 
@@ -20,6 +21,42 @@ def main():
         if line.startswith("#SIM-BEHAVIOR:"):
             behavior = line.split(":", 1)[1].strip()
             break
+
+    # sleep:<seconds> — silent agent: no output, no file writes. Used by the
+    # hardening tests to prove the supervisor/cancel path works while an
+    # agent is still running (and, on the bridge, that the watchdog survives
+    # a silent process).
+    if behavior.startswith("sleep"):
+        try:
+            secs = float(behavior.split(":", 1)[1])
+        except (IndexError, ValueError):
+            secs = 10.0
+        time.sleep(secs)
+        print("Done.")
+        return 0
+
+    # commit_secret — writes a secret-like file AND commits it, leaving the
+    # working tree clean. Regression fixture for H2 (committed changes must
+    # stay visible to scope validation and secret scan).
+    if behavior == "commit_secret":
+        import os as _os
+        import subprocess
+        target = Path("secrets/leaked.txt")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            'API_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"\n',
+            encoding="utf-8",
+        )
+        env = dict(_os.environ)
+        env.setdefault("GIT_AUTHOR_NAME", "agent")
+        env.setdefault("GIT_AUTHOR_EMAIL", "agent@example.invalid")
+        env.setdefault("GIT_COMMITTER_NAME", "agent")
+        env.setdefault("GIT_COMMITTER_EMAIL", "agent@example.invalid")
+        subprocess.run(["git", "add", "secrets/leaked.txt"], check=True, env=env)
+        subprocess.run(["git", "commit", "-m", "add config", "-q"],
+                       check=True, env=env)
+        print("Done. Everything works.")
+        return 0
 
     greeter = Path("pkg/greeter.py")
     test_file = Path("tests/test_greeter.py")

@@ -1,18 +1,27 @@
 {
   "worker": {
-    "kind": "local-fixture-or-remote",
+    "kind": "local-fixture-or-pi-sandbox",
     "enabled": true,
     "offline": false,
-    "note": "F.1.1: production implementation agents run ONLY on the external worker via restricted SSH (transport.remote). The in-container execution is a local fixture (test repos only)."
+    "note": "F.1.1-Pi.2: PiSandboxWorkerAdapter (bridge + disposable worker container) is the PRODUCTION transport. Local fixture execution is development/test only (kind='test', allow_simulated repos). Production jobs always run through the sandbox/external worker.",
+    "isolation_note": "Personal-context isolation comes from the container/filesystem boundary, NOT from --ignore-rules (runtime audit: the flag does not change prompt composition)."
   },
   "default_agent": null,
-  "production_agents": ["remote-claude-code", "remote-codex"],
-  "fixture_agents": ["simulated", "fixture-local-hermes"],
+  "production_agents": [
+    "pi-sandbox-claude-code",
+    "pi-sandbox-codex",
+    "pi-sandbox-opencode",
+    "remote-claude-code",
+    "remote-codex"
+  ],
+  "fixture_agents": ["simulated", "fixture-local-hermes", "pi-sandbox-fixture"],
   "limits": {
     "max_attempts": 6,
+    "max_attempts_note": "F.1.1-Pi.2: job.max_attempts (per job) takes precedence; this global value is only the fallback for legacy rows without a per-job value.",
     "agent_timeout_s": 1200,
     "test_timeout_s": 600,
-    "no_progress_strikes": 2
+    "no_progress_strikes": 2,
+    "no_progress_note": "F.1.1-Pi.2: progress signature hashes base/head sha + canonical changed-file names + diff hash + unmet criteria ids (not just changed-file counts)."
   },
   "transport": {
     "kind": "local-fixture",

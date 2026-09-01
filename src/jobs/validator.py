@@ -17,6 +17,9 @@ import ast
 import subprocess
 from pathlib import Path
 
+# Item 43: bounded artifact reads — never slurp unbounded files.
+ARTIFACT_MAX_BYTES = 1_000_000
+
 
 class VerificationError(Exception):
     pass
@@ -57,15 +60,22 @@ def _check_git_scope(repo_path, params, changed_files):
                          else f"changed={len(changed_files)} all in scope")
 
 
-def _check_artifact_contains(repo_path, params):
+def _check_artifact_contains(repo_path, params, max_bytes=ARTIFACT_MAX_BYTES):
     p = _safe_repo_path(repo_path, params.get("path"))
     if not p.is_file():
         return False, f"file missing: {params.get('path')}"
+    if p.stat().st_size > max_bytes:
+        # Item 43: refuse unbounded reads; surface an explicit marker
+        return False, f"artifact_too_large (> {max_bytes} bytes)"
     hit = params.get("text", "") in p.read_text(encoding="utf-8", errors="replace")
     return hit, f"contains={hit}"
 
 
 def run_tests(repo_path, command, allowlist, timeout_s):
+    """Run ONLY an allowlisted command. Returns (status, summary) where
+    status is PASS (exit 0) / FAIL (nonzero) / BLOCKED (not allowlisted) /
+    TIMEOUT. H1: any status other than PASS must be treated as UNMET by
+    callers — a test that never ran can never satisfy a criterion."""
     if not command or command not in (allowlist or []):
         return "BLOCKED", "test command not in repository allowlist"
     try:
