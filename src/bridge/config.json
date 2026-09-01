@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "image": "hermes-coding-worker:1.0.0",
+  "agent_timeout_s": 1200,
+  "hang_watchdog_s": 900,
+  "limits": {"memory": "1250m", "cpus": "2.0", "pids": 256},
+  "container_uid": 1000,
+  "container_gid": 1000,
+  "agents": {
+    "fixture": "python3 /opt/workerbin/fixture_agent.py /jobs/prompt.txt"
+  },
+  "repositories": {
+    "coding-worker-smoke-test": {
+      "path": "/home/<PI_USER>/coding-worker/repos/coding-worker-smoke-test",
+      "test_commands": ["python3 -m unittest discover -s tests -v"],
+      "allowed_paths": ["pkg/", "tests/", "README.md"]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "worker": {
+    "kind": "local-fixture-or-remote",
+    "enabled": true,
+    "offline": false,
+    "note": "F.1.1: production implementation agents run ONLY on the external worker via restricted SSH (transport.remote). The in-container execution is a local fixture (test repos only)."
+  },
+  "default_agent": null,
+  "production_agents": ["remote-claude-code", "remote-codex"],
+  "fixture_agents": ["simulated", "fixture-local-hermes"],
+  "limits": {
+    "max_attempts": 6,
+    "agent_timeout_s": 1200,
+    "test_timeout_s": 600,
+    "no_progress_strikes": 2
+  },
+  "transport": {
+    "kind": "local-fixture",
+    "remote": null,
+    "remote_note": "populated by jobs/remote_worker.json once the user provides worker host info (worker/README.md)"
+  },
+  "repositories": {
+    "coding-worker-smoke-test": {
+      "path": "/opt/data/coding-worker/repos/coding-worker-smoke-test",
+      "test_commands": ["python3 -m unittest discover -s tests -v"],
+      "allowed_paths": ["pkg/", "tests/", "README.md"],
+      "allow_simulated": true,
+      "note": "fixture repo (supervisor regression + worker smoke test source)"
+    }
+  }
+}

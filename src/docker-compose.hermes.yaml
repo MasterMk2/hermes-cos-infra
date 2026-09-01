@@ -1,0 +1,28 @@
+services:
+  hermes:
+    image: nousresearch/hermes-agent@sha256:d07e79106ebd1891690ba6b5dd91f743419d87ae7bc26f7382d5f6da3ce8a2e2
+    container_name: hermes
+    restart: unless-stopped
+    command: gateway run
+    ports:
+      - "<LAN_IP>:8642:8642"
+      - "<LAN_IP>:9119:9119"
+    volumes:
+      - /srv/hermes/hermes-data:/opt/data
+      - /home/<PI_USER>/coding-worker/bridge-sock:/hermes-coding
+    environment:
+      - HERMES_UID=1000
+      - HERMES_GID=1000
+      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}
+      - HERMES_DASHBOARD_BASIC_AUTH_SECRET=${HERMES_DASHBOARD_BASIC_AUTH_SECRET}
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${API_SERVER_KEY}
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

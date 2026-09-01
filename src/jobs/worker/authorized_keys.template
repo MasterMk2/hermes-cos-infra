@@ -1,0 +1,1 @@
+command="/home/hermes-worker/hermes-worker/bin/workerctl request",restrict ssh-ed25519 REPLACE_WITH_PUBKEY hermes-supervisor
