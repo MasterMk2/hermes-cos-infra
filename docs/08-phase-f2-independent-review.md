@@ -32,7 +32,7 @@ z-ai/glm-5.3-flash                      meta/muse-spark-1.2
    GLM fix attempt <-- CHANGES_REQUIRED            APPROVED
    (structured findings only)                          |
                                                        v
-                                               FINAL_VALIDATING
+                                            completion_decision()
                                        exact target SHA + content binding
                                        + diff hash + fresh tests
                                        + secret scan + cancel guard + CAS
@@ -40,6 +40,11 @@ z-ai/glm-5.3-flash                      meta/muse-spark-1.2
                                                        v
                                                    COMPLETED
 ```
+
+> 図中 `completion_decision()` は仕様書 §25 が `FINAL_VALIDATING` と呼ぶ段階に
+> あたる。**これは status 値ではない** — `jobs_db.REVIEW_STATUSES` /
+> `STATUSES` に `FINAL_VALIDATING` は存在せず、この段階は関数1つとして
+> 実装されている(event_log には `final_validation_started` として残る)。
 
 ## Independence (§8/§9/§10/§11)
 
@@ -316,11 +321,16 @@ review history(immutable、cycle毎に1行):
 ### 同セッションの他13 job
 
 3つの fixture repository で、登録testでは見えない品質欠陥を狙った課題を
-11本流し、**すべて review cycle 1 で APPROVE**。うち難度の高い2本
+10本完走させ、**すべて review cycle 1 で APPROVE**。うち難度の高い2本
 (SemVerと逆の独自順序規則 / 7モジュール横断リファクタ)については後から
 独立oracleを書いて検証し、それぞれ **26/26 一致** / **未達要件0** で
-Reviewerの承認が正しかったことを確認した。残り2本は fixture 側の不備
-(登録testが課題と矛盾 / 課題が着手不能なほど大)で運用者がcancel。
+Reviewerの承認が正しかったことを確認した。
+
+残り3本はいずれも fixture 側の不備で運用者が cancel した(agent の問題では
+ない): 登録testが課題自体と矛盾していたもの1本(これは cancel 前に
+**実際の CHANGES_REQUIRED を blocking 3件**で受けており、うち1件は
+tuple 化で壊れる既存 consumer を confidence 1.00 で事前に予見していた)、
+および課題が大きすぎて agent がウィンドウ内に着手できなかったもの2本。
 
 得られた知見: **GLM-5.3-Flash は明示的に書かれた契約を初回で高精度に満たす**
 (引数名・例外文言の一致、`bool` は `int` のサブクラス、half-away-from-zero、

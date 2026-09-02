@@ -107,8 +107,10 @@ src/
 ├── reviewer-hermes/            Reviewer専用Hermes config (ro mount 元)
 ├── security_patterns.py        canonical secret patterns (単一ソース)
 ├── bin/ + worker/              fixture agent, reviewer runner, watchdog, worker設定
-├── tests/                      回帰テスト (unittest, 129 tests)
 └── docker-compose.hermes.yaml  実機 deploy 対象 (digest pin)
+
+tests/                          回帰テスト (repo root、src/ の外。unittest 129 tests)
+docs/                           フェーズ文書 + 実測レポート
 ```
 
 ## Status

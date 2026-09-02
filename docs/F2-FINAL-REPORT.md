@@ -286,9 +286,10 @@ Every call in that sequence was a real CommandCode API call: real GLM
 implementation, real Muse review, real GLM fix, real fresh Muse re-review.
 Nothing in the loop was mocked.
 
-### The other twelve real jobs this session
+### The other thirteen real jobs this session
 
-Eleven further production jobs were run against real models on three fixture
+Ten further production jobs were run to completion against real models on
+three fixture
 repositories, deliberately probing for quality defects the registered tests
 could not see: an explicit 7-clause numeric contract, a single-flight
 concurrency contract with lock-scope and re-entrancy clauses, an API
@@ -299,12 +300,16 @@ all), a bespoke ordering spec whose rules deliberately invert SemVer, a
 ten-function module, and a repo-wide error-type refactor across seven
 modules.
 
-**All eleven were approved on review cycle 1**, and independent oracles
-written for the two hardest (the bespoke ordering spec, 26/26; the repo-wide
-refactor, 0 unmet requirements) confirm the reviewer was right to approve
-them. Two further jobs were cancelled by the operator because the fixture
-itself was faulty, not the agent (one had a registered test that contradicted
-the task; one was too large for the agent to begin).
+**All ten were approved on review cycle 1**, and independent oracles written
+for the two hardest (the bespoke ordering spec, 26/26; the repo-wide refactor,
+0 unmet requirements) confirm the reviewer was right to approve them.
+
+Three further jobs were cancelled by the operator, in every case because the
+fixture was faulty rather than the agent: one whose registered test
+contradicted the task it set (that one had already drawn a real
+CHANGES_REQUIRED with three correct blocking findings, including a regression
+the reviewer predicted at confidence 1.00 before it could happen), and two
+whose task was too large for the agent to even begin inside its window.
 
 The finding is about the implementation model, and it is worth recording:
 **GLM-5.3-Flash satisfies an explicitly written contract on the first
@@ -353,7 +358,7 @@ as if it were a measured cost of zero.
 ## Muse Quality Observations
 
 ```text
-valid JSON first try:   13 / 13 review runs this session parsed and schema-validated
+valid JSON first try:   15 / 15 review runs this session parsed and schema-validated
                         on the first attempt; the repair budget was never used
 blocking finding quality: every blocking finding this session was correct and
                         evidence-backed; two were verified against independent
@@ -553,7 +558,7 @@ meta/muse-spark-1.2 (the STANDARD variant actually deployed here, not the
 spec's meta/muse-spark-1.2-contributor) is suitable as the default reviewer.
 ```
 
-Grounds, kept narrow because the sample is small (13 review runs this
+Grounds, kept narrow because the sample is small (15 review runs this
 session, 22 review records in total):
 
 - It produced valid, schema-conforming JSON on the first attempt every time;
