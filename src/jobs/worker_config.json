@@ -11,17 +11,25 @@
     "pi-sandbox-claude-code",
     "pi-sandbox-codex",
     "pi-sandbox-opencode",
+    "pi-sandbox-hermes-commandcode",
     "remote-claude-code",
     "remote-codex"
   ],
-  "fixture_agents": ["simulated", "fixture-local-hermes", "pi-sandbox-fixture"],
+  "fixture_agents": [
+    "simulated",
+    "fixture-local-hermes",
+    "pi-sandbox-fixture"
+  ],
   "limits": {
     "max_attempts": 6,
     "max_attempts_note": "F.1.1-Pi.2: job.max_attempts (per job) takes precedence; this global value is only the fallback for legacy rows without a per-job value.",
+    "max_review_cycles": 3,
+    "max_review_cycles_note": "F.2: bounded fix<->review loop; exhaustion -> WAITING_HUMAN (review_cycle_limit_reached).",
     "agent_timeout_s": 1200,
     "test_timeout_s": 600,
     "no_progress_strikes": 2,
-    "no_progress_note": "F.1.1-Pi.2: progress signature hashes base/head sha + canonical changed-file names + diff hash + unmet criteria ids (not just changed-file counts)."
+    "no_progress_note": "F.1.1-Pi.2: progress signature hashes base/head sha + canonical changed-file names + diff hash + unmet criteria ids (not just changed-file counts).",
+    "review_policy_note": "F.2: production (kind=implementation) jobs ALWAYS require independent review (fixed in supervisor code; not disableable via MCP/config). Test-kind fixture jobs skip review."
   },
   "transport": {
     "kind": "local-fixture",
@@ -31,10 +39,68 @@
   "repositories": {
     "coding-worker-smoke-test": {
       "path": "/opt/data/coding-worker/repos/coding-worker-smoke-test",
-      "test_commands": ["python3 -m unittest discover -s tests -v"],
-      "allowed_paths": ["pkg/", "tests/", "README.md"],
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ],
       "allow_simulated": true,
       "note": "fixture repo (supervisor regression + worker smoke test source)"
+    },
+    "fix-loop-fixture": {
+      "path": "/opt/data/coding-worker/repos/fix-loop-fixture",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ],
+      "allow_simulated": true,
+      "note": "F.2 real fix-loop fixture repo (bridge-side checkout: coding-worker/repos/fix-loop-fixture)"
+    },
+    "f2-fixloop": {
+      "path": "/opt/data/coding-worker/repos/f2-fixloop",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ],
+      "allow_simulated": false,
+      "note": "F.2 clean fix-loop fixture (bridge-side checkout: coding-worker/repos/f2-fixloop). Registered tests are deliberately narrower than the written contract."
+    },
+    "f2-loop2": {
+      "path": "/opt/data/coding-worker/repos/f2-loop2",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ],
+      "allow_simulated": false,
+      "note": "F.2 fix-loop fixture #2 (fresh small repo)"
+    },
+    "f2-loop3": {
+      "path": "/opt/data/coding-worker/repos/f2-loop3",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ],
+      "allow_simulated": false,
+      "note": "F.2 fix-loop fixture #3 (small module, exact API surface)"
     }
   }
 }

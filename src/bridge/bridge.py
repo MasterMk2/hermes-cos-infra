@@ -23,6 +23,14 @@ Security model:
     tmpfs /tmp, memory/cpu/pids limits, fixed uid, no published ports
   - one job at a time
 
+Production Agent addendum (F.1.1-Pi Hermes+CommandCode):
+  - agents registry may run the worker Hermes CLI (hermes-commandcode-*)
+  - per-agent read-only mounts come from agent_mounts (this config only)
+  - per-agent credential env comes from agent_pass_env + secrets_source:
+    the bridge alone reads the host secret file and passes requested
+    variable names into the container env at run time. Secret values are
+    never logged, never stored in job dirs, and never included in evidence.
+
 F.1.1-Pi.2 hardening:
   - H1: test_command criteria PASS only when the registered test ran (exit 0)
   - H2: worktree base_sha is recorded at job_start; the canonical changed
@@ -32,6 +40,17 @@ F.1.1-Pi.2 hardening:
     wakes every poll interval (watchdog works for silent agents)
   - H4: cancellation is terminal — finalize never overwrites 'cancelled'
   - M7: git state unknown at job_start is fail-closed (job refused)
+
+Phase F.2 (independent review):
+  - review_start/status/result/cancel/cleanup: typed reviewer actions only;
+    the reviewer agent+model come from THIS config, never from requests
+  - review snapshot: detached worktree at the exact target SHA plus the
+    implementation's uncommitted state; the implementation worktree itself
+    is never mounted into the reviewer container
+  - combined concurrency 1: an active review blocks job_start and vice versa
+  - content_sha256: per-file bounded content binding for exact-revision
+    approval (covers uncommitted trees)
+  - job_verify: fresh canonical re-verification used by the completion gate
 """
 
 import hashlib
@@ -56,11 +75,19 @@ LOG = ROOT / "logs" / "bridge.log"
 
 JOB_FIELDS = {"job_id", "repo_id", "agent", "prompt", "tests_command",
               "acceptance_criteria", "timeout_s"}
+REVIEW_FIELDS = {"job_id", "review_id", "cycle", "repo_id", "target_sha",
+                 "base_sha", "prompt", "timeout_s"}
 
 # Item 43: bounded reads for artifact-based criteria.
 ARTIFACT_MAX_BYTES = 1_000_000
 # Item 43/M6: bounded diff body for hashing.
 DIFF_MAX_BYTES = 2_000_000
+# F.2: bounded per-file content for the exact-revision binding hash.
+CONTENT_HASH_FILE_MAX = 200_000
+# F.2: bounded reviewer output file read.
+REVIEW_RESULT_MAX_BYTES = 1_000_000
+# F.2: bounded total for untracked-file copies into a review snapshot.
+SNAPSHOT_COPY_MAX_BYTES = 4_000_000
 
 
 def cfg():
@@ -107,6 +134,42 @@ def any_active_job():
         except Exception:
             continue
     return None
+
+
+def any_active_review():
+    """F.2: an in-flight reviewer run also occupies the single coding slot."""
+    for p in (ROOT / "jobs").glob("*/review-*/state.json"):
+        try:
+            if json.loads(p.read_text()).get("state") == "running":
+                return p.parent.name + "/" + p.parent.name
+        except Exception:
+            continue
+    return None
+
+
+def content_hash(worktree, files, per_file_max=CONTENT_HASH_FILE_MAX):
+    """F.2: exact-revision content binding (section 50/51).
+
+    sha256 over the sorted (path, bounded file content hash) pairs of the
+    canonical changed set. Detects ANY content change — including uncommitted
+    working-tree edits that a committed-diff hash cannot see."""
+    parts = []
+    for f in files or []:
+        try:
+            p = _wt_path(worktree, f)
+        except ValueError:
+            parts.append([f, "path_escape"])
+            continue
+        if p.is_file() and not p.is_symlink():
+            try:
+                h = hashlib.sha256(p.read_bytes()[:per_file_max]).hexdigest()
+            except OSError:
+                h = "unreadable"
+            parts.append([f, h])
+        else:
+            parts.append([f, "missing"])
+    raw = json.dumps(parts, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def docker(*args, timeout=120, check=False):
@@ -286,6 +349,92 @@ def container_limits(c):
     ]
 
 
+def _read_secret_values(keys):
+    """Read ONLY the requested credential names from the bridge-owned secret
+    source (F.1.1-Pi addendum). Values are passed straight to the worker
+    container env; they are never logged, never written to job dirs, and
+    never included in evidence. Missing names are simply absent."""
+    c = cfg()
+    src = c.get("secrets_source")
+    wanted = set(keys or [])
+    if not src or not wanted:
+        return {}
+    try:
+        text = Path(src).read_text(encoding="utf-8")
+    except OSError:
+        log(f"secrets_source unreadable: {src} (presence only, no value)")
+        return {}
+    vals = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        if k in wanted:
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            if v:
+                vals[k] = v
+    return vals
+
+
+def usage_summary(job_id):
+    """Aggregate per-attempt --usage-file reports (numeric fields only)."""
+    return usage_summary_dir(ROOT / "jobs" / job_id, "usage-attempt-*.json")
+
+
+def usage_summary_dir(directory, pattern):
+    """Aggregate --usage-file reports from a directory (numeric fields only)."""
+    agg = {"attempts": [], "input_tokens": 0, "output_tokens": 0,
+           "reasoning_tokens": 0, "cache_read_tokens": 0,
+           "cache_write_tokens": 0, "total_tokens": 0, "api_calls": 0,
+           "estimated_cost_usd": 0.0}
+    # Section 76: never invent a cost. The harness writes estimated_cost_usd=0.0
+    # together with cost_status="unknown" when the provider returned no cost at
+    # all; aggregating that as 0.0 would record "this run was free", which is a
+    # fabricated billing figure. Only costs the provider actually reported are
+    # summed; if none were reported the aggregate cost is None/"unavailable"
+    # and only the token counts are kept (they are enough to compute a cost
+    # later, outside the jobs DB).
+    cost_known = False
+    found = False
+    for f in sorted(Path(directory).glob(pattern)):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        found = True
+        entry = {"attempt_file": f.name}
+        for k in ("input_tokens", "output_tokens", "reasoning_tokens",
+                  "cache_read_tokens", "cache_write_tokens", "total_tokens",
+                  "api_calls", "estimated_cost_usd", "cost_status",
+                  "cost_source", "model", "provider", "completed", "failed"):
+            entry[k] = d.get(k)
+        agg["attempts"].append(entry)
+        for k in ("input_tokens", "output_tokens", "reasoning_tokens",
+                  "cache_read_tokens", "cache_write_tokens", "total_tokens",
+                  "api_calls"):
+            v = d.get(k) or 0
+            if isinstance(v, (int, float)):
+                agg[k] += int(v)
+        cost = d.get("estimated_cost_usd")
+        status = (d.get("cost_status") or "").lower()
+        if isinstance(cost, (int, float)) and status not in ("unknown", "unavailable"):
+            cost_known = True
+            agg["estimated_cost_usd"] += float(cost)
+    if not found:
+        return None
+    if cost_known:
+        agg["estimated_cost_usd"] = round(agg["estimated_cost_usd"], 6)
+        agg["cost_status"] = "provider_reported"
+    else:
+        agg["estimated_cost_usd"] = None
+        agg["cost_status"] = "unavailable"
+    return agg
+
+
 def worktree_max_mtime(worktree):
     latest = 0.0
     for p in list(Path(worktree).rglob("*"))[:2000]:
@@ -422,8 +571,19 @@ def run_agent_container(job_id, repo_id, agent, prompt_file, timeout_s):
         "-v", f"{ROOT / 'bin'}:/opt/workerbin:ro",
         "-v", f"{ROOT / 'agent-home'}:/agent-home",
         "-w", "/workspace",
-        c["image"],
-    ] + c["agents"][agent].format(prompt_file=prompt_file).split()
+    ]
+    # per-agent, bridge-config-owned mounts (e.g. read-only worker Hermes
+    # config) and credential env (F.1.1-Pi addendum: values pass through
+    # argv once to the docker daemon; they are never logged or persisted
+    # by the bridge)
+    for m in (c.get("agent_mounts") or {}).get(agent) or []:
+        cmd.extend(["-v", m])
+    secrets = _read_secret_values((c.get("agent_pass_env") or {}).get(agent))
+    for k, v in secrets.items():
+        cmd.extend(["-e", f"{k}={v}"])
+    cmd.extend(["-e", f"HERMES_JOB_ID={job_id}"])
+    cmd.append(c["image"])
+    cmd.extend(c["agents"][agent].format(prompt_file=prompt_file).split())
     started = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True)
@@ -519,6 +679,336 @@ def _commit_terminal_state(job_id, st, new_state, note=None, error=None):
     return st["state"]
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Phase F.2: independent reviewer (typed actions only — section 123)
+# ─────────────────────────────────────────────────────────────────────────
+
+def review_dir(job_id, review_id):
+    d = ROOT / "jobs" / job_id / f"review-{review_id}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def review_state_path(job_id, review_id):
+    return review_dir(job_id, review_id) / "state.json"
+
+
+def read_review_state(job_id, review_id):
+    p = review_state_path(job_id, review_id)
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def write_review_state(job_id, review_id, st):
+    p = review_state_path(job_id, review_id)
+    p.write_text(json.dumps(st, ensure_ascii=False, indent=1))
+    p.chmod(0o600)
+
+
+def _is_review_cancelled(st):
+    return bool(st) and (st.get("state") == "cancelled"
+                         or bool(st.get("cancel_requested_at")))
+
+
+def _commit_review_terminal_state(job_id, review_id, st, new_state,
+                                  note=None, error=None):
+    """F.2/H4: the reviewer finalize must never resurrect a cancelled
+    review (cancel during review is terminal intent — section 71)."""
+    cur = read_review_state(job_id, review_id) or {}
+    if _is_review_cancelled(cur) or _is_review_cancelled(st):
+        st["state"] = "cancelled"
+        st.setdefault("cancel_requested_at",
+                      cur.get("cancel_requested_at") or now())
+        if note:
+            st["note"] = note
+        if error:
+            st["error"] = error
+    else:
+        st["state"] = new_state
+        if note:
+            st["note"] = note
+        if error:
+            st["error"] = error
+    write_review_state(job_id, review_id, st)
+    return st["state"]
+
+
+def snapshot_path(job_id, cycle):
+    return ROOT / "review-snapshots" / job_id / f"cycle-{int(cycle or 1)}"
+
+
+def build_review_snapshot(job_id, repo_id, target_sha, cycle):
+    """Detached read-snapshot of the exact target revision (section 15/16).
+
+    The snapshot = detached worktree at target_sha + the implementation's
+    uncommitted tracked diff applied + untracked new files copied (bounded).
+    The implementation worktree is never touched or mounted (section 14/98)."""
+    repo_path = c_registry_path(repo_id)
+    if not repo_path:
+        return None, f"unknown repo_id {repo_id!r}"
+    impl = ROOT / "worktrees" / job_id
+    snap = snapshot_path(job_id, cycle)
+    if snap.exists():
+        return snap, None
+    snap.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "add", "--detach",
+         str(snap), str(target_sha)],
+        capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        return None, f"snapshot worktree failed: {(r.stderr or '')[-300:]}"
+    if impl.exists():
+        d = docker_run_git(str(impl), "diff", "HEAD")
+        patch = d.stdout or ""
+        if patch:
+            ap = subprocess.run(
+                ["git", "-C", str(snap), "apply", "--whitespace=nowarn", "-"],
+                input=patch, capture_output=True, text=True, timeout=120)
+            if ap.returncode != 0:
+                return None, f"snapshot apply failed: {(ap.stderr or '')[-300:]}"
+        ls = docker_run_git(str(impl), "ls-files", "--others",
+                            "--exclude-standard")
+        total = 0
+        for rel in (ls.stdout or "").splitlines():
+            rel = rel.strip()
+            if not rel:
+                continue
+            try:
+                src = _wt_path(str(impl), rel)
+                dst = _wt_path(str(snap), rel)
+            except ValueError:
+                return None, f"unsafe untracked path: {rel!r}"
+            if src.is_file() and not src.is_symlink():
+                data = src.read_bytes()[:CONTENT_HASH_FILE_MAX]
+                total += len(data)
+                if total > SNAPSHOT_COPY_MAX_BYTES:
+                    return None, "snapshot untracked copy budget exceeded"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(data)
+    return snap, None
+
+
+def a_review_start(req):
+    c = cfg()
+    extra = set(req.keys()) - REVIEW_FIELDS - {"version", "action"}
+    if extra:
+        return {"error": "unexpected_fields", "fields": sorted(extra)}
+    job_id = req.get("job_id") or ""
+    review_id = req.get("review_id") or ""
+    repo_id = req.get("repo_id") or ""
+    target_sha = req.get("target_sha") or ""
+    base_sha = req.get("base_sha")
+    prompt = req.get("prompt") or ""
+    cycle = req.get("cycle") or 1
+    timeout_s = int(req.get("timeout_s") or c.get("agent_timeout_s", 1200))
+    if not re.fullmatch(r"job_[0-9a-f]{10}", job_id):
+        return {"error": "bad_job_id"}
+    if not re.fullmatch(r"rev_[0-9a-f]{10}", review_id):
+        return {"error": "bad_review_id"}
+    if repo_id not in c["repositories"]:
+        return {"error": "unknown_repo_id", "allowed": sorted(c["repositories"])}
+    if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
+        return {"error": "bad_target_sha"}
+    if len(prompt) > 100_000:
+        return {"error": "prompt_too_large"}
+    # F.2 (section 19/124): the reviewer agent comes from THIS config only.
+    reviewer_agent = c.get("reviewer_agent") or ""
+    if not reviewer_agent or reviewer_agent not in c["agents"]:
+        return {"error": "reviewer_agent_unconfigured"}
+    active = any_active_job() or any_active_review()
+    if active:
+        return {"error": "busy", "active": active}
+    st = read_review_state(job_id, review_id)
+    if st and st.get("state") == "running":
+        return {"error": "already_running", "review_id": review_id}
+
+    snap, err = build_review_snapshot(job_id, repo_id, target_sha, cycle)
+    if err:
+        log(f"{review_id}: snapshot refused: {err}"[:250])
+        return {"error": "snapshot_failed", "detail": err}
+    try:
+        files = canonical_changed_files(str(snap), base_sha)
+    except RuntimeError as exc:
+        return {"error": "git_state_unknown", "detail": str(exc)[:200]}
+    snap_content = content_hash(str(snap), files)
+
+    rd = review_dir(job_id, review_id)
+    (rd / "prompt.txt").write_text(prompt)
+    (rd / "prompt.txt").chmod(0o600)
+    write_review_state(job_id, review_id, {
+        "review_id": review_id, "job_id": job_id, "cycle": int(cycle),
+        "state": "running", "repo_id": repo_id, "agent": reviewer_agent,
+        "target_sha": target_sha, "base_sha": base_sha,
+        "snapshot": str(snap), "snapshot_content_sha": snap_content,
+        "created_at": now(),
+    })
+    threading.Thread(target=_review_worker,
+                     args=(job_id, review_id, req), daemon=True).start()
+    log(f"{review_id}: review started job={job_id} cycle={cycle} "
+        f"target={target_sha[:12]} snapshot_content={snap_content[:12]}")
+    return {"accepted": True, "review_id": review_id, "state": "running",
+            "snapshot_content_sha": snap_content}
+
+
+def _review_worker(job_id, review_id, req):
+    c = cfg()
+    reviewer_agent = c.get("reviewer_agent")
+    rd = review_dir(job_id, review_id)
+    st = read_review_state(job_id, review_id) or {}
+    snap = Path(st.get("snapshot") or "")
+    name = f"hermes-rv-{review_id}"
+    cmd = [
+        "docker", "run", "--rm", "--name", name,
+        *container_limits(c),
+        "-v", f"{snap}:/workspace",
+        "-v", f"{rd}:/jobs",
+        "-v", f"{ROOT / 'bin'}:/opt/workerbin:ro",
+        # F.2 (section 11/48): ONLY the reviewer home is mounted — the
+        # implementation agent-home is never visible to the reviewer.
+        "-v", f"{ROOT / 'reviewer-home'}:/agent-home",
+        "-w", "/workspace",
+    ]
+    for m in (c.get("agent_mounts") or {}).get(reviewer_agent) or []:
+        cmd.extend(["-v", m])
+    secrets = _read_secret_values((c.get("agent_pass_env") or {}).get(reviewer_agent))
+    for k, v in secrets.items():
+        cmd.extend(["-e", f"{k}={v}"])
+    cmd.extend(["-e", f"HERMES_REVIEW_ID={review_id}"])
+    cmd.append(c["image"])
+    cmd.extend(c["agents"][reviewer_agent]
+               .format(prompt_file="/jobs/prompt.txt").split())
+    started = time.time()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+
+    def _cancelled():
+        s = read_review_state(job_id, review_id)
+        return _is_review_cancelled(s)
+
+    def _stop():
+        subprocess.run(["docker", "stop", "-t", "10", name],
+                       capture_output=True, timeout=60)
+
+    exit_status, timed_out, output_tail = supervise_process(
+        proc,
+        mtime_fn=lambda: worktree_max_mtime(str(snap)) if snap.exists() else 0.0,
+        timeout_s=int(req.get("timeout_s") or c.get("agent_timeout_s", 1200)),
+        hang_watchdog_s=c.get("hang_watchdog_s", 900),
+        grace_s=300,
+        stop_fn=_stop,
+        cancelled_fn=_cancelled,
+        poll_s=1.0,
+    )
+    insp = docker("inspect", name, timeout=30)
+    oom = False
+    if insp.returncode == 0:
+        try:
+            s0 = json.loads(insp.stdout)[0]["State"]
+            oom = bool(s0.get("OOMKilled"))
+            if s0.get("ExitCode") is not None:
+                exit_status = s0["ExitCode"]
+        except Exception:
+            pass
+    docker("rm", "-f", name, timeout=60)
+
+    result_text = None
+    rf = rd / "review-result.json"
+    if rf.exists():
+        try:
+            result_text = rf.read_text(errors="replace")[:REVIEW_RESULT_MAX_BYTES]
+        except OSError:
+            result_text = None
+    probes = None
+    pf = rd / "reviewer-probes.json"
+    if pf.exists():
+        try:
+            probes = json.loads(pf.read_text())
+        except ValueError:
+            probes = None
+    evidence = {
+        "review_id": review_id, "job_id": job_id,
+        "reviewer_agent": reviewer_agent,
+        "exit_status": exit_status, "timed_out": timed_out, "oom": oom,
+        "agent_reason": "\n".join([l for l in output_tail.splitlines()
+                                   if l.strip()][-10:])[:2000],
+        "duration_s": round(time.time() - started, 1),
+        "result_json": result_text,
+        "usage": usage_summary_dir(rd, "review-usage-*.json"),
+        "isolation": probes,
+        "finished_at": now(),
+    }
+    st = read_review_state(job_id, review_id) or {}
+    st["evidence"] = evidence
+    note = "reviewer produced no result file" if result_text is None else None
+    if evidence.get("oom"):
+        _commit_review_terminal_state(job_id, review_id, st, "failed",
+                                      note=note, error="reviewer container OOM killed")
+    else:
+        _commit_review_terminal_state(job_id, review_id, st, "finished", note=note)
+    log(f"{review_id}: review terminal state={st['state']} "
+        f"exit={exit_status} result_file={result_text is not None}")
+
+
+def a_review_status(req):
+    st = read_review_state(req.get("job_id", ""), req.get("review_id", ""))
+    if not st:
+        return {"error": "unknown_review"}
+    return {"review_id": st.get("review_id"), "job_id": st.get("job_id"),
+            "cycle": st.get("cycle"), "state": st.get("state"),
+            "error": st.get("error")}
+
+
+def a_review_result(req):
+    st = read_review_state(req.get("job_id", ""), req.get("review_id", ""))
+    if not st:
+        return {"error": "unknown_review"}
+    ev = st.get("evidence") or {}
+    if isinstance(ev.get("result_json"), str) and \
+            len(ev.get("result_json") or "") > REVIEW_RESULT_MAX_BYTES:
+        ev = dict(ev)
+        ev["result_json"] = ev["result_json"][:REVIEW_RESULT_MAX_BYTES]
+    return {"review_id": st.get("review_id"), "job_id": st.get("job_id"),
+            "state": st.get("state"), "error": st.get("error"),
+            "note": st.get("note"), "review": ev}
+
+
+def a_review_cancel(req):
+    job_id = req.get("job_id", "")
+    review_id = req.get("review_id", "")
+    st = read_review_state(job_id, review_id)
+    if not st:
+        return {"error": "unknown_review"}
+    if st.get("state") == "running":
+        docker("stop", "-t", "10", f"hermes-rv-{review_id}", timeout=60)
+    st["state"] = "cancelled"
+    if not st.get("cancel_requested_at"):
+        st["cancel_requested_at"] = now()
+    write_review_state(job_id, review_id, st)
+    return {"review_id": review_id, "state": "cancelled"}
+
+
+def a_review_cleanup(req):
+    job_id = req.get("job_id", "")
+    review_id = req.get("review_id", "")
+    st = read_review_state(job_id, review_id)
+    if not st:
+        return {"error": "unknown_review"}
+    if st.get("state") == "running":
+        return {"error": "review_still_running"}
+    snap = Path(st.get("snapshot") or "")
+    removed = False
+    if snap.exists():
+        repo_path = c_registry_path(st.get("repo_id"))
+        if repo_path:
+            subprocess.run(["git", "-C", str(repo_path), "worktree", "remove",
+                            "--force", str(snap)],
+                           capture_output=True, text=True, timeout=120)
+        if snap.exists():
+            import shutil
+            shutil.rmtree(snap, ignore_errors=True)
+        removed = not snap.exists()
+    return {"review_id": review_id, "snapshot_removed": removed}
+
+
 def _job_worker(job_id, package):
     c = cfg()
     repo_cfg = c["repositories"][package["repo_id"]]
@@ -569,10 +1059,12 @@ def _job_worker(job_id, package):
             "changed_files": files,
             "diff_stat": diff_stat,
             "diff_sha256": diff_hash,
+            "content_sha256": content_hash(str(worktree), files),
             "test_summary": {"status": tests["status"], "summary": tests["summary"],
                              "criteria_results": criteria_results},
             "secret_scan": scans,
             "isolation": probes,
+            "usage": usage_summary(job_id),
             "finished_at": now(),
         }
         st["evidence"] = evidence
@@ -616,6 +1108,8 @@ def a_worker_status(_req):
         "worker_image_present": img.returncode == 0,
         "worker_image_id": img.stdout.strip() if img.returncode == 0 else None,
         "active_job": active,
+        "active_review": any_active_review(),
+        "reviewer_agent": c.get("reviewer_agent"),
         "resources": mem,
     }
 
@@ -644,7 +1138,7 @@ def a_job_start(req):
         return {"error": "test_command_not_in_registry"}
     if len(criteria) > 20:
         return {"error": "too_many_criteria"}
-    active = any_active_job()
+    active = any_active_job() or any_active_review()
     if active and active != job_id:
         return {"error": "busy", "active_job": active}
 
@@ -685,6 +1179,7 @@ def a_job_start(req):
         "job_id": job_id, "state": "running",
         "repo_id": repo_id, "agent": agent,
         "base_sha": base_sha or st.get("base_sha"),
+        "tests_command": tests_command or st.get("tests_command"),
         "attempt": st.get("attempt", 0) + 1,
         "created_at": st.get("created_at") or now(),
     })
@@ -749,6 +1244,88 @@ def c_registry_path(repo_id):
     return Path(r["path"]) if r else None
 
 
+def a_job_diff(req):
+    """F.2 (section 44/47): bounded canonical diff text for the review
+    package (committed diff vs base UNION the uncommitted working tree).
+    Read-only; never mutates state."""
+    c = cfg()
+    job_id = req.get("job_id") or ""
+    try:
+        max_bytes = min(int(req.get("max_bytes") or 60_000), 200_000)
+    except (TypeError, ValueError):
+        max_bytes = 60_000
+    if not re.fullmatch(r"job_[0-9a-f]{10}", job_id):
+        return {"error": "bad_job_id"}
+    st = read_state(job_id)
+    if not st:
+        return {"error": "unknown_job"}
+    worktree = ROOT / "worktrees" / job_id
+    if not worktree.exists():
+        return {"error": "no_worktree"}
+    base = st.get("base_sha")
+    parts = []
+    if base:
+        r1 = docker_run_git(str(worktree), "diff", f"{base}...HEAD")
+        if r1.returncode != 0:
+            return {"error": "git_state_unknown", "detail": (r1.stderr or "")[:200]}
+        parts.append(r1.stdout or "")
+    r2 = docker_run_git(str(worktree), "diff", "HEAD")
+    if r2.returncode != 0:
+        return {"error": "git_state_unknown", "detail": (r2.stderr or "")[:200]}
+    parts.append(r2.stdout or "")
+    ls = docker_run_git(str(worktree), "ls-files", "--others",
+                        "--exclude-standard")
+    untracked = [l.strip() for l in (ls.stdout or "").splitlines() if l.strip()]
+    text = "\n".join(p for p in parts if p)
+    truncated = len(text) > max_bytes
+    return {"diff": text[:max_bytes], "truncated": truncated,
+            "untracked_files": untracked[:50]}
+
+
+def a_job_verify(req):
+    """F.2 (section 52): fresh canonical re-verification for the completion
+    gate — current HEAD, content binding, secret scan and a real re-run of
+    the registered tests. Read-only for the job record; the test container is
+    ephemeral."""
+    c = cfg()
+    job_id = req.get("job_id") or ""
+    if not re.fullmatch(r"job_[0-9a-f]{10}", job_id):
+        return {"error": "bad_job_id"}
+    st = read_state(job_id)
+    if not st:
+        return {"error": "unknown_job"}
+    worktree = ROOT / "worktrees" / job_id
+    if not worktree.exists():
+        return {"error": "no_worktree"}
+    if any_active_job() or any_active_review():
+        return {"error": "busy"}
+    repo_cfg = c["repositories"].get(st.get("repo_id") or "")
+    if not repo_cfg:
+        return {"error": "unknown_repo_id"}
+    base_sha = st.get("base_sha")
+    try:
+        files = canonical_changed_files(str(worktree), base_sha)
+    except RuntimeError as exc:
+        return {"error": "git_state_unknown", "detail": str(exc)[:200]}
+    scans = secret_scan(str(worktree), files)
+    head = docker_run_git(str(worktree), "rev-parse", "HEAD")
+    tests_command = st.get("tests_command")
+    if tests_command and tests_command not in repo_cfg.get("test_commands", []):
+        return {"error": "test_command_not_in_registry"}
+    tests = run_test_container(job_id, repo_cfg, tests_command) \
+        if tests_command else {"status": "NOT_RUN", "summary": None}
+    return {
+        "job_id": job_id,
+        "head_sha": head.stdout.strip() if head.returncode == 0 else None,
+        "base_sha": base_sha,
+        "changed_files": files,
+        "content_sha256": content_hash(str(worktree), files),
+        "diff_sha256": bounded_diff_hash(worktree, base_sha),
+        "secret_scan": scans,
+        "tests": {"status": tests["status"], "summary": tests["summary"]},
+    }
+
+
 ACTIONS = {
     "worker_status": (a_worker_status, False),
     "job_start": (a_job_start, True),
@@ -756,6 +1333,14 @@ ACTIONS = {
     "job_result": (a_job_result, True),
     "job_cancel": (a_job_cancel, True),
     "job_cleanup": (a_job_cleanup, True),
+    # F.2 typed review surface (section 123) — no generic shell/docker
+    "job_diff": (a_job_diff, True),
+    "job_verify": (a_job_verify, True),
+    "review_start": (a_review_start, True),
+    "review_status": (a_review_status, True),
+    "review_result": (a_review_result, True),
+    "review_cancel": (a_review_cancel, True),
+    "review_cleanup": (a_review_cleanup, True),
 }
 
 

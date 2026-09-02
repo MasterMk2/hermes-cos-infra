@@ -211,6 +211,10 @@ class PiSandboxWorkerAdapter:
         "pi-sandbox-claude-code": "claude-code",
         "pi-sandbox-codex": "codex",
         "pi-sandbox-opencode": "opencode",
+        # F.1.1-Pi Production Agent addendum: worker Hermes CLI + CommandCode
+        # + GLM-5.3-Flash. The bridge resolves the logical worker name to the
+        # actual command/image; the supervisor stays provider-agnostic.
+        "pi-sandbox-hermes-commandcode": "hermes-commandcode-glm53flash",
     }
 
     def run(self, job, rcfg, repo_path, prompt, timeout_s):
@@ -290,6 +294,9 @@ class PiSandboxWorkerAdapter:
             "test_summary": ev.get("test_summary"),
             "secret_scan": ev.get("secret_scan") or [],
             "isolation": ev.get("isolation"),
+            # F.1.1-Pi addendum: usage capture (per-attempt --usage-file
+            # aggregation produced by the bridge; numeric fields only).
+            "usage": ev.get("usage"),
         }
 
 
@@ -303,6 +310,10 @@ def get_adapter(job):
                 "production jobs must use a sandbox worker agent"
             )
         return LocalFixtureAdapter()
+    # note (F.1.1-Pi.2): the fixture-agent test-only rule is enforced at
+    # creation time (jobs_mcp job_create -> fixture_agent_is_test_only).
+    # get_adapter must stay adapter-pure so H5 job_validate can resolve the
+    # adapter name (pi-sandbox) without raising for existing rows.
     if agent.startswith("pi-sandbox-"):
         return PiSandboxWorkerAdapter()
     if agent.startswith("remote-"):

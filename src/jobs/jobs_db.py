@@ -17,6 +17,17 @@ ARTIFACTS_DIR = JOBS_DIR / "artifacts"
 LOGS_DIR = JOBS_DIR / "logs"
 PROMPTS_DIR = JOBS_DIR / "prompts"
 
+# Phase F.2 review-status values for jobs.review_status.
+REVIEW_STATUSES = (
+    "NOT_STARTED", "NOT_REQUIRED", "WAITING_REVIEW", "REVIEWING", "APPROVED",
+    "CHANGES_REQUIRED", "REVIEW_INTERRUPTED", "REVIEW_FAILED",
+)
+# Review-row (immutable history) statuses.
+REVIEW_ROW_STATUSES = (
+    "reviewing", "approved", "changes_required", "interrupted",
+    "failed", "cancelled",
+)
+
 STATUSES = [
     "NEW", "QUEUED", "DISPATCHING", "RUNNING", "AGENT_STOPPED", "VALIDATING",
     "CONTINUE_REQUIRED", "WAITING_REVIEW", "CHANGES_REQUESTED", "WAITING_HUMAN",
@@ -113,12 +124,28 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           ts TEXT, job_id TEXT, run_id TEXT, level TEXT, message TEXT
         );
+        CREATE TABLE IF NOT EXISTS reviews (
+          review_id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          cycle INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'reviewing',
+          reviewer_agent TEXT, reviewer_model TEXT,
+          base_sha TEXT, target_sha TEXT, diff_hash TEXT, content_sha TEXT,
+          started_at TEXT, finished_at TEXT,
+          verdict TEXT, summary TEXT,
+          findings_json TEXT, blocking_count INTEGER DEFAULT 0,
+          fingerprints_json TEXT,
+          usage_json TEXT, error_summary TEXT,
+          content_progress TEXT
+        );
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
         CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
         CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id);
+        CREATE INDEX IF NOT EXISTS idx_reviews_job ON reviews(job_id, cycle);
         """
     )
     _ensure_columns(con)
+    _ensure_review_columns(con)
     con.commit()
     con.close()
 
@@ -140,6 +167,27 @@ def _ensure_columns(con):
     runs_cols = {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}
     if "diff_hash" not in runs_cols:
         con.execute("ALTER TABLE runs ADD COLUMN diff_hash TEXT")
+
+
+def _ensure_review_columns(con):
+    """F.2 additive review schema (section 28): the reviews table is created
+    with IF NOT EXISTS; legacy databases created before F.2 get any missing
+    review columns added in place. Running twice changes nothing (idempotent)."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(reviews)").fetchall()}
+    if not cols:
+        return  # table itself was just created with the full schema
+    additions = {
+        "attempt_no": "INTEGER DEFAULT 1",
+        # F.2 (section 61/107): whether the canonical content binding actually
+        # moved between the previous verdicted cycle and this one
+        # ('first_cycle' | 'changed' | 'unchanged'). Review evidence only —
+        # a cycle that converged on UNCHANGED content is reviewer-only
+        # convergence and must never be counted as fix-loop evidence.
+        "content_progress": "TEXT",
+    }
+    for name, decl in additions.items():
+        if name not in cols:
+            con.execute(f"ALTER TABLE reviews ADD COLUMN {name} {decl}")
 
 
 def _row_to_job(r):
@@ -377,6 +425,131 @@ def counts_by_status():
     con = connect()
     try:
         return dict(con.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status").fetchall())
+    finally:
+        con.close()
+
+
+# ── Phase F.2: immutable review history (section 27) ────────────────────
+
+def create_review(job_id, cycle, reviewer_agent, reviewer_model,
+                  base_sha=None, target_sha=None, diff_hash=None,
+                  content_sha=None, attempt_no=1):
+    con = connect()
+    try:
+        rid = new_id("rev")
+        con.execute(
+            "INSERT INTO reviews (review_id, job_id, cycle, attempt_no, status,"
+            " reviewer_agent, reviewer_model, base_sha, target_sha, diff_hash,"
+            " content_sha, started_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rid, job_id, cycle, attempt_no, "reviewing", reviewer_agent,
+             reviewer_model, base_sha, target_sha, diff_hash, content_sha,
+             now_iso()),
+        )
+        con.commit()
+        log(job_id, None, "review",
+            f"review started review_id={rid} cycle={cycle} attempt={attempt_no} "
+            f"model={reviewer_model} target_sha={(target_sha or '')[:12]}")
+        return rid
+    finally:
+        con.close()
+
+
+def update_review(review_id, **fields):
+    if not fields:
+        return
+    # JSON-typed columns arrive as python objects under the plain names.
+    if "findings" in fields:
+        fields["findings_json"] = json.dumps(fields.pop("findings"),
+                                             ensure_ascii=False)
+    if "fingerprints" in fields:
+        fields["fingerprints_json"] = json.dumps(fields.pop("fingerprints"),
+                                                 ensure_ascii=False)
+    if "usage" in fields:
+        fields["usage_json"] = json.dumps(fields.pop("usage"),
+                                          ensure_ascii=False)
+    cols = ", ".join(f"{k}=?" for k in fields)
+    con = connect()
+    try:
+        con.execute(f"UPDATE reviews SET {cols} WHERE review_id=?",
+                    tuple(fields.values()) + (review_id,))
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_review(review_id):
+    con = connect()
+    try:
+        r = con.execute("SELECT * FROM reviews WHERE review_id=?",
+                        (review_id,)).fetchone()
+        return _review_row(r) if r else None
+    finally:
+        con.close()
+
+
+def _review_row(r):
+    d = dict(r)
+    for f in ("findings_json", "fingerprints_json", "usage_json"):
+        raw = d.pop(f, None)
+        key = f[:-5]
+        try:
+            d[key] = json.loads(raw) if raw else ({} if f == "usage_json" else [])
+        except (TypeError, ValueError):
+            d[key] = {} if f == "usage_json" else []
+    return d
+
+
+def reviews_for_job(job_id, limit=20):
+    con = connect()
+    try:
+        return [_review_row(r) for r in con.execute(
+            "SELECT * FROM reviews WHERE job_id=? ORDER BY cycle, started_at, rowid "
+            "LIMIT ?", (job_id, max(1, min(int(limit), 100))))]
+    finally:
+        con.close()
+
+
+def latest_review(job_id, statuses=None):
+    con = connect()
+    try:
+        q = "SELECT * FROM reviews WHERE job_id=?"
+        p = [job_id]
+        if statuses:
+            q += " AND status IN (%s)" % ",".join("?" for _ in statuses)
+            p.extend(statuses)
+        q += " ORDER BY cycle DESC, started_at DESC, rowid DESC LIMIT 1"
+        r = con.execute(q, p).fetchone()
+        return _review_row(r) if r else None
+    finally:
+        con.close()
+
+
+def latest_approved_review(job_id):
+    return latest_review(job_id, statuses=("approved",))
+
+
+def review_verdict_counts():
+    con = connect()
+    try:
+        rows = con.execute(
+            "SELECT status, COUNT(*) FROM reviews GROUP BY status").fetchall()
+        return {r[0]: r[1] for r in rows}
+    finally:
+        con.close()
+
+
+def cas_review_status(job_id, new_review_status, allowed_from):
+    """F.2: compare-and-set on jobs.review_status (single review owner)."""
+    placeholders = ",".join("?" for _ in allowed_from)
+    con = connect()
+    try:
+        cur = con.execute(
+            f"UPDATE jobs SET review_status=?, updated_at=? WHERE job_id=? "
+            f"AND review_status IN ({placeholders})",
+            (new_review_status, now_iso(), job_id, *allowed_from))
+        con.commit()
+        return cur.rowcount == 1
     finally:
         con.close()
 

@@ -20,6 +20,17 @@ Disposable Worker Container (cap-drop ALL, read-only rootfs)
 Coding Agent → isolated git worktree → deterministic tests
         ▼
 evidence → IMPLEMENTATION_ACCEPTED → WAITING_REVIEW
+        │
+        ▼
+Independent Reviewer Container (別model / 別HERMES_HOME / 別session)
+        │  read snapshot of target_sha のみ。実装worktreeもtranscriptも渡さない
+        ▼
+structured findings → APPROVED  or  CHANGES_REQUIRED → 実装fix → 再review
+        ▼
+completion_decision() — exact target SHA + content binding + diff hash
+        + 登録test再実行 + secret scan + cancel guard + CAS
+        ▼
+COMPLETED
 ```
 
 ## 原則
@@ -33,6 +44,11 @@ evidence → IMPLEMENTATION_ACCEPTED → WAITING_REVIEW
   しない)
 - **cancel は terminal intent**(H4: cancel 後に validation / acceptance へ
   進まない。cancel_requested_at を永続化し finalize は上書きしない)
+- **implementation accepted ≠ completed / reviewer said approved ≠ completed**
+  (F.2: `COMPLETED` は `completion_decision()` 一箇所だけが書き、
+  独立レビューの承認が **その exact revision** に bind されていること、
+  最新の deterministic 検証が通ること、cancel されていないことを全て要求する。
+  承認後に worktree が動けば承認は無効化され再レビューになる)
 - Hermes Personal Data (SOUL/MEMORY/LINE/Events) はCoding Agentから到達不可。
   **隔離は container / filesystem boundary による**
   (`--ignore-rules` は個人context注入を止めない — 実測で確認済み。
@@ -59,6 +75,8 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 | 5 | [docs/05-phase-f11-isolation-gate.md](docs/05-phase-f11-isolation-gate.md) | ignore-rules実測 / transport adapter / lifecycle移行 / secret scan |
 | 6 | [docs/06-phase-f11pi-same-host-worker.md](docs/06-phase-f11pi-same-host-worker.md) | 同一Pi上の分離Worker container / typed bridge / 隔離実証 |
 | 7 | [docs/07-phase-f11pi2-hardening.md](docs/07-phase-f11pi2-hardening.md) | Supervisor Hardening Gate (H1-H5 / M1-M8 / 回帰83tests) |
+| 8 | [docs/08-phase-f2-independent-review.md](docs/08-phase-f2-independent-review.md) | Independent Reviewer (Muse) / fix loop / exact-revision completion gate |
+| - | [docs/F2-FINAL-REPORT.md](docs/F2-FINAL-REPORT.md) | F.2 実測レポート (real fix loop / 隔離実測 / usage / 回帰) |
 | - | [docs/lessons-learned.md](docs/lessons-learned.md) | 実測で見つかった落とし穴と修正 |
 
 ## Code Snapshot (`src/`)
@@ -69,22 +87,27 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 ```text
 src/
 ├── jobs/                       Coding Supervisor (container内, stdio MCP)
-│   ├── jobs_db.py              job/run/event_log SQLite層 (cancel CAS / 監査)
-│   ├── supervisor.py           state machine + continuation + canonical changed set
+│   ├── jobs_db.py              job/run/event_log/reviews SQLite層 (cancel CAS / 監査)
+│   ├── supervisor.py           state machine + continuation + review phase
+│   │                           + completion_decision() (唯一のCOMPLETED writer)
+│   ├── review.py               Reviewer persona / 出力schema validator /
+│   │                           finding fingerprint / review package builder
 │   ├── validator.py            deterministic acceptance validator
 │   ├── transport.py            adapter群 (local fixture / pi-sandbox / remote)
 │   ├── agents_local.py         fixture agent実行(test専用)
-│   ├── jobs_mcp.py             typed MCP server (9 tools, generic shell無し)
+│   ├── jobs_mcp.py             typed MCP server (12 tools, generic shell無し)
 │   ├── supervisor_runner.py    detached runner entry
 │   ├── test_fixtures/          deterministic test agent
 │   └── worker/                 remote worker protocol (workerctl)
 ├── bridge/                     Host Coding Bridge (host側)
-│   ├── bridge.py               typed Unix-socket RPC, 非blocking watchdog
+│   ├── bridge.py               typed Unix-socket RPC, 非blocking watchdog,
+│   │                           review snapshot / reviewer container / job_verify
 │   ├── config.json             repo registry / limits / agent commands
 │   └── Dockerfile              worker image (arm64)
+├── reviewer-hermes/            Reviewer専用Hermes config (ro mount 元)
 ├── security_patterns.py        canonical secret patterns (単一ソース)
-├── bin/ + worker/              fixture agent, watchdog, worker側設定
-├── tests/                      hardening 回帰テスト (unittest, 83 tests)
+├── bin/ + worker/              fixture agent, reviewer runner, watchdog, worker設定
+├── tests/                      回帰テスト (unittest, 126 tests)
 └── docker-compose.hermes.yaml  実機 deploy 対象 (digest pin)
 ```
 
@@ -92,6 +115,15 @@ src/
 
 - Supervisor / Bridge / 分離Worker / 全isolation test: 稼働・検証済み
 - F.1.1-Pi.2 Supervisor Hardening Gate: 完了 (H1-H5 / M1-M8、回帰テスト全PASS)
-  - 実Production Coding Agent (Hermes CLI + CommandCode) の接続は
-    この Hardening Gate 完了後に行うこと
-- Next: 実Coding Agent接続 → Phase F.2 — Independent Coding Review & Fix Loop
+- F.1.1-Pi / Pi.2 / Pi.3: 完了 (実Production Coding Agent 接続済み、
+  Hermes CLI + CommandCode + GLM-5.3-Flash)
+- F.2 Independent Coding Review & Fix Loop: Reviewer (Muse Spark 1.2) /
+  review schema / fix loop / exact-revision completion gate を実装・実機検証。
+  production coding job は **独立レビュー承認 + exact revision 一致 + 最終
+  deterministic 検証** を通らない限り `COMPLETED` にならない
+- 回帰テスト: 126 tests OK (F.1.1 hardening 108 + F.2 binding/cost/surface 18)
+- Real Fix Loop 実測済み (Pi実機・両roleとも実APIコール):
+  GLM実装 → deterministic acceptance → **Muse が CHANGES_REQUIRED (blocking 4)**
+  → GLM が実際にコードを修正 (content binding が移動) → fresh Muse review
+  → APPROVE → exact-revision gate → COMPLETED
+  (詳細: [docs/F2-FINAL-REPORT.md](docs/F2-FINAL-REPORT.md))

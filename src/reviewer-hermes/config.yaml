@@ -1,0 +1,37 @@
+# Reviewer-only Hermes config — independent coding reviewer profile (F.2).
+#
+# Mounted READ-ONLY by the bridge at /agent-home/reviewer-hermes/config.yaml.
+# This is NOT a copy of the personal Hermes config and NOT the implementation
+# worker config: separate HERMES_HOME, separate session/state, fixed reviewer
+# model. No gateway, no LINE/Discord/Event/jobs MCP servers, no personal data.
+#
+# Model note: meta/muse-spark-1.2 is the STANDARD variant. The spec pins
+# meta/muse-spark-1.2-contributor (the vendor's data-contribution tier); the
+# user confirmed the standard variant instead on data-policy grounds
+# (re-confirmed 2026-09-02). Measured, not assumed: BOTH ids are present in
+# the live CommandCode /provider/v1/models listing, so this is a documented
+# deviation and not a fallback from an unavailable model. jobs/review.py
+# REVIEWER_MODEL is the single source of truth; this file must match it.
+model:
+  default: meta/muse-spark-1.2
+  provider: commandcode
+agent:
+  max_turns: 40
+  verbose: false
+  reasoning_effort: medium
+terminal:
+  backend: local
+  timeout: 180
+approvals:
+  # Unattended reviewer on a disposable sandboxed container. -z one-shot
+  # already auto-bypasses approval prompts; mode "off" makes the choice
+  # explicit. Deny rules are enforced BEFORE the off-bypass by Hermes.
+  # The reviewer must never modify the implementation: push/merge/remote
+  # operations are denied at the tool level as well.
+  mode: "off"
+  timeout: 30
+  deny:
+    - "git push*"
+    - "git merge*"
+    - "git remote add*"
+    - "git remote set-url*"

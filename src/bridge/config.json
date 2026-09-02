@@ -1,19 +1,93 @@
 {
   "version": 1,
-  "image": "hermes-coding-worker:1.0.0",
+  "image": "hermes-coding-worker:1.0.1-hermes-commandcode",
   "agent_timeout_s": 1200,
   "hang_watchdog_s": 900,
-  "limits": {"memory": "1250m", "cpus": "2.0", "pids": 256},
+  "limits": {
+    "memory": "1250m",
+    "cpus": "2.0",
+    "pids": 256
+  },
   "container_uid": 1000,
   "container_gid": 1000,
   "agents": {
-    "fixture": "python3 /opt/workerbin/fixture_agent.py /jobs/prompt.txt"
+    "fixture": "python3 /opt/workerbin/fixture_agent.py /jobs/prompt.txt",
+    "hermes-commandcode-glm53flash": "bash /opt/workerbin/run_hermes_agent.sh",
+    "hermes-reviewer-commandcode-muse-spark12": "bash /opt/workerbin/run_hermes_reviewer.sh"
+  },
+  "reviewer_agent": "hermes-reviewer-commandcode-muse-spark12",
+  "secrets_source": "/srv/hermes/hermes-data/.env",
+  "agent_pass_env": {
+    "hermes-commandcode-glm53flash": [
+      "COMMANDCODE_API_KEY"
+    ],
+    "hermes-reviewer-commandcode-muse-spark12": [
+      "COMMANDCODE_API_KEY"
+    ]
+  },
+  "agent_mounts": {
+    "hermes-commandcode-glm53flash": [
+      "/home/<PI_USER>/coding-worker/worker-hermes/config.yaml:/agent-home/hermes/config.yaml:ro"
+    ],
+    "hermes-reviewer-commandcode-muse-spark12": [
+      "/home/<PI_USER>/coding-worker/reviewer-home/reviewer-hermes/config.yaml:/agent-home/reviewer-hermes/config.yaml:ro"
+    ]
   },
   "repositories": {
     "coding-worker-smoke-test": {
       "path": "/home/<PI_USER>/coding-worker/repos/coding-worker-smoke-test",
-      "test_commands": ["python3 -m unittest discover -s tests -v"],
-      "allowed_paths": ["pkg/", "tests/", "README.md"]
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ]
+    },
+    "fix-loop-fixture": {
+      "path": "/home/<PI_USER>/coding-worker/repos/fix-loop-fixture",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ]
+    },
+    "f2-fixloop": {
+      "path": "/home/<PI_USER>/coding-worker/repos/f2-fixloop",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ]
+    },
+    "f2-loop2": {
+      "path": "/home/<PI_USER>/coding-worker/repos/f2-loop2",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ]
+    },
+    "f2-loop3": {
+      "path": "/home/<PI_USER>/coding-worker/repos/f2-loop3",
+      "test_commands": [
+        "python3 -m unittest discover -s tests -v"
+      ],
+      "allowed_paths": [
+        "pkg/",
+        "tests/",
+        "README.md"
+      ]
     }
   }
 }
