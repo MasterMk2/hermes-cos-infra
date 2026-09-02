@@ -54,15 +54,6 @@ class TestM1PerJobMaxAttempts(unittest.TestCase):
             self.assertEqual(len(runs), 2)
 
     def test_job_max_attempts_6_beats_global_2(self):
-        with Sandbox() as sb:
-            repo = make_fixture_repo(sb.dir)
-            final, runs = self._run_to_limit(sb, repo, job_max=6,
-                                             global_max=2)
-            self.assertEqual(final["status"], "WAITING_HUMAN")
-            self.assertIn("attempt limit 2", final["failure_reason"])
-            self.assertEqual(len(runs), 2)
-
-    def test_job_max_attempts_6_beats_global_2(self):
         # M1 spec: the job's own value WINS even when it is larger than the
         # global default (global is only a fallback, never a cap).
         with Sandbox() as sb:

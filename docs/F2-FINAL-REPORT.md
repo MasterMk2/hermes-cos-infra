@@ -119,7 +119,9 @@ structured JSON:     reviewer writes /jobs/review-result.json; chat text is
 schema:              review.validate_review_output() — verdict/severity/
                      category enums, confidence range, bool typing
 path validation:     absolute paths, "..", backslashes and paths outside the
-                     repo scope rejected
+                     repository's registered allowed_paths are rejected. The
+                     scope half only fires when the caller supplies the
+                     allowed_paths list; the production call site now does
 conflicting verdict: APPROVE + any blocking=true finding -> invalid
                      (CHANGES_REQUIRED with no blocking finding also invalid)
 finding bounds:      max 30 findings; summary/explanation/suggested_fix 2000
@@ -411,8 +413,8 @@ review-less completion, any job kind: unit-tested (kind=test skips review and
                                       completion_decision writes COMPLETED)
 ```
 
-Regression suite: **126 tests OK** (108 pre-existing F.1.1 hardening + F.2
-review tests, plus 18 added this session in `tests/test_f2_binding.py`).
+Regression suite: **129 tests OK** — 83 F.1.1 hardening tests, 25 F.2 review
+tests, and 21 added this session in `tests/test_f2_binding.py`.
 
 Three of these were also observed on real hardware, not only in unit tests:
 
@@ -528,8 +530,13 @@ RequiresMountsFor: RequiresMountsFor=/srv/hermes drop-in present (unchanged)
   `bridge/config.json` and `worker_config.json`) now carries five entries:
   `coding-worker-smoke-test` and `fix-loop-fixture` from earlier phases, plus
   `f2-fixloop`, `f2-loop2` and `f2-loop3` added this session. All are
-  disposable toy repositories with `allow_simulated: false` and scoped
-  `allowed_paths`; none contains personal data and none is deployed. Note
+  disposable toy repositories with scoped `allowed_paths`; none contains
+  personal data and none is deployed. `allow_simulated` (a `worker_config.json`
+  key only — the bridge registry has no such field) is **false** on the three
+  added this session and **true** on the two earlier ones, so the local
+  fixture agent is still permitted against `coding-worker-smoke-test` and
+  `fix-loop-fixture` — which is what the supervisor's own regression tests
+  rely on, and is gated separately by the `kind=test` rule. Note
   that `f2-fixloop` is **not a clean baseline** — it holds eight commits of
   reviewed-and-landed agent output from this session's fixtures, so a future
   job against it starts from that state. `f2-loop2` and `f2-loop3` were

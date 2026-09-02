@@ -107,7 +107,7 @@ src/
 ├── reviewer-hermes/            Reviewer専用Hermes config (ro mount 元)
 ├── security_patterns.py        canonical secret patterns (単一ソース)
 ├── bin/ + worker/              fixture agent, reviewer runner, watchdog, worker設定
-├── tests/                      回帰テスト (unittest, 126 tests)
+├── tests/                      回帰テスト (unittest, 129 tests)
 └── docker-compose.hermes.yaml  実機 deploy 対象 (digest pin)
 ```
 
@@ -121,7 +121,8 @@ src/
   review schema / fix loop / exact-revision completion gate を実装・実機検証。
   production coding job は **独立レビュー承認 + exact revision 一致 + 最終
   deterministic 検証** を通らない限り `COMPLETED` にならない
-- 回帰テスト: 126 tests OK (F.1.1 hardening 108 + F.2 binding/cost/surface 18)
+- 回帰テスト: 129 tests OK
+  (F.1.1 hardening 83 + F.2 review 25 + F.2 binding/scope/cost/surface 21)
 - Real Fix Loop 実測済み (Pi実機・両roleとも実APIコール):
   GLM実装 → deterministic acceptance → **Muse が CHANGES_REQUIRED (blocking 4)**
   → GLM が実際にコードを修正 (content binding が移動) → fresh Muse review

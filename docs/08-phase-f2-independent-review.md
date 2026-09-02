@@ -76,7 +76,9 @@ Reviewer は `/jobs/review-result.json` に JSON を書く。**LLMの自己申�
   指定できない)
 - severity / category enum、confidence range、finding 数上限 30、
   text size 上限
-- path は repo-relative のみ。絶対パス・`..`・backslash・repo外は reject
+- path は repo-relative のみ。絶対パス・`..`・backslash・
+  repository の登録 `allowed_paths` 外は reject
+  (scope 判定は allowed_paths を渡したときだけ働く。本番の呼び出し側は渡す)
 - **verdict/finding 整合**: `APPROVE` + `blocking=true` は invalid
   (勝手に APPROVE 扱いしない)
 - invalid JSON は strict repair prompt で 1 回だけ retry、超過で
@@ -252,6 +254,8 @@ fingerprints_json usage_json error_summary
 - review-less completion guard(全 kind)
 - migration idempotency
 - **§76 cost honesty**(`cost_status: unknown` を 0.0 として記録しない)
+- **§37 scope 実効性**(本番の呼び出し側が `allowed_paths` を渡すこと。
+  repo-relative だが allowed_paths 外の path が実際に reject されること)
 
 ## 実測 — Real Fix Loop (Pi実機、両roleとも実APIコール)
 
@@ -338,8 +342,13 @@ Reviewerの承認が正しかったことを確認した。残り2本は fixture
 - **fixture repository が5件 registry に残っている**。
   `coding-worker-smoke-test` / `fix-loop-fixture`(既存)に加え、本セッションで
   `f2-fixloop` / `f2-loop2` / `f2-loop3` を追加した。いずれも使い捨ての toy repo
-  (`allow_simulated: false`、`allowed_paths` はスコープ済み、個人データ無し、
-  deploy されない)。ただし `f2-fixloop` は **clean baseline ではない** —
+  (`allowed_paths` はスコープ済み、個人データ無し、deploy されない)。
+  `allow_simulated`(`worker_config.json` のみのキー。bridge registry には無い)は
+  本セッション追加の3件が **false**、既存2件は **true** のままである
+  — `coding-worker-smoke-test` / `fix-loop-fixture` に対しては fixture agent の
+  実行が許可されており、supervisor 自身の回帰テストがそれに依存している
+  (`kind=test` 制約で別途ガードされる)。
+  ただし `f2-fixloop` は **clean baseline ではない** —
   本セッションで review を通して land した agent 出力が8コミット入っている。
   `f2-loop2` / `f2-loop3` は単発用途なので随時 deregister してよい。
 - **本番の agent window (1200s / hang watchdog 900s) は Pi には厳しい**。

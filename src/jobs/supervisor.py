@@ -648,7 +648,12 @@ def run_review_phase(job_id, cfg):
         payload = res.get("review") or {}
         raw = payload.get("result_json")
         data = raw if isinstance(raw, dict) else rv.parse_review_text(raw)
-        normalized, err = rv.validate_review_output(data, repo_scope_dirs=None)
+        # Section 37: a finding path must be repo-relative AND inside the
+        # repository's allowed paths. Passing the registry's allowed_paths is
+        # what makes the "outside the repository" half of that check real —
+        # with repo_scope_dirs=None the scope test is skipped entirely.
+        normalized, err = rv.validate_review_output(
+            data, repo_scope_dirs=(rcfg or {}).get("allowed_paths") or None)
         usage = payload.get("usage")
         _review_usage_log(job_id, cycle, usage)
         if err:

@@ -22,6 +22,7 @@ import helpers  # noqa: F401  (sys.path setup)
 from helpers import Sandbox, make_fixture_repo
 
 import jobs_db           # noqa: E402
+import review as rv      # noqa: E402
 import supervisor        # noqa: E402
 
 from test_f2_review import (BASE_SHA, CONTENT_SHA, DIFF_SHA, F2ReviewTestBase,
@@ -99,6 +100,66 @@ class TestDiffHashBinding(F2ReviewTestBase):
             jobs_db.update_review(rec["review_id"], diff_hash=None)
             ok, why, _ = supervisor.completion_decision(jid)
             self.assertTrue(ok, why)
+
+
+class TestFindingScopeIsEnforcedInProduction(F2ReviewTestBase):
+    """Section 37: a finding path must be repo-relative AND inside the
+    repository's allowed paths.
+
+    The validator has always had the scope half, but it is gated behind
+    `if repo_dirs` — so it did nothing until the production call site
+    actually passed the registry's allowed_paths. These tests pin the wiring,
+    not just the validator, which is what the earlier version was missing."""
+
+    def _bridge_with_finding_path(self, path):
+        fb = FakeBridge("changes_required")
+        orig = fb._review_payload
+
+        def payload():
+            d = orig()
+            d["result_json"]["findings"][0]["file"] = path
+            return d
+        fb._review_payload = payload
+        return fb
+
+    def test_in_scope_path_is_accepted(self):
+        with Sandbox() as sb:
+            repo = make_fixture_repo(sb.dir)
+            jid = self.accept_job(sb, repo)   # allowed_paths: pkg/ tests/ README.md
+            self.install_bridge(self._bridge_with_finding_path('pkg/greeter.py'))
+            out = supervisor.run_review_phase(jid, supervisor.load_config())
+            self.assertEqual(out, 'FIX_REQUIRED')
+            self.assertEqual(jobs_db.latest_review(jid)['status'],
+                             'changes_required')
+
+    def test_out_of_scope_path_is_rejected_on_the_production_path(self):
+        """A path that is repo-relative and traversal-free, but outside the
+        repository's allowed_paths, must still be refused."""
+        with Sandbox() as sb:
+            repo = make_fixture_repo(sb.dir)
+            jid = self.accept_job(sb, repo)
+            self.install_bridge(self._bridge_with_finding_path('secrets/prod.env'))
+            out = supervisor.run_review_phase(jid, supervisor.load_config())
+            self.assertEqual(out, 'WAITING_HUMAN')
+            job = jobs_db.get_job(jid)
+            self.assertEqual(job['review_status'], 'REVIEW_FAILED')
+            rows = jobs_db.reviews_for_job(jid)
+            self.assertTrue(rows)
+            self.assertIn('outside allowed repo scope',
+                          rows[-1]['error_summary'] or '')
+
+    def test_validator_still_rejects_traversal_without_any_scope_list(self):
+        """The path checks that do not depend on repo_dirs keep working when
+        no scope list is supplied at all."""
+        for bad in ('../../etc/passwd', '/etc/shadow', 'a\\b.py'):
+            res, err = rv.validate_review_output({
+                'verdict': 'CHANGES_REQUIRED', 'summary': 's',
+                'findings': [{'severity': 'high', 'category': 'correctness',
+                              'file': bad, 'title': 't', 'explanation': 'e',
+                              'blocking': True, 'confidence': 0.9}]},
+                repo_scope_dirs=None)
+            self.assertIsNone(res, bad)
+            self.assertIn('path', err, bad)
 
 
 class TestContentProgressEvidence(F2ReviewTestBase):
