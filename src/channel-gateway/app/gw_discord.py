@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Unified Channel Gateway — the Discord Interface adapter.
+
+This is the *second* Discord bot in this system and it must never be confused
+with the first (spec sections 3, 41):
+
+    Knowledge Bot (phase D.1)   ears only. Reads guild channels, writes to a
+                                search index, never speaks.
+    Interface Bot (this file)   mouth and ears for one person, in DMs only.
+                                Never reads a guild channel.
+
+They are separate Discord Applications with separate tokens, and the
+separation is enforced here by construction rather than by discipline:
+
+* the gateway connects with `Intents.none() + dm_messages`, numeric value
+  **4096**. GUILDS and GUILD_MESSAGES are absent, so guild message events are
+  not delivered to this connection at all — there is no guild content for a
+  bug to leak, because none arrives.
+* `MESSAGE_CONTENT` (32768) is deliberately NOT requested. Discord documents
+  four cases in which content is delivered without it, and "Content in DMs
+  with the app" is one of them, which is the entire surface this bot uses.
+  Verified against docs.discord.com/developers/events/gateway on 2026-09-03.
+* every send goes out with `AllowedMentions.none()` set client-wide, so no
+  answer this gateway relays can ping @everyone, a role, or a user.
+
+The adapter does not answer questions. It normalizes, authenticates against
+the single configured owner id, and puts a row in the queue; the worker does
+the rest. That is the whole of section 12's "the gateway is not an agent".
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+import discord
+
+import gw_store as store
+from gw_canonical import PLATFORM_DISCORD, canonical_from_discord
+from gw_format import chunk_text, neutralize_mentions, redact
+
+log = logging.getLogger("gateway.discord")
+
+# Discord's own hard limit on a message body. The library does not chunk for
+# you and raises HTTPException(50035) if you exceed it, so the gateway chunks
+# below the line rather than discovering it.
+DISCORD_MAX_MESSAGE_CHARS = 2000
+
+# The intents this bot is allowed to hold. Asserted at startup: if a later
+# edit widens them, the service refuses to start instead of quietly gaining
+# the ability to read guild messages.
+REQUIRED_INTENTS_VALUE = 4096
+
+
+def build_intents() -> discord.Intents:
+    """DIRECT_MESSAGES and nothing else."""
+    intents = discord.Intents.none()
+    intents.dm_messages = True
+    return intents
+
+
+class InterfaceBot(discord.Client):
+    """Receives owner DMs, queues them, and delivers answers back."""
+
+    def __init__(self, cfg, db_path: str, wake: asyncio.Event):
+        intents = build_intents()
+        if intents.value != REQUIRED_INTENTS_VALUE:
+            # Not a warning. A widened intent set is a change in what this
+            # process is capable of reading, and it must not happen silently.
+            raise RuntimeError(
+                f"interface bot intents are {intents.value}, expected "
+                f"{REQUIRED_INTENTS_VALUE} (DIRECT_MESSAGES only)"
+            )
+        super().__init__(
+            intents=intents,
+            # Client-wide, so it applies to every send including ones added
+            # later that forget to pass it.
+            allowed_mentions=discord.AllowedMentions.none(),
+            max_messages=None,      # no message cache; nothing to leak
+            chunk_guilds_at_startup=False,
+        )
+        self.cfg = cfg
+        self.db_path = db_path
+        self.wake = wake
+        self._chunk_chars = min(
+            int(cfg.discord.get("text_chunk_chars") or 1900),
+            DISCORD_MAX_MESSAGE_CHARS,
+        )
+        self._max_chunks = int(cfg.discord.get("max_chunks") or 4)
+
+    # -- lifecycle -----------------------------------------------------
+
+    async def on_ready(self):
+        log.info(
+            "interface bot ready as %s (id=%s) intents=%s guilds_visible=%d",
+            self.user, getattr(self.user, "id", "?"),
+            self.intents.value, len(self.guilds),
+        )
+
+    # -- inbound -------------------------------------------------------
+
+    async def on_message(self, message: discord.Message):
+        """Queue one owner DM. Everything else is dropped, quietly."""
+        try:
+            await self._handle(message)
+        except Exception:
+            # A raise here would be swallowed by discord.py's task handling
+            # and the message would vanish with no trace. Log it against the
+            # id so it can be found, and keep the connection alive.
+            log.exception("interface on_message failed id=%s",
+                          getattr(message, "id", "?"))
+
+    async def _handle(self, message: discord.Message):
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        is_bot = bool(getattr(message.author, "bot", False))
+
+        # `canonical_from_discord` returns None for a bot author or a
+        # non-DM channel, so this is belt and braces — but the belt is in a
+        # different file and this is the one place a guild message could
+        # arrive if the intents were ever widened.
+        if not is_dm or is_bot:
+            return
+
+        canonical = canonical_from_discord(
+            message_id=message.id,
+            author_id=message.author.id,
+            channel_id=message.channel.id,
+            content=message.content,
+            created_at=message.created_at,
+            is_bot=is_bot,
+            is_dm=is_dm,
+            owner_discord_user_id=self.cfg.owner_discord_user_id,
+        )
+        if canonical is None:
+            return
+
+        # Empty content on a DM means the intent assumption above is wrong on
+        # this account. Say so loudly once per message rather than treating a
+        # blank prompt as a real question.
+        if not canonical.text.strip():
+            log.warning(
+                "empty DM content id=%s — if this persists, MESSAGE_CONTENT "
+                "may be required on this application", message.id
+            )
+            return
+
+        con = store.open_db(self.db_path)
+        try:
+            request_id, is_new = store.record_inbound(con, canonical)
+            if not canonical.authenticated:
+                # Not the owner. Recorded for the audit trail, never answered:
+                # a reply would confirm to a stranger that this bot is live
+                # and belongs to someone.
+                store.audit(con, "inbound_rejected", request_id=request_id,
+                            platform=PLATFORM_DISCORD, authenticated=False,
+                            detail="not_owner")
+                con.commit()
+                log.info("dropped non-owner DM from %s", message.author.id)
+                return
+            if not is_new:
+                store.audit(con, "inbound_duplicate", request_id=request_id,
+                            platform=PLATFORM_DISCORD, detail="dedupe")
+                con.commit()
+                return
+            store.enqueue(con, request_id)
+            store.audit(con, "inbound_queued", request_id=request_id,
+                        platform=PLATFORM_DISCORD, authenticated=True,
+                        capability_profile=canonical.capability_profile)
+            con.commit()
+        finally:
+            con.close()
+
+        self.wake.set()
+
+    # -- outbound ------------------------------------------------------
+
+    def prepare(self, text: str) -> list:
+        """Chunk an answer to Discord's limit, with mentions neutralised."""
+        body = redact(neutralize_mentions(text or ""))
+        return chunk_text(body, self._chunk_chars, self._max_chunks)
+
+    async def send_chunks(self, channel_id: int, chunks: list) -> tuple:
+        """Deliver to a DM channel. Returns (sent_count, error_or_None).
+
+        Stops at the first failure rather than pressing on: a partial answer
+        in order beats a scrambled complete one, and the unsent chunks stay
+        PENDING for the retry.
+        """
+        try:
+            channel = self.get_channel(int(channel_id)) or \
+                await self.fetch_channel(int(channel_id))
+        except discord.HTTPException as exc:
+            return 0, f"channel_unavailable:{exc.code}"
+
+        sent = 0
+        for chunk in chunks:
+            try:
+                await channel.send(
+                    chunk, allowed_mentions=discord.AllowedMentions.none()
+                )
+                sent += 1
+            except discord.HTTPException as exc:
+                # Match on `exc.code`, the Discord error number, not on the
+                # exception class: Forbidden/NotFound/HTTPException all carry
+                # the actionable detail in `code`.
+                return sent, f"http:{exc.status}:{exc.code}"
+            except Exception as exc:  # pragma: no cover - transport
+                return sent, type(exc).__name__
+        return sent, None

@@ -1,0 +1,89 @@
+[Unit]
+Description=Unified Channel Gateway (LINE + Discord interface -> Hermes)
+After=network-online.target
+Wants=network-online.target
+# /srv/hermes is the USB disk. Starting before it mounts would create a second,
+# invisible state database on the SD card that nothing ever reads back — and
+# with the queue living in that database, every message received before the
+# next restart would be silently lost.
+RequiresMountsFor=/srv/hermes
+# Crash-loop bound. A revoked LINE token or a deleted Discord application
+# fails identically on every start; without a limit that is a tight retry loop
+# against two external APIs, which is how an account earns a rate limit.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=channelgateway
+Group=channelgateway
+WorkingDirectory=/srv/hermes/channel-gateway
+
+# Four credentials, all by the same route: systemd reads each root-owned 0400
+# file as root and drops a copy into $CREDENTIALS_DIRECTORY (unit-scoped
+# tmpfs, 0400, gone when the unit stops). The service user cannot read
+# /etc/hermes-secrets itself and no credential is in any environment variable
+# or on any command line — /proc/<pid>/cmdline is world readable.
+LoadCredential=line_channel_secret:/etc/hermes-secrets/line-channel-secret
+LoadCredential=line_channel_access_token:/etc/hermes-secrets/line-channel-access-token
+LoadCredential=discord_interface_token:/etc/hermes-secrets/discord-interface-token
+LoadCredential=hermes_api_key:/etc/hermes-secrets/channel-gateway-hermes-key
+
+ExecStart=/srv/hermes/channel-gateway/venv/bin/python -u /srv/hermes/channel-gateway/app/gw_service.py --config /srv/hermes/channel-gateway/config/config.yaml
+
+Restart=on-failure
+RestartSec=15
+# Exit 78 (EX_CONFIG): no owner id set, no platform enabled, or a credential
+# missing. A restart cannot fix any of those, and retrying would reconnect to
+# Discord in a loop. The unit lands in failed state with status 78, which is
+# the signal to the operator rather than a crash.
+RestartPreventExitStatus=78
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=channel-gateway
+
+# --- Hardening ------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# Inbound TCP from the reverse proxy plus outbound TLS to two APIs and to
+# Hermes on the LAN. No AF_PACKET, no AF_NETLINK.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0007
+MemoryMax=350M
+TasksMax=64
+
+# The gateway must never read Hermes' own configuration or environment
+# (section 67). ProtectSystem=strict only makes the filesystem read-only —
+# the assistant's .env, which holds provider API keys, would still be
+# perfectly readable. This makes the directory not exist for this process.
+# The gateway reaches Hermes over HTTP with its own key, which is why it does
+# not need anything in there.
+InaccessiblePaths=/srv/hermes/hermes-data
+
+# ProtectSystem=strict makes everything read-only, so name exactly what the
+# gateway writes: its queue database and its logs. app/ and venv/ are
+# deliberately absent — the service must not be able to rewrite its own code.
+ReadWritePaths=/srv/hermes/channel-gateway/state /srv/hermes/channel-gateway/logs
+
+[Install]
+WantedBy=multi-user.target

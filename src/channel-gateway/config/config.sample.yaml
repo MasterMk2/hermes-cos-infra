@@ -1,0 +1,109 @@
+# Unified Channel Gateway — sample configuration.
+#
+# Copy to config/config.yaml on the host and fill in the three REPLACE_ values.
+# This file carries NO credential and the parser refuses to load one: every
+# secret arrives through systemd's LoadCredential, with a root-owned 0400 file
+# as the fallback. Putting a token here is a startup error, not a bad habit.
+
+owner:
+  # The authority boundary. Exact, immutable platform ids — never a display
+  # name, which anyone can change to anyone else's.
+  #
+  # LINE: 'U' followed by 32 lowercase hex characters. It is NOT the @-id you
+  # see in the app; read it from the webhook's source.userId the first time
+  # you message the account (the gateway logs the id of a rejected sender at
+  # INFO for exactly this purpose).
+  line_user_id: REPLACE_WITH_OWNER_LINE_USER_ID
+  # Discord: the numeric user id. Enable Developer Mode, right-click your own
+  # name, "Copy User ID".
+  discord_user_id: REPLACE_WITH_OWNER_DISCORD_USER_ID
+
+paths:
+  state_db: /srv/hermes/channel-gateway/state/gateway.db
+  log_dir: /srv/hermes/channel-gateway/logs
+
+line:
+  enabled: true
+  # The address the reverse proxy connects to.
+  #
+  # NOT 127.0.0.1 on this deployment: the TLS terminator is a Caddy container
+  # on a DIFFERENT machine on the LAN, so a loopback bind is unreachable from
+  # it. Set this host's own LAN address. The parser refuses a wildcard
+  # (0.0.0.0) and any publicly routable address — bind one named interface so
+  # the reachable surface is a decision rather than a default.
+  listen_host: REPLACE_WITH_THIS_HOST_LAN_IP
+  listen_port: 8790
+  # Must match the path configured in the reverse proxy and in the LINE
+  # Developer Console's Webhook URL.
+  webhook_path: /line/webhook
+  max_body_bytes: 65536
+  # LINE's limit is 5000 UTF-16 code units per text message; 4800 leaves room
+  # for the truncation notice. Up to 5 message objects go in one request.
+  text_chunk_chars: 4800
+  max_messages_per_request: 5
+
+discord:
+  enabled: true
+  # Discord's hard limit is 2000 characters per message.
+  text_chunk_chars: 1900
+  max_chunks: 4
+  typing_indicator: true
+
+hermes:
+  # Loopback or LAN only — the parser refuses anything reachable from the
+  # internet.
+  #
+  # NOT 127.0.0.1 on this deployment. Hermes runs in Docker with its port
+  # published to the LAN address only:
+  #
+  #     LISTEN  <PI_LAN_IP>:8642      (not 0.0.0.0, not 127.0.0.1)
+  #
+  # so a loopback URL fails to connect and EVERY answer becomes "いま応答
+  # できません". Measured 2026-09-04: 127.0.0.1:8642 -> connection refused,
+  # <LAN_IP>:8642/health -> 200 {"status": "ok", ...}.
+  # `--check` probes this now, so a wrong value fails at startup rather than
+  # on the first message.
+  base_url: http://REPLACE_WITH_THIS_HOST_LAN_IP:8642
+  model: hermes-agent
+  # Measured on this host 2026-09-03 across five representative prompts:
+  # 9.3s / 23.4s / 49.6s / 62.5s / 88.3s, median 49.6s. A reply token lives
+  # 60s, so answers past ~52s fall back to a metered push. Raising the
+  # absolute timeout does not change that — it only decides how long a slow
+  # answer is waited for before the user is told it gave up.
+  soft_timeout_seconds: 45
+  absolute_timeout_seconds: 240
+  poll_interval_seconds: 2
+  session_prefix: gw
+
+limits:
+  # This host has 3.7 GiB of RAM shared with Hermes itself. Two concurrent
+  # runs is a deliberate ceiling, not a placeholder.
+  max_active_requests: 2
+  max_attempts: 3
+  outbound_max_attempts: 3
+  queue_warn_depth: 50
+  response_soft_limit_chars: 4000
+  response_hard_limit_chars: 20000
+
+retention:
+  # Message bodies are cleared after this many days; the rows survive so that
+  # duplicate suppression still recognises a late redelivery. Personal memory
+  # lives in Hermes, not in this pipe.
+  days: 14
+
+secrets:
+  # credential_name is the LoadCredential name in the unit file;
+  # fallback_file is used when the service is run outside systemd.
+  # No value is ever read from this file.
+  line_channel_secret:
+    credential_name: line_channel_secret
+    fallback_file: /etc/hermes-secrets/line-channel-secret
+  line_channel_access_token:
+    credential_name: line_channel_access_token
+    fallback_file: /etc/hermes-secrets/line-channel-access-token
+  discord_interface_token:
+    credential_name: discord_interface_token
+    fallback_file: /etc/hermes-secrets/discord-interface-token
+  hermes_api_key:
+    credential_name: hermes_api_key
+    fallback_file: /etc/hermes-secrets/channel-gateway-hermes-key
