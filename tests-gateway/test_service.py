@@ -251,6 +251,61 @@ class TestRowRoundTrip(GatewayTestCase):
         self.assertEqual(msg.reply_token, "tok-0001")
 
 
+class TestConnectionsStayInTheirThread(GatewayTestCase):
+    """A sqlite3 connection belongs to the thread that opened it.
+
+    The first production start failed on exactly this. The worker opened its
+    connection on the event loop and handed it to `asyncio.to_thread`:
+
+        sqlite3.ProgrammingError: SQLite objects created in a thread can only
+        be used in that same thread
+
+    Nothing here caught it, because every earlier test called the store
+    synchronously on one thread. The result in production was the worst
+    possible shape of failure — the webhook kept accepting messages and
+    answering 200, while every one of them sat in the queue forever, because
+    the worker died on each pass. /healthz returned 500 from the same cause.
+
+    These tests exercise the threaded path, so the next such mistake fails
+    here instead of in the journal.
+    """
+
+    async def test_claim_from_a_thread_does_not_raise(self):
+        row = await self.gw._in_thread(store.claim_next, max_active=2)
+        self.assertIsNone(row)            # empty queue, but no exception
+
+    async def test_queued_message_is_claimable_from_a_thread(self):
+        await self.gw.handle_line_webhook(self.signed([fx.line_text_event()]))
+        row = await self.gw._in_thread(store.claim_next, max_active=2)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["platform_message_id"], "msg-0001")
+
+    async def test_row_survives_the_connection_close(self):
+        """`_in_thread` closes the connection before returning."""
+        await self.gw.handle_line_webhook(self.signed([fx.line_text_event()]))
+        row = await self.gw._in_thread(store.claim_next, max_active=2)
+        msg = gw_service.message_from_row(row)     # reads every column
+        self.assertEqual(msg.text, "こんにちは")
+
+    async def test_health_endpoint_is_200_not_500(self):
+        """The production symptom: /healthz answered 500 from this bug."""
+        resp = await self.gw.handle_health(None)
+        self.assertEqual(resp.status, 200)
+
+    async def test_session_lookup_from_a_thread(self):
+        sid = await self.gw._in_thread(
+            store.session_id_for, "line:U0", "line"
+        )
+        self.assertTrue(sid)
+
+    async def test_housekeeping_from_a_thread(self):
+        recovered, purged = await self.gw._in_thread(
+            self.gw._housekeep, retention_days=14
+        )
+        self.assertEqual(recovered, {"requeued": 0, "failed": 0})
+        self.assertIn("inbound_cleared", purged)
+
+
 class TestHermesReachabilityProbe(unittest.TestCase):
     """`--check` must fail on an unreachable Hermes, not just on missing ids.
 

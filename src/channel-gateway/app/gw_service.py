@@ -189,6 +189,40 @@ class Gateway:
     def db(self):
         return open_db(self.cfg.state_db)
 
+    def _in_thread(self, fn, *args, **kwargs):
+        """Run one store operation on its own connection, in a worker thread.
+
+        A sqlite3 connection belongs to the thread that created it. Opening
+        one on the event loop and then handing it to `asyncio.to_thread`
+        raises
+
+            ProgrammingError: SQLite objects created in a thread can only be
+            used in that same thread
+
+        which is exactly what happened in production on the first worker
+        tick: the webhook kept accepting messages (its connection is opened
+        inside the thread that uses it) while every one of them sat in the
+        queue unprocessed, because the worker died on each pass.
+
+        Opening inside the thread keeps a connection and its only user
+        together, which is a stronger guarantee than `check_same_thread=
+        False` would give — that flag silences the check without making the
+        sharing safe.
+
+        The values returned survive the close: `sqlite3.Row` holds its data,
+        not a cursor.
+        """
+        def _run():
+            con = self.db()
+            try:
+                result = fn(con, *args, **kwargs)
+                con.commit()
+                return result
+            finally:
+                con.close()
+
+        return asyncio.to_thread(_run)
+
     # -- inbound: LINE ------------------------------------------------
 
     async def handle_line_webhook(self, request: web.Request) -> web.Response:
@@ -275,11 +309,7 @@ class Gateway:
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """Local health only. Never routed publicly (sections 16, 22)."""
-        con = self.db()
-        try:
-            snap = await asyncio.to_thread(store.status_snapshot, con)
-        finally:
-            con.close()
+        snap = await self._in_thread(store.status_snapshot)
         return web.json_response({"status": "ok", "component": "channel-gateway",
                                   **snap})
 
@@ -290,14 +320,8 @@ class Gateway:
         while not self.stop.is_set():
             row = None
             try:
-                con = self.db()
-                try:
-                    row = await asyncio.to_thread(
-                        store.claim_next, con, max_active=max_active
-                    )
-                    con.commit()
-                finally:
-                    con.close()
+                row = await self._in_thread(store.claim_next,
+                                            max_active=max_active)
             except Exception:
                 log.exception("worker: claim failed")
 
@@ -329,14 +353,9 @@ class Gateway:
             await self.deliver(row, message, unsupported_input_reply())
             return
 
-        con = self.db()
-        try:
-            session_id = await asyncio.to_thread(
-                store.session_id_for, con, message.conversation_id, message.platform
-            )
-            con.commit()
-        finally:
-            con.close()
+        session_id = await self._in_thread(
+            store.session_id_for, message.conversation_id, message.platform
+        )
 
         envelope = build_envelope(message)
         try:
@@ -538,26 +557,26 @@ class Gateway:
 
     # -- housekeeping -------------------------------------------------
 
+    @staticmethod
+    def _housekeep(con, *, retention_days: int) -> tuple:
+        """Both periodic chores on one connection, inside one thread."""
+        return (store.recover_stale(con),
+                store.purge_expired(con, retention_days=retention_days))
+
     async def maintenance(self):
         while not self.stop.is_set():
             try:
-                con = self.db()
-                try:
-                    recovered = await asyncio.to_thread(store.recover_stale, con)
-                    purged = await asyncio.to_thread(
-                        store.purge_expired, con,
-                        retention_days=int(self.cfg.retention["days"]),
-                    )
-                    con.commit()
-                    # Both helpers return a dict of counters, and a dict of
-                    # zeros is truthy — so test the values, not the dict, or
-                    # the log claims a recovery every five minutes forever.
-                    if any((recovered or {}).values()):
-                        log.warning("recovered stale request(s): %s", recovered)
-                    if any((purged or {}).values()):
-                        log.info("retention purge: %s", purged)
-                finally:
-                    con.close()
+                recovered, purged = await self._in_thread(
+                    self._housekeep,
+                    retention_days=int(self.cfg.retention["days"]),
+                )
+                # Both helpers return a dict of counters, and a dict of zeros
+                # is truthy — so test the values, not the dict, or the log
+                # claims a recovery every five minutes forever.
+                if any((recovered or {}).values()):
+                    log.warning("recovered stale request(s): %s", recovered)
+                if any((purged or {}).values()):
+                    log.info("retention purge: %s", purged)
             except Exception:
                 log.exception("maintenance failed")
             try:
