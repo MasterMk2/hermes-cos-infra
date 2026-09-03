@@ -310,6 +310,22 @@ class TestHermesReachabilityProbe(unittest.TestCase):
             pathlib.Path.is_file = real
         self.assertEqual(rc, 78)               # unreachable hermes still fails
 
+    def test_check_survives_an_unopenable_state_db(self):
+        """state/ is 0750 to the service user; another account cannot open it.
+
+        That is the design, not a fault, and the diagnostic must survive it.
+        """
+        import tempfile as tf
+
+        cfg = parse_config(fx.config_dict(
+            # A directory is not a database: sqlite refuses to open it, which
+            # stands in for the permission denial seen on the host.
+            paths={"state_db": tf.mkdtemp(), "log_dir": tf.mkdtemp()},
+            hermes={"base_url": "http://127.0.0.1:1"},
+        ))
+        rc = gw_service.run_check(cfg)          # must not raise
+        self.assertEqual(rc, 78)
+
     def test_probe_treats_an_http_error_as_reachable(self):
         """A 404 still proves the address is right; only a connection
         failure means the address is wrong."""
@@ -327,6 +343,67 @@ class TestHermesReachabilityProbe(unittest.TestCase):
             gw_service.urllib.request.urlopen = real
         self.assertTrue(ok)
         self.assertIn("404", detail)
+
+
+class TestLoggingDegradesInsteadOfDying(unittest.TestCase):
+    """A diagnostic must not be defeated by the permissions it diagnoses.
+
+    logs/ is 0750 owned by the service user. An operator running `--check`
+    from their own account cannot write there, and an earlier version opened
+    the log file before anything else and exited with a PermissionError —
+    observed on the target host, 2026-09-04.
+    """
+
+    def setUp(self):
+        import logging as _logging
+
+        self._root = _logging.getLogger()
+        self._saved = list(self._root.handlers)
+        self._level = self._root.level
+
+    def tearDown(self):
+        import logging as _logging
+
+        root = _logging.getLogger()
+        for h in list(root.handlers):
+            if h not in self._saved:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+                root.removeHandler(h)
+        root.setLevel(self._level)
+
+    def test_unwritable_log_dir_still_logs_to_stderr(self):
+        import logging as _logging
+        import tempfile as tf
+
+        # A regular file where a directory is expected: mkdir raises OSError,
+        # which is the same class of failure as EACCES on the real host.
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            gw_service.setup_logging(path)          # must not raise
+        finally:
+            os.unlink(path)
+
+        root = _logging.getLogger()
+        stream_handlers = [h for h in root.handlers
+                           if isinstance(h, _logging.StreamHandler)
+                           and not isinstance(h, _logging.FileHandler)]
+        self.assertTrue(stream_handlers, "stderr logging must survive")
+        file_handlers = [h for h in root.handlers
+                         if isinstance(h, _logging.FileHandler)]
+        self.assertFalse(file_handlers, "no file handler should have opened")
+
+    def test_writable_log_dir_gets_a_file_handler(self):
+        import logging as _logging
+        import tempfile as tf
+
+        gw_service.setup_logging(tf.mkdtemp())
+        root = _logging.getLogger()
+        self.assertTrue([h for h in root.handlers
+                         if isinstance(h, _logging.FileHandler)])
 
 
 if __name__ == "__main__":

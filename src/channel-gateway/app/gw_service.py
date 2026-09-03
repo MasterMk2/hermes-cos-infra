@@ -93,27 +93,42 @@ MAINTENANCE_INTERVAL_SECONDS = 300
 
 
 def setup_logging(log_dir: str, level: str = "INFO") -> None:
-    """Rotating file plus stderr for the journal.
+    """stderr always; a rotating file when this account can write one.
 
     Formatter carries no message body by construction — the call sites pass
     ids and categories. Anything that could hold user text belongs in the
     database, which is 0600 and on the same disk as the rest of the data.
+
+    stderr is attached FIRST and the file is optional, because the log
+    directory is 0750 owned by the service user: an operator running
+    `--check` from their own account cannot write it. An earlier version
+    opened the file before anything else and died with a PermissionError, so
+    a diagnostic tool was defeated by the very permissions it exists to
+    diagnose. Losing the file copy costs nothing here — under systemd the
+    journal has every line anyway.
     """
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s %(message)s"
     )
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
-    fh = logging.handlers.RotatingFileHandler(
-        os.path.join(log_dir, "gateway.log"),
-        maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
-    )
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
+
     sh = logging.StreamHandler(sys.stderr)
     sh.setFormatter(fmt)
     root.addHandler(sh)
+
+    try:
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(
+            os.path.join(log_dir, "gateway.log"),
+            maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8",
+        )
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError as exc:
+        root.warning("file logging disabled (%s: %s) — stderr only",
+                     log_dir, type(exc).__name__)
+
     # discord.py logs the token nowhere, but it is chatty at INFO.
     logging.getLogger("discord").setLevel(logging.WARNING)
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
@@ -647,9 +662,25 @@ def run_check(cfg) -> int:
     answer failing at runtime, long after the credentials were set up.
     """
     ok = True
+    as_root = getattr(os, "geteuid", lambda: 1)() == 0
+    log.info("running as  : uid=%s%s",
+             getattr(os, "geteuid", lambda: "?")(), " (root)" if as_root else "")
 
-    open_db(cfg.state_db).close()
-    log.info("state db    : %s", cfg.state_db)
+    # Everything the service owns is 0750 to the service user, so a check run
+    # from another account legitimately cannot touch it. Report that; do not
+    # die of it. The whole point of this command is to explain a deployment,
+    # and it is worthless if the deployment's own permissions kill it.
+    try:
+        open_db(cfg.state_db).close()
+        log.info("state db    : %s (openable)", cfg.state_db)
+    except Exception as exc:
+        log.info("state db    : %s (not openable from this account: %s)",
+                 cfg.state_db, type(exc).__name__)
+        if as_root:
+            log.error("root cannot open the state database — check ownership "
+                      "of %s", os.path.dirname(cfg.state_db))
+            ok = False
+
     log.info("listen      : %s:%s%s", cfg.line["listen_host"],
              cfg.line["listen_port"], cfg.line["webhook_path"])
 
@@ -679,7 +710,6 @@ def run_check(cfg) -> int:
     if cfg.discord.get("enabled"):
         needed += ["discord_interface_token"]
 
-    as_root = getattr(os, "geteuid", lambda: 1)() == 0
     unverified = 0
     for name in needed:
         status, where = secret_status(cfg, name)
