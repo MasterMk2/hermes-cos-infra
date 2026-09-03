@@ -207,10 +207,70 @@ Gateway は Hermes の `.env` を読めない。`ProtectSystem=strict` は読み
    → 「インターネットから到達可能でないこと」という本来の性質で書き直し
    （`is_global` を拒否、ワイルドカード `0.0.0.0` も拒否）。
 
+6. **`hermes.base_url` が実機と食い違っていた。**
+   Hermes は Docker の publish 指定により LAN アドレスにしかバインドされて
+   おらず、サンプルの `127.0.0.1` では**全リクエストが接続失敗**する。
+   E2E まで気づけず、「いま応答できません」だけが延々返る状態だった。
+
+   ```
+   LISTEN  <PI_LAN_IP>:8642        (0.0.0.0 でも 127.0.0.1 でもない)
+   127.0.0.1:8642/health      -> URLError: Connection refused
+   <PI_LAN_IP>:8642/health  -> 200 {"status": "ok", ...}
+   ```
+
+   値を直すだけでは同じことが繰り返されるので、**`--check` に到達性検査を
+   追加**した。サンプルはパーサが拒否するプレースホルダを持たせ、
+   「もっともらしい既定値」を継承できないようにした。
+
+## 9.1 権限境界がクラッシュになっていた 2 件
+
+どちらも「実機で `--check` を実際に叩いたから」見つかった。
+テストでは出ない。**設計どおりに権限が働いた結果**がトレースバックだった。
+
+```
+PermissionError: [Errno 13] Permission denied:
+  '/etc/hermes-secrets/channel-gateway-hermes-key'      ← 1 件目
+  '/srv/hermes/channel-gateway/logs/gateway.log'        ← 2 件目
+```
+
+**1 件目**: `/etc/hermes-secrets` は 0700 root:root。サービスユーザーが
+読めないのが正しい（systemd が root として読み、専用コピーを渡す）。
+ところが Python 3.13 の `Path.is_file()` は `PermissionError` を握りつぶさず
+伝播する。
+
+→ `probe_secret()` が全てのファイル操作を包み、
+`readable` / `present-but-unreadable` / `missing` を返す。
+**後ろ 2 つは意味が正反対**なので区別する — `missing` は障害、
+`unreadable` は手動実行時の正常な境界。
+閉じたディレクトリでは存在しない名前も EACCES を返すため、
+非 root では両者を**原理的に判別できない**。そう明記して root での
+再実行を促す。
+
+**2 件目**: `logs/` は 0750 サービスユーザー所有。`setup_logging` が
+stderr より先にログファイルを開いていたため、**診断ツールがログを
+書けないという理由で死んだ**。
+
+→ stderr を先に、常に接続。ファイルは失敗したら 1 行警告して継続。
+systemd 下では journal に全行残るので損失はない。
+`run_check` の DB オープンも同様に包み、非 root では報告のみ、
+root で開けない場合だけ本物の障害として扱う。
+
+**この 2 件が示す一般則**:
+権限境界が正しく働いた結果がトレースバックになってはいけない。
+診断ツールが、診断対象の権限に負けたら意味がない。
+
+実測（3 アカウントから `--check`、いずれも Traceback 0）:
+
+| 実行者 | state db | 資格情報 |
+|---|---|---|
+| root | openable | `readable` / `missing` を判定できる |
+| channelgateway | openable | `present-but-unreadable` |
+| 一般ユーザー | not openable（報告のみ） | `present-but-unreadable` |
+
 ## 10. テスト
 
 ```
-tests-gateway/  142 tests
+tests-gateway/  157 tests
   test_line_webhook.py   署名・イベント・正規化・UTF-16 長
   test_authority.py      owner 許可リスト・封筒の偽造不能性・リクエスト検疫
   test_store.py          重複排除・順序・並行度・クラッシュ回収・保持期間
