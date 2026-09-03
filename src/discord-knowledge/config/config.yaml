@@ -1,0 +1,129 @@
+# ============================================================================
+# Discord Knowledge Collector - configuration
+#
+#   THIS FILE MUST NEVER CONTAIN THE BOT TOKEN.
+#
+# The token is delivered at runtime only: systemd LoadCredential puts it in
+# $CREDENTIALS_DIRECTORY, with the root-owned 0400 file
+# /etc/hermes-secrets/discord-knowledge-token as the fallback. The loader
+# (app/dk_config.py) hard-fails if it finds a key named token / bot_token /
+# value under `secret:`, so a pasted token here does not start the service -
+# it breaks it. There is also no token command-line flag: argv is world
+# readable through /proc.
+#
+# This file is readable by the operator and by the service account. Treat it
+# as public within the host.
+#
+# Default deny: nothing is collected until a guild id is filled in, that guild
+# is enabled, AND its channel ids are listed. As shipped, the collector runs in
+# a degraded, non-ingesting state. It never falls back to "collect everything".
+#
+# How to get the ids below:
+#   Discord -> User Settings -> Advanced -> Developer Mode = ON
+#   Right-click a server icon -> Copy Server ID   (that is guild_id)
+#   Right-click a channel      -> Copy Channel ID (that is a channels entry)
+#   Right-click your own name  -> Copy User ID    (that is owner.discord_user_id)
+#
+# IDS ARE STRINGS, NOT NUMBERS. Always keep them in quotes. A Discord
+# snowflake is 17-19 digits; unquoted YAML turns it into an integer and a
+# leading zero would silently change the value.
+#
+# After editing:  sudo systemctl restart discord-knowledge
+#                 journalctl -u discord-knowledge -n 50
+# ============================================================================
+
+version: 1
+
+owner:
+  # Your own Discord user id. Used to attribute your messages; optional.
+  # Leave the placeholder exactly as written until you fill it in - any other
+  # non-numeric value is a configuration error.
+  discord_user_id: "REPLACE_WITH_OWNER_DISCORD_USER_ID"
+
+paths:
+  # Canonical source database. Written by the collector only, never mounted
+  # into the Hermes container.
+  source_db: /srv/hermes/knowledge/discord/messages.db
+  # Search index. Written by the INDEXER, read-only from the Hermes container.
+  # The collector's systemd unit cannot write here on purpose.
+  index_db: /srv/hermes/hermes-data/knowledge-index/discord/index.db
+  # Backfill cursors and runtime state.
+  state_dir: /srv/hermes/discord-knowledge/state
+  # Application logs (the journal is the primary log; this is the app's own).
+  log_dir: /srv/hermes/discord-knowledge/logs
+
+secret:
+  # Name of the systemd credential - must match LoadCredential= in the unit.
+  credential_name: discord-knowledge-token
+  # Used only when the process runs outside systemd (manual debugging as
+  # root). Root-owned, 0400. Never world readable, never in git.
+  fallback_file: /etc/hermes-secrets/discord-knowledge-token
+
+# ----------------------------------------------------------------------------
+# Allowlist. At most 2 guilds - more is rejected as a configuration error.
+#
+# A guild collects only when BOTH hold:
+#   enabled: true      AND      channels: [] is non-empty
+# Leaving enabled: false, or leaving channels empty, means NOTHING from that
+# guild is collected - not "everything", nothing.
+#
+# The placeholder guild_id below is tolerated ONLY while enabled is false; it
+# is there to show you where the id goes. Setting enabled: true without
+# replacing the id makes the collector refuse to start. Replace the id first,
+# then flip enabled.
+# ----------------------------------------------------------------------------
+guilds:
+  - guild_id: "REPLACE_WITH_GUILD_ID_1"
+    label: "guild-1 (rename me)"
+    enabled: false
+    # Right-click each channel -> Copy Channel ID. Quoted strings, one per line:
+    #   - "123456789012345678"
+    channels: []
+    # Threads under an allowed channel inherit that channel's allowance.
+    include_threads: true
+
+  - guild_id: "REPLACE_WITH_GUILD_ID_2"
+    label: "guild-2 (rename me)"
+    enabled: false
+    channels: []
+    include_threads: true
+
+# ----------------------------------------------------------------------------
+# Historical backfill, run once per allowed channel and then resumed from the
+# stored cursor. Bounded so a first run cannot page through years of history.
+# ----------------------------------------------------------------------------
+backfill:
+  enabled: true
+  # How far back to reach, in days.
+  days: 14
+  # Hard ceiling per channel, regardless of days.
+  max_messages_per_channel: 2000
+  # Discord API maximum is 100; larger is rejected.
+  page_size: 100
+  # Pages per process run - keeps one restart from hammering the API.
+  max_pages_per_run: 20
+
+# ----------------------------------------------------------------------------
+# Truncation limits. All are positive integers; oversized content is cut, not
+# dropped. Raise only with a reason - these bound the database growth.
+# ----------------------------------------------------------------------------
+limits:
+  content_max_chars: 8000
+  embed_title_max_chars: 300
+  embed_description_max_chars: 1000
+  embed_field_max_chars: 300
+  embed_field_max_count: 10
+  embed_max_count: 5
+  attachment_max_count: 10
+  # Depth at which the pending index queue starts logging a warning.
+  queue_warn_depth: 5000
+
+# ----------------------------------------------------------------------------
+# Event extraction from collected messages.
+# ----------------------------------------------------------------------------
+events:
+  enabled: true
+  window_days: 14
+  # Bot-authored messages are ignored unless the bot's user id is listed here
+  # (quoted strings). Empty means: no bot messages become events.
+  bot_author_allowlist: []

@@ -1,0 +1,12 @@
+# Discord Knowledge Collector - pinned runtime dependencies.
+#
+# discord.py 2.7.1 was verified importable on CPython 3.13.5 / aarch64, which
+# is the Pi's system interpreter (Debian 13 trixie). It ships as a pure-python
+# wheel (discord_py-2.7.1-py3-none-any.whl); its only runtime dependencies are
+# aiohttp<4,>=3.7.4 and, on Python >= 3.13, audioop-lts. Both publish prebuilt
+# cp313 manylinux aarch64 wheels, so building the venv needs no compiler.
+#
+# The voice extra (discord.py[voice]) is deliberately NOT installed: it adds
+# PyNaCl and davey for audio this collector never touches.
+discord.py==2.7.1
+PyYAML==6.0.2

@@ -1,0 +1,90 @@
+[Unit]
+Description=Discord Knowledge Collector (Gateway client, outbound only)
+After=network-online.target
+Wants=network-online.target
+# /srv/hermes is the USB disk. Without this the unit can win the boot race
+# against the mount and start against an empty directory on the SD card,
+# creating a second, invisible database that nothing ever reads back.
+RequiresMountsFor=/srv/hermes
+# Crash-loop bound. A bad token or a revoked bot fails on every start; without
+# a limit that is a tight IDENTIFY loop against Discord, which is how a bot
+# earns a rate limit or a ban. 5 starts per 300s, then systemd stops trying
+# until `systemctl reset-failed discord-knowledge`.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=discordknowledge
+Group=discordknowledge
+WorkingDirectory=/srv/hermes/discord-knowledge
+
+# The whole point of the secret design: systemd reads the root-owned 0400 file
+# as root and drops a copy into $CREDENTIALS_DIRECTORY (unit-scoped tmpfs,
+# 0400, gone when the unit stops). The service user can never read
+# /etc/hermes-secrets itself, and the token is in no environment variable.
+LoadCredential=discord-knowledge-token:/etc/hermes-secrets/discord-knowledge-token
+
+# No token on the command line, ever: /proc/<pid>/cmdline is world readable.
+ExecStart=/srv/hermes/discord-knowledge/venv/bin/python -u /srv/hermes/discord-knowledge/app/collector.py --config /srv/hermes/discord-knowledge/config/config.yaml
+
+Restart=on-failure
+RestartSec=15
+# Exit 78 (EX_CONFIG) means "a restart cannot fix this": invalid bot token,
+# MESSAGE_CONTENT privileged intent not enabled in the Developer Portal, or an
+# empty/placeholder guild allowlist. Retrying those just re-IDENTIFYs at
+# Discord in a loop. Stop and wait for the operator instead; the unit lands in
+# failed state with status 78, which is the signal, not a crash. Ordinary
+# faults (network drop, transient HTTP error) use other codes and still
+# restart.
+RestartPreventExitStatus=78
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=discord-knowledge
+
+# --- Hardening ------------------------------------------------------------
+# Everything below is compatible with a CPython + aiohttp websocket client:
+# outbound TCP/TLS, DNS, and file writes under ReadWritePaths only.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# Outbound sockets + local unix sockets only. No AF_PACKET, no AF_NETLINK.
+# Measured on this host under exactly these three families (systemd-run with
+# the same RestrictAddressFamilies + SystemCallFilter): getaddrinfo resolved
+# gateway.discord.gg and a TLSv1.3 handshake to discord.com succeeded, so
+# glibc's netlink interface probe degrades cleanly and AF_NETLINK is not
+# needed. It is the first family to add if DNS ever fails with EAFNOSUPPORT.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# A network client needs no capabilities at all.
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0007
+MemoryMax=400M
+TasksMax=64
+
+# ProtectSystem=strict makes the whole filesystem read-only, so name exactly
+# the three paths the collector writes: the source DB, its backfill cursors,
+# and its logs. app/ and venv/ are deliberately absent - the service must not
+# be able to rewrite its own code. /srv/hermes/hermes-data is absent too: the
+# search index is written by the indexer, not by the collector.
+ReadWritePaths=/srv/hermes/knowledge/discord /srv/hermes/discord-knowledge/state /srv/hermes/discord-knowledge/logs
+
+[Install]
+WantedBy=multi-user.target

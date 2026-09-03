@@ -77,6 +77,8 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 | 7 | [docs/07-phase-f11pi2-hardening.md](docs/07-phase-f11pi2-hardening.md) | Supervisor Hardening Gate (H1-H5 / M1-M8 / 回帰83tests) |
 | 8 | [docs/08-phase-f2-independent-review.md](docs/08-phase-f2-independent-review.md) | Independent Reviewer (Muse) / fix loop / exact-revision completion gate |
 | - | [docs/F2-FINAL-REPORT.md](docs/F2-FINAL-REPORT.md) | F.2 実測レポート (real fix loop / 隔離実測 / usage / 回帰) |
+| 9 | [docs/09-phase-d1-discord-knowledge.md](docs/09-phase-d1-discord-knowledge.md) | Discord read-only Knowledge (collector / 増分index / discord_* MCP / Event統合) |
+| - | [docs/D1-STATUS-REPORT.md](docs/D1-STATUS-REPORT.md) | D.1 実測レポート (実Discord E2E / 敵対的監査 / 除外判断の根拠) |
 | - | [docs/lessons-learned.md](docs/lessons-learned.md) | 実測で見つかった落とし穴と修正 |
 
 ## Code Snapshot (`src/`)
@@ -107,9 +109,16 @@ src/
 ├── reviewer-hermes/            Reviewer専用Hermes config (ro mount 元)
 ├── security_patterns.py        canonical secret patterns (単一ソース)
 ├── bin/ + worker/              fixture agent, reviewer runner, watchdog, worker設定
+├── discord-knowledge/          Phase D.1 — Discord read-only Knowledge
+│   ├── app/                    collector / normalize / store / backfill / indexer
+│   ├── mcp/discord_mcp.py      discord_search / discord_get / discord_status
+│   ├── events/                 discord_event_extract.py (既存Event Layerへ接続)
+│   ├── systemd/ + install-root.sh + bin/   専用user・LoadCredential・配備
+│   └── config/config.yaml      allowlist (default deny)。tokenは絶対に置かない
 └── docker-compose.hermes.yaml  実機 deploy 対象 (digest pin)
 
-tests/                          回帰テスト (repo root、src/ の外。unittest 129 tests)
+tests/                          F.2 回帰テスト (repo root、src/ の外。unittest 129 tests)
+tests-discord/                  D.1 テスト (host 94 + Hermes container 32 = 126)
 docs/                           フェーズ文書 + 実測レポート
 ```
 
@@ -125,6 +134,13 @@ docs/                           フェーズ文書 + 実測レポート
   deterministic 検証** を通らない限り `COMPLETED` にならない
 - 回帰テスト: 129 tests OK
   (F.1.1 hardening 83 + F.2 review 25 + F.2 binding/scope/cost/surface 21)
+- D.1 Discord Knowledge Ingestion: **本番稼働中**。3 Guild / 116 channel から
+  1,685件を取り込み、`discord_search`・`discord_get`・`discord_status` で
+  Hermesから検索可能。Event Layerへ `source_type=discord` で合流し、
+  actor判定は66/66一致。Bot TokenはHermesに渡さず、送信toolが存在しない。
+  テスト126 + 実データ不変条件23/23 PASS。配備後に6レンズの敵対的監査を行い、
+  forum履歴が無言で欠落する欠陥など6件を修正
+  (詳細: [docs/D1-STATUS-REPORT.md](docs/D1-STATUS-REPORT.md))
 - Real Fix Loop 実測済み (Pi実機・両roleとも実APIコール):
   GLM実装 → deterministic acceptance → **Muse が CHANGES_REQUIRED (blocking 4)**
   → GLM が実際にコードを修正 (content binding が移動) → fresh Muse review
