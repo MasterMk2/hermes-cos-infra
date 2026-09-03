@@ -13,11 +13,15 @@ import unittest
 
 import gw_fixtures as fx
 from gw_config import (
+    SECRET_MISSING,
     SECRET_NAMES,
+    SECRET_UNREADABLE,
     Config,
     ConfigError,
     load_secret,
     parse_config,
+    probe_secret,
+    secret_status,
 )
 
 
@@ -204,6 +208,85 @@ class TestSecretLoading(unittest.TestCase):
         cfg = parse_config(fx.config_dict())
         with self.assertRaises(ConfigError):
             load_secret(cfg, "not_a_secret")
+
+
+class TestSecretPermissionHandling(unittest.TestCase):
+    """A credential directory closed to this user must not crash the process.
+
+    `/etc/hermes-secrets` is 0700 root:root by design — the service user is
+    supposed to be unable to read it, because systemd hands the service its
+    own copies. Python 3.13's `Path.is_file()` propagates the resulting
+    PermissionError rather than returning False, which turned the intended
+    clean configuration error into a traceback out of `--check`. Observed on
+    the target host, 2026-09-04.
+    """
+
+    @staticmethod
+    def _with_eacces(fn):
+        import pathlib
+
+        real = pathlib.Path.is_file
+
+        def boom(self, *a, **k):
+            raise PermissionError(13, "Permission denied")
+
+        pathlib.Path.is_file = boom
+        try:
+            return fn()
+        finally:
+            pathlib.Path.is_file = real
+
+    def setUp(self):
+        os.environ.pop("CREDENTIALS_DIRECTORY", None)
+
+    def test_probe_returns_unreadable_instead_of_raising(self):
+        from pathlib import Path
+
+        status, value = self._with_eacces(
+            lambda: probe_secret(Path("/etc/hermes-secrets/whatever"))
+        )
+        self.assertEqual(status, SECRET_UNREADABLE)
+        self.assertIsNone(value)
+
+    def test_load_secret_raises_config_error_not_permission_error(self):
+        cfg = parse_config(fx.config_dict())
+        with self.assertRaises(ConfigError):
+            self._with_eacces(lambda: load_secret(cfg, "hermes_api_key"))
+
+    def test_load_secret_optional_returns_none(self):
+        cfg = parse_config(fx.config_dict())
+        self.assertIsNone(
+            self._with_eacces(
+                lambda: load_secret(cfg, "hermes_api_key", required=False)
+            )
+        )
+
+    def test_status_reports_unreadable(self):
+        cfg = parse_config(fx.config_dict())
+        status, _where = self._with_eacces(
+            lambda: secret_status(cfg, "hermes_api_key")
+        )
+        self.assertEqual(status, SECRET_UNREADABLE)
+
+    def test_absent_file_is_missing_not_unreadable(self):
+        """The two must stay distinguishable: one is a fault, one is expected."""
+        cfg = parse_config(fx.config_dict(
+            secrets={"hermes_api_key": {"fallback_file": "/nonexistent/dir/key"}}
+        ))
+        status, _where = secret_status(cfg, "hermes_api_key")
+        self.assertEqual(status, SECRET_MISSING)
+
+    def test_readable_file_is_readable(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "key")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("a-value\n")
+            cfg = parse_config(fx.config_dict(
+                secrets={"hermes_api_key": {"fallback_file": path}}
+            ))
+            status, _where = secret_status(cfg, "hermes_api_key")
+            self.assertEqual(status, "readable")
+            self.assertEqual(load_secret(cfg, "hermes_api_key"), "a-value")
 
 
 class TestConfigCarriesNoSecret(unittest.TestCase):

@@ -287,6 +287,29 @@ class TestHermesReachabilityProbe(unittest.TestCase):
         ))
         self.assertEqual(gw_service.run_check(cfg), 78)
 
+    def test_check_survives_an_unreadable_credential_directory(self):
+        """The regression this covers produced a traceback, not a verdict.
+
+        Running `--check` as the service user is the documented way to test a
+        deployment, and that user cannot read /etc/hermes-secrets by design.
+        """
+        import pathlib
+
+        real = pathlib.Path.is_file
+
+        def boom(self, *a, **k):
+            if "hermes-secrets" in str(self):
+                raise PermissionError(13, "Permission denied")
+            return real(self)
+
+        cfg = self._cfg("http://127.0.0.1:1")
+        pathlib.Path.is_file = boom
+        try:
+            rc = gw_service.run_check(cfg)      # must not raise
+        finally:
+            pathlib.Path.is_file = real
+        self.assertEqual(rc, 78)               # unreachable hermes still fails
+
     def test_probe_treats_an_http_error_as_reachable(self):
         """A 404 still proves the address is right; only a connection
         failure means the address is wrong."""

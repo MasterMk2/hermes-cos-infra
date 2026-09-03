@@ -53,7 +53,14 @@ from gw_canonical import (
     CanonicalMessage,
     build_envelope,
 )
-from gw_config import ConfigError, load_config, load_secret
+from gw_config import (
+    SECRET_MISSING,
+    SECRET_UNREADABLE,
+    ConfigError,
+    load_config,
+    load_secret,
+    secret_status,
+)
 from gw_format import prepare_outbound, user_facing_error
 from gw_hermes import HermesClient, HermesRejected, HermesUnavailable
 from gw_line import (
@@ -661,16 +668,48 @@ def run_check(cfg) -> int:
                   "in %s", cfg.path)
         ok = False
 
-    try:
-        secrets = load_all_secrets(cfg)
-        # Names only. Printing a length would still say something about a
-        # credential, and printing a value would be the credential.
-        log.info("credentials : %s", sorted(secrets))
-    except ConfigError as exc:
-        log.error("credential unavailable: %s", exc)
-        ok = False
+    # Presence only — never a value, never a length. `/etc/hermes-secrets` is
+    # 0700 root:root by design, so a non-root check genuinely CANNOT tell a
+    # missing file from an unreadable one: every name in a closed directory
+    # answers EACCES. Say that plainly instead of guessing, and say which
+    # account would be able to tell.
+    needed = ["hermes_api_key"]
+    if cfg.line.get("enabled"):
+        needed += ["line_channel_secret", "line_channel_access_token"]
+    if cfg.discord.get("enabled"):
+        needed += ["discord_interface_token"]
 
-    log.info("result      : %s", "would start" if ok else "would NOT start")
+    as_root = getattr(os, "geteuid", lambda: 1)() == 0
+    unverified = 0
+    for name in needed:
+        status, where = secret_status(cfg, name)
+        log.info("credential  : %-26s %-22s %s", name, status, where)
+        if status == SECRET_MISSING:
+            log.error("credential %s is missing; install it before starting", name)
+            ok = False
+        elif status == SECRET_UNREADABLE:
+            if as_root:
+                # Root cannot read it either: that is a real permissions fault,
+                # not the expected privilege boundary.
+                log.error("credential %s exists but is unreadable even as root",
+                          name)
+                ok = False
+            else:
+                unverified += 1
+
+    if unverified:
+        log.warning(
+            "%d credential(s) could not be checked from this account — "
+            "/etc/hermes-secrets is root-only by design, and systemd hands the "
+            "service its own copies at start. Re-run this check as root to "
+            "verify they are installed.", unverified,
+        )
+
+    if ok and unverified:
+        log.info("result      : would start, but %d credential(s) unverified "
+                 "from here", unverified)
+    else:
+        log.info("result      : %s", "would start" if ok else "would NOT start")
     return 0 if ok else EXIT_CONFIG
 
 

@@ -312,6 +312,54 @@ def load_config(path=None) -> Config:
     return parse_config(yaml.safe_load(text) or {}, path=str(p))
 
 
+#: What `probe_secret` can conclude about one credential file.
+SECRET_READABLE = "readable"
+SECRET_UNREADABLE = "present-but-unreadable"
+SECRET_MISSING = "missing"
+
+
+def probe_secret(path: Path) -> tuple:
+    """(status, value_or_None) for one candidate file.
+
+    Every filesystem call here is wrapped, because the interesting case is
+    the one that used to crash: `/etc/hermes-secrets` is 0700 root:root by
+    design, so a non-root reader gets EACCES from `stat` rather than a
+    negative answer — and Python 3.13's `Path.is_file()` propagates that
+    instead of returning False. The result was a traceback out of `--check`
+    where a clean configuration error was intended.
+
+    "present but unreadable" is kept distinct from "missing" on purpose. Under
+    systemd the service never reads these paths at all — it reads the copies
+    systemd places in $CREDENTIALS_DIRECTORY — so an operator running a check
+    by hand SHOULD find them unreadable, and that is not a fault.
+    """
+    try:
+        if path.is_file():
+            try:
+                return SECRET_READABLE, path.read_text(encoding="utf-8").strip()
+            except OSError:
+                return SECRET_UNREADABLE, None
+        return SECRET_MISSING, None
+    except PermissionError:
+        # Cannot even stat it: the directory above is closed to this user.
+        # Whether the file exists is unknowable from here.
+        return SECRET_UNREADABLE, None
+    except OSError:
+        return SECRET_MISSING, None
+
+
+def secret_status(cfg: Config, name: str) -> tuple:
+    """(status, where) for a credential, without returning its value."""
+    ref = cfg.secrets[name]
+    creds = os.environ.get("CREDENTIALS_DIRECTORY")
+    if creds:
+        status, _ = probe_secret(Path(creds) / ref.credential_name)
+        if status == SECRET_READABLE:
+            return status, "systemd credential"
+    status, _ = probe_secret(Path(ref.fallback_file))
+    return status, ref.fallback_file
+
+
 def load_secret(cfg: Config, name: str, *, required: bool = True) -> str | None:
     """systemd credential first, root-owned file second.
 
@@ -323,20 +371,23 @@ def load_secret(cfg: Config, name: str, *, required: bool = True) -> str | None:
         raise ConfigError(f"unknown secret {name}")
     ref = cfg.secrets[name]
     tried = []
+
     creds = os.environ.get("CREDENTIALS_DIRECTORY")
     if creds:
         cand = Path(creds) / ref.credential_name
-        tried.append(str(cand))
-        if cand.is_file():
-            value = cand.read_text(encoding="utf-8").strip()
-            if value:
-                return value
-    fb = Path(ref.fallback_file)
-    tried.append(str(fb))
-    if fb.is_file():
-        value = fb.read_text(encoding="utf-8").strip()
-        if value and not value.startswith("REPLACE_"):
+        status, value = probe_secret(cand)
+        tried.append(f"{cand} ({status})")
+        if status == SECRET_READABLE and value:
             return value
+
+    fb = Path(ref.fallback_file)
+    status, value = probe_secret(fb)
+    tried.append(f"{fb} ({status})")
+    if status == SECRET_READABLE and value and not value.startswith("REPLACE_"):
+        return value
+
     if required:
-        raise ConfigError(f"secret {name} not available; looked at: {', '.join(tried)}")
+        raise ConfigError(
+            f"secret {name} not available; looked at: {', '.join(tried)}"
+        )
     return None
