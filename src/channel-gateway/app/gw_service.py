@@ -388,12 +388,21 @@ class Gateway:
     async def deliver(self, row, message: CanonicalMessage, text: str,
                       run_id=None):
         if message.platform == PLATFORM_LINE:
-            ok, detail = await self.deliver_line(row, message, text)
+            ok, detail, mode = await self.deliver_line(row, message, text)
         else:
-            ok, detail = await self.deliver_discord(row, message, text)
-        await asyncio.to_thread(self._settle, row, ok, detail, run_id)
+            ok, detail, mode = await self.deliver_discord(row, message, text)
 
-    def _settle(self, row, ok: bool, detail, run_id):
+        # Whether the answer actually reached the owner is the single most
+        # important fact this service produces, and it was missing from the
+        # journal entirely: the first real message showed only "processing"
+        # and nothing about its fate. Log the outcome, the mode (reply is
+        # free, push is metered) and the size — never the text.
+        log.info("delivered %s platform=%s mode=%s ok=%s detail=%s chars=%d",
+                 row["gateway_request_id"], message.platform, mode or "-",
+                 ok, detail, len(text or ""))
+        await asyncio.to_thread(self._settle, row, ok, detail, run_id, mode)
+
+    def _settle(self, row, ok: bool, detail, run_id, mode=""):
         con = self.db()
         try:
             store.set_state(con, row["gateway_request_id"],
@@ -402,8 +411,14 @@ class Gateway:
             store.release_conversation(con, row["conversation_id"])
             store.audit(con, "responded" if ok else "response_failed",
                         request_id=row["gateway_request_id"],
-                        platform=row["platform"], detail=str(detail or "")[:100])
+                        platform=row["platform"],
+                        detail=f"{mode}:{detail}"[:100] if mode
+                        else str(detail or "")[:100])
             store.bump(con, "responded" if ok else "failed")
+            # A metered push is worth its own counter: the free plan allows
+            # 200 a month and `gw_status` reads this to show the month's use.
+            if ok and mode == "push":
+                store.bump(con, "line_push")
             con.commit()
         finally:
             con.close()
@@ -413,7 +428,7 @@ class Gateway:
 
     async def deliver_line(self, row, message: CanonicalMessage, text: str):
         if self.line is None:
-            return False, "line_not_configured"
+            return False, "line_not_configured", ""
 
         chunks = prepare_outbound(
             text,
@@ -424,7 +439,7 @@ class Gateway:
             hard_limit=int(self.cfg.limits["response_hard_limit_chars"]),
         )
         if not chunks:
-            return False, "empty_answer"
+            return False, "empty_answer", ""
 
         # One row per chunk for the durable record, but ONE API call for all
         # of them: LINE accepts up to five message objects per request, and a
@@ -452,7 +467,7 @@ class Gateway:
             # A previous attempt got all the way through; sending again would
             # duplicate the answer and spend quota.
             log.info("line: already delivered %s", row["gateway_request_id"])
-            return True, "already_delivered"
+            return True, "already_delivered", "none"
 
         messages = build_text_messages(chunks)
         mode = choose_delivery_mode(message)
@@ -478,7 +493,7 @@ class Gateway:
 
         await self._record_attempt(reserved[0], result.mode, result)
         await asyncio.to_thread(self._mark_chunks, reserved, result)
-        return result.ok, result.category
+        return result.ok, result.category, result.mode
 
     def _mark_chunks(self, outbound_ids, result):
         con = self.db()
@@ -509,11 +524,11 @@ class Gateway:
 
     async def deliver_discord(self, row, message: CanonicalMessage, text: str):
         if self.discord_bot is None:
-            return False, "discord_not_configured"
+            return False, "discord_not_configured", ""
 
         chunks = self.discord_bot.prepare(text)
         if not chunks:
-            return False, "empty_answer"
+            return False, "empty_answer", ""
 
         channel_id = str(row["conversation_id"]).split(":", 1)[1]
         con = self.db()
@@ -535,7 +550,7 @@ class Gateway:
             con.close()
 
         if already:
-            return True, "already_delivered"
+            return True, "already_delivered", "none"
 
         sent, error = await self.discord_bot.send_chunks(channel_id, chunks)
 
@@ -553,7 +568,7 @@ class Gateway:
             finally:
                 con.close()
         await asyncio.to_thread(_write)
-        return (error is None and sent == len(chunks)), error or "ok"
+        return (error is None and sent == len(chunks)), error or "ok", "dm"
 
     # -- housekeeping -------------------------------------------------
 

@@ -13,6 +13,8 @@ end-to-end run:
     on LINE it would spend metered quota on a stranger.
 """
 
+import contextlib
+import io
 import os
 import sqlite3
 import tempfile
@@ -21,6 +23,7 @@ import unittest
 import gw_fixtures as fx
 import gw_service
 import gw_store as store
+from gw_canonical import canonical_from_line
 from gw_config import parse_config
 from gw_line import SIGNATURE_HEADER, compute_signature
 from gw_schema import open_db
@@ -398,6 +401,72 @@ class TestHermesReachabilityProbe(unittest.TestCase):
             gw_service.urllib.request.urlopen = real
         self.assertTrue(ok)
         self.assertIn("404", detail)
+
+
+class TestStatusToolExplainsItself(unittest.TestCase):
+    """A status tool that cannot read must say so, not print empty tables.
+
+    The shell version shelled out to `sqlite3`, which is not installed on the
+    target host. Every section came back blank and nothing said why — the
+    operator's view of a running gateway was silently, plausibly wrong.
+    """
+
+    def test_missing_database_is_reported_and_nonzero(self):
+        import gw_status
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = gw_status.main(["--db", "/nonexistent/dir/gateway.db"])
+        self.assertEqual(rc, 1)
+        self.assertIn("ありません", buf.getvalue())
+
+    def test_connect_explains_who_can_read(self):
+        import gw_status
+
+        con, err = gw_status.connect("/nonexistent/dir/gateway.db")
+        self.assertIsNone(con)
+        self.assertTrue(err)
+
+    def test_readable_database_reports_zero_and_succeeds(self):
+        import tempfile as tf
+
+        import gw_status
+        from gw_schema import open_db
+
+        path = os.path.join(tf.mkdtemp(), "g.db")
+        open_db(path).close()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = gw_status.main(["--db", path])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("受信キュー", out)
+        # An empty gateway says so explicitly rather than printing nothing.
+        self.assertIn("(なし)", out)
+
+    def test_status_never_prints_message_text(self):
+        """The tool reports states and counts, never what anyone said."""
+        import tempfile as tf
+
+        import gw_status
+        from gw_schema import open_db
+
+        path = os.path.join(tf.mkdtemp(), "g.db")
+        con = open_db(path)
+        secret_text = "SENTINEL-PRIVATE-MESSAGE-9f3a"
+        msg = canonical_from_line(
+            fx.line_text_event(text=secret_text),
+            owner_line_user_id=fx.OWNER_LINE,
+        )
+        rid, _ = store.record_inbound(con, msg)
+        store.enqueue(con, rid)
+        con.commit()
+        con.close()
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            gw_status.main(["--db", path])
+        self.assertNotIn(secret_text, buf.getvalue())
 
 
 class TestLoggingDegradesInsteadOfDying(unittest.TestCase):
