@@ -323,12 +323,14 @@ commit して閉じる。接続がスレッド境界を越える箇所はゼロ�
 ## 10. テスト
 
 ```
-tests-gateway/  157 tests
+tests-gateway/  181 tests
   test_line_webhook.py   署名・イベント・正規化・UTF-16 長
   test_authority.py      owner 許可リスト・封筒の偽造不能性・リクエスト検疫
   test_store.py          重複排除・順序・並行度・クラッシュ回収・保持期間
   test_delivery.py       reply/push 判定・再送キー・分割・マスク
   test_config.py         bind 先・資格情報の拒否・到達範囲
+  test_discord.py        Interface Bot アダプタ（DM 受理・ギルド無視・
+                         ボット無視・非 owner・空本文・分割/マスク）
   test_service.py        Webhook ハンドラ（署名ゲート・サイズ制限・
                          非 owner の黙殺・DB 障害時の 500・行からの復元）
 ```
@@ -344,12 +346,53 @@ PYTHONPATH="src/channel-gateway/app:tests-gateway" \
   python3 -m unittest discover -s tests-gateway -p "test_*.py"
 ```
 
-## 11. まだ検証していないこと
+## 11. 実機での検証結果 (2026-09-04)
 
-資格情報が無いと確認できないものは、実物を入れてから行う。
+実際の LINE 公式アカウントと Discord Interface Bot で往復を確認した。
 
-- 実際の LINE 公式アカウントからの往復
-- 実際の Discord Interface Bot の DM 往復（DM 本文が intents 4096 で
-  実際に届くこと。ドキュメント上は届くが、**まだ実測していない**）
-- reply → push フォールバックの実発火
-- 非 owner からの着信が黙って捨てられること
+```
+受信  discord  RESPONDED  1      送信  discord  dm    SENT  1
+      line     RESPONDED  2            line     push  SENT  2
+エラー: なし
+```
+
+| 項目 | 結果 |
+|---|---|
+| LINE 往復 | ✓ webhook → 署名検証 → キュー → Hermes → 配信(HTTP 200) → 監査 |
+| Discord DM 往復 | ✓ 受信 11:14:00 → 配信 11:14:16（16 秒、mode=dm） |
+| **intents 4096 で DM 本文が届くか** | **✓ 実証**（§9.3 参照） |
+| 公開面 | `POST /line/webhook` → 403（署名なし）、`GET` → 405 |
+| 既存の医薬祭取り込み | ✓ 無傷（`<EXISTING_LINE_DOMAIN>` → 403 のまま） |
+| 権限制限 | ✓ シェル探索は `NO_SHELL_TOOL_FOUND`、ジョブ作成は `CANNOT_CREATE_JOB` |
+
+### reply ではなく push になった
+
+LINE の 2 件はどちらも **push（従量）**。2 件目は受信 22:50:27 → 応答 22:52:02 の
+**95 秒**で、reply トークンの 60 秒を超えている。
+
+事前測定（中央値 49.6s・最大 88.3s）どおりの結果で、
+**実使用では大半が push になる**ことが確定した。
+無料枠は月 200 通 ≒ 1 日 6.6 通。常用するなら有料プランを検討する材料になる。
+
+## 9.3 Discord の DM が一度も処理されていなかった
+
+```
+AttributeError: module 'gw_store' has no attribute 'open_db'
+   gw_discord.py   con = store.open_db(self.db_path)
+```
+
+`open_db` は `gw_schema` にある。**すべての DM がここで落ちていた。**
+`on_message` が例外を握る設計なので、ボットは接続を保ったまま
+ログを 1 行出すだけ — 外から見ると健全で、何も答えないサービスだった。
+
+**出荷まで残った理由**: `gw_discord.py` には `_handle` を通すテストが
+1 件も無く、純粋関数の `canonical_from_discord` しか覆っていなかった。
+14 件追加し、**修正前は 5 件が失敗、修正後は全通過**することを実機で確認した。
+
+**この失敗が同時に証明したこと**: 例外が出たのは空本文チェックの
+**次の行**だった。つまり `canonical.text` は空ではなかった —
+**intents 4096 で DM 本文は届く**。設計上で唯一残っていた
+未検証の仮定が、皮肉にもこのバグによって実証された。
+
+同種の誤り（モジュール違いの属性参照）が他に無いことは、
+全ファイルの `alias.attr` を実際に import して解決し、確認済み（未解決 0 件）。
