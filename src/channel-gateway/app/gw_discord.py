@@ -38,6 +38,10 @@ import discord
 import gw_store as store
 from gw_canonical import PLATFORM_DISCORD, canonical_from_discord
 from gw_format import chunk_text, neutralize_mentions, redact
+# open_db lives in gw_schema, not gw_store. Calling store.open_db raised
+# AttributeError on every single DM — caught by on_message's handler, logged,
+# and otherwise invisible: the bot stayed connected and answered nothing.
+from gw_schema import open_db
 
 log = logging.getLogger("gateway.discord")
 
@@ -144,7 +148,7 @@ class InterfaceBot(discord.Client):
             )
             return
 
-        con = store.open_db(self.db_path)
+        con = open_db(self.db_path)
         try:
             request_id, is_new = store.record_inbound(con, canonical)
             if not canonical.authenticated:
