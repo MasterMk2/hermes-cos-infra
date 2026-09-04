@@ -81,9 +81,17 @@ TasksMax=64
 InaccessiblePaths=/srv/hermes/hermes-data
 
 # ProtectSystem=strict makes everything read-only, so name exactly what the
-# gateway writes: its queue database and its logs. app/ and venv/ are
-# deliberately absent — the service must not be able to rewrite its own code.
-ReadWritePaths=/srv/hermes/channel-gateway/state /srv/hermes/channel-gateway/logs
+# gateway writes: its queue database, its logs, and (G.2) the directory that
+# holds the proactive unix socket. app/ and venv/ are deliberately absent —
+# the service must not be able to rewrite its own code.
+#
+# run/ is 2770, owned by this service user with the engine's account as its
+# group. The setgid bit gives the socket that group without the gateway
+# needing to be a member of it, and the directory permission — not the socket
+# mode — is the access control: only members of that group can traverse it and
+# connect. Nothing under here is mounted into the Hermes container, so the
+# assistant has no route to this socket at all.
+ReadWritePaths=/srv/hermes/channel-gateway/state /srv/hermes/channel-gateway/logs /srv/hermes/channel-gateway/run
 
 [Install]
 WantedBy=multi-user.target

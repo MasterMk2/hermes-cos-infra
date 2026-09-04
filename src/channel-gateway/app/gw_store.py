@@ -419,3 +419,240 @@ def status_snapshot(con: sqlite3.Connection) -> dict:
 
 def json_dump(value) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+# =========================================================== G.2 ==========
+#
+# Everything below serves the Attention Engine. None of it is reachable from
+# a channel: the routes that call it listen on a unix socket the platforms
+# cannot see, and none of it takes a recipient.
+
+
+def stamp(con: sqlite3.Connection, key: str, when: str | None = None) -> None:
+    """Record 'this happened, most recently, at'.
+
+    Distinct from `bump`: a counter says how often, a stamp says how long ago,
+    and the difference is the whole of section 41. A gateway with zero
+    messages today is idle; a gateway whose last SUCCESSFUL Hermes answer was
+    three hours ago while messages kept arriving is broken. Only the second
+    is worth waking someone for, and telling them apart needs both figures.
+    """
+    con.execute(
+        "INSERT INTO metrics (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, when or _now()),
+    )
+
+
+def liveness(con: sqlite3.Connection) -> dict:
+    """The end-to-end facts section 40 asks for.
+
+    Most are computed from the tables rather than kept as counters, so they
+    cannot drift out of step with reality — the exception is
+    `last_hermes_success_at`, which has no row of its own to be read off.
+    A RESPONDED inbound row proves only that SOMETHING was delivered, and
+    "いま応答できません" is something: the G.1 failure this exists to catch was
+    a gateway that answered every message with an error and looked, by every
+    queue metric, perfectly healthy.
+    """
+    def one(sql, params=()):
+        row = con.execute(sql, params).fetchone()
+        return row[0] if row else None
+
+    m = metrics(con)
+    oldest_queued = one(
+        "SELECT MIN(received_at) FROM inbound_messages WHERE state = 'QUEUED'"
+    )
+    oldest_processing = one(
+        "SELECT MIN(claimed_at) FROM inbound_messages WHERE state = 'PROCESSING'"
+    )
+    return {
+        "now": _now(),
+        "last_inbound_received_at": one(
+            "SELECT MAX(received_at) FROM inbound_messages"
+        ),
+        "last_inbound_processed_at": one(
+            "SELECT MAX(completed_at) FROM inbound_messages"
+            " WHERE state = 'RESPONDED'"
+        ),
+        "last_hermes_success_at": m.get("last_hermes_success_at"),
+        "last_hermes_failure_at": m.get("last_hermes_failure_at"),
+        "last_outbound_success_at": one(
+            "SELECT MAX(sent_at) FROM outbound_messages WHERE state = 'SENT'"
+        ),
+        "last_proactive_success_at": one(
+            "SELECT MAX(sent_at) FROM proactive_deliveries WHERE state = 'SENT'"
+        ),
+        "oldest_queued_at": oldest_queued,
+        "oldest_processing_at": oldest_processing,
+        "queue_depth": one(
+            "SELECT COUNT(*) FROM inbound_messages WHERE state = 'QUEUED'"
+        ) or 0,
+        "processing_depth": one(
+            "SELECT COUNT(*) FROM inbound_messages WHERE state = 'PROCESSING'"
+        ) or 0,
+        "outbound_pending": one(
+            "SELECT COUNT(*) FROM outbound_messages"
+            " WHERE state IN ('PENDING','SENDING')"
+        ) or 0,
+        "proactive_pending": one(
+            "SELECT COUNT(*) FROM proactive_deliveries"
+            " WHERE state IN ('PENDING','SENDING')"
+        ) or 0,
+        "processing_failure_count": int(m.get("failed") or 0),
+        "hermes_failure_count": int(m.get("hermes_failed") or 0),
+        "delivery_failure_count": one(
+            "SELECT COUNT(*) FROM delivery_attempts WHERE outcome <> 'ok'"
+        ) or 0,
+        "responded_count": int(m.get("responded") or 0),
+    }
+
+
+# ------------------------------------------------------ proactive send
+
+
+def proactive_delivery_id(notification_id: str, channel: str) -> str:
+    """Stable, derived, and the reason a crash cannot charge twice.
+
+    Same construction as `new_outbound_id`: the identity of a delivery is a
+    function of what it is, not of when it was attempted, so a retry after a
+    crash computes the identifier the earlier attempt already inserted.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(
+        f"{notification_id}:{channel}".encode("utf-8")
+    ).hexdigest()
+    return f"pn_{digest[:24]}"
+
+
+def content_revision(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:32]
+
+
+def reserve_proactive(con: sqlite3.Connection, *, notification_id: str,
+                      channel: str, severity: str, dedupe_key, reason,
+                      body: str, target_user_id: str) -> tuple:
+    """Claim the right to deliver one notification on one channel.
+
+    Returns (row, is_new). `is_new` False means this exact (notification,
+    channel) already exists — either delivered, in flight, or failed. The
+    caller decides what that means; what it must never do is send anyway.
+    """
+    did = proactive_delivery_id(notification_id, channel)
+    rev = content_revision(body)
+    now = _now()
+    try:
+        con.execute(
+            "INSERT INTO proactive_deliveries ("
+            " delivery_id, notification_id, channel, severity, dedupe_key,"
+            " reason, content_revision, body, target_user_id, state, attempts,"
+            " quota_consumed, created_at, updated_at"
+            ") VALUES (?,?,?,?,?,?,?,?,?,'PENDING',0,0,?,?)",
+            (did, notification_id, channel, severity,
+             (str(dedupe_key)[:200] if dedupe_key else None),
+             (str(reason)[:200] if reason else None),
+             rev, body, target_user_id, now, now),
+        )
+    except sqlite3.IntegrityError:
+        return get_proactive(con, did), False
+    return get_proactive(con, did), True
+
+
+def get_proactive(con: sqlite3.Connection, delivery_id: str):
+    return con.execute(
+        "SELECT * FROM proactive_deliveries WHERE delivery_id = ?",
+        (delivery_id,),
+    ).fetchone()
+
+
+def mark_proactive(con: sqlite3.Connection, delivery_id: str, state: str, *,
+                   error=None, mode=None, quota_consumed=None,
+                   count_attempt: bool = False) -> None:
+    now = _now()
+    fields = {"state": state, "updated_at": now}
+    if state == "SENT":
+        fields["sent_at"] = now
+        fields["last_error"] = None
+    if error is not None:
+        fields["last_error"] = str(error)[:200]
+    if mode is not None:
+        fields["delivery_mode"] = mode
+    if quota_consumed is not None:
+        fields["quota_consumed"] = int(bool(quota_consumed))
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    extra = ", attempts = attempts + 1" if count_attempt else ""
+    con.execute(
+        f"UPDATE proactive_deliveries SET {cols}{extra} WHERE delivery_id = ?",
+        list(fields.values()) + [delivery_id],
+    )
+
+
+def recover_stuck_proactive(con: sqlite3.Connection, *,
+                            lease_seconds: int = 180,
+                            max_attempts: int = 3) -> dict:
+    """Unstick deliveries whose outcome was never written (section 89).
+
+    A row left SENDING means the process died between the API call and the
+    state write. For LINE that is safe to retry: the retry key is derived
+    from the delivery id, so LINE answers 409 for a message it already
+    accepted rather than charging a second one (section 87). For Discord
+    there is no such key, so a retry can duplicate the DM — which is why the
+    lease is generous and the attempt budget small, and why the residual is
+    stated plainly rather than papered over.
+    """
+    cutoff = _iso_minus(lease_seconds)
+    rows = con.execute(
+        "SELECT delivery_id, attempts FROM proactive_deliveries"
+        " WHERE state = 'SENDING' AND updated_at < ?",
+        (cutoff,),
+    ).fetchall()
+    requeued, failed = 0, 0
+    for r in rows:
+        if int(r["attempts"] or 0) >= max_attempts:
+            mark_proactive(con, r["delivery_id"], "FAILED",
+                           error="stuck_max_attempts")
+            failed += 1
+        else:
+            mark_proactive(con, r["delivery_id"], "PENDING",
+                           error="reclaimed_stuck")
+            requeued += 1
+    return {"proactive_requeued": requeued, "proactive_failed": failed}
+
+
+def proactive_summary(con: sqlite3.Connection) -> dict:
+    rows = con.execute(
+        "SELECT channel, state, COUNT(*) AS n FROM proactive_deliveries"
+        " GROUP BY channel, state"
+    ).fetchall()
+    out = {f"{r['channel']}:{r['state']}": r["n"] for r in rows}
+    out["line_month_sent"] = con.execute(
+        "SELECT COUNT(*) FROM proactive_deliveries WHERE channel='line'"
+        " AND state='SENT' AND strftime('%Y-%m', sent_at) = strftime('%Y-%m','now')"
+    ).fetchone()[0]
+    return out
+
+
+# ----------------------------------------------------- LINE quota cache
+
+
+def save_quota_cache(con: sqlite3.Connection, snap) -> None:
+    con.execute(
+        "INSERT INTO line_quota_cache"
+        " (id, ok, quota_type, limit_value, used, error_category, fetched_at,"
+        "  updated_at) VALUES (1,?,?,?,?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET ok=excluded.ok,"
+        "  quota_type=excluded.quota_type, limit_value=excluded.limit_value,"
+        "  used=excluded.used, error_category=excluded.error_category,"
+        "  fetched_at=excluded.fetched_at, updated_at=excluded.updated_at",
+        (int(bool(snap.ok)), snap.quota_type, snap.limit, snap.used,
+         snap.error_category, snap.fetched_at or _now(), _now()),
+    )
+
+
+def load_quota_cache(con: sqlite3.Connection):
+    return con.execute(
+        "SELECT * FROM line_quota_cache WHERE id = 1"
+    ).fetchone()

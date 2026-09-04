@@ -73,6 +73,21 @@ DEFAULT_LIMITS = {
 
 DEFAULT_RETENTION = {"days": 14}
 
+# G.2. Off by default: a gateway that gains the ability to message the owner
+# unprompted should do so because someone configured it, not because it was
+# upgraded.
+DEFAULT_PROACTIVE = {
+    "enabled": False,
+    "socket_path": "/srv/hermes/channel-gateway/run/proactive.sock",
+    # Section 80 asks for 15-60 minutes. The engine also refreshes right after
+    # it spends a push, so the TTL only bounds how stale the figure gets from
+    # sends made by something else.
+    "quota_cache_seconds": 1800,
+    # Section 89's watchdog: a delivery left SENDING for longer than this is
+    # assumed to belong to a process that died, and is retried.
+    "stuck_lease_seconds": 180,
+}
+
 SECRET_NAMES = (
     "line_channel_secret",
     "line_channel_access_token",
@@ -103,6 +118,7 @@ class Config:
     hermes: dict
     limits: dict
     retention: dict
+    proactive: dict
     secrets: dict
     raw: dict = field(default_factory=dict, repr=False)
 
@@ -135,6 +151,16 @@ class Config:
     @property
     def any_channel_ready(self) -> bool:
         return self.line_ready or self.discord_ready
+
+    @property
+    def proactive_ready(self) -> bool:
+        """Whether the owner-notification socket should be opened at all.
+
+        Requires a channel: a proactive API with nowhere to deliver is a
+        socket that accepts work it can only fail, which is worse than not
+        existing (G.2 sections 49, 83).
+        """
+        return bool(self.proactive.get("enabled")) and self.any_channel_ready
 
 
 def _merge(section, defaults, what) -> dict:
@@ -235,6 +261,24 @@ def parse_config(data: dict, path: str = "<memory>") -> Config:
     hermes = _merge(data.get("hermes"), DEFAULT_HERMES, "hermes")
     limits = _merge(data.get("limits"), DEFAULT_LIMITS, "limits")
     retention = _merge(data.get("retention"), DEFAULT_RETENTION, "retention")
+    proactive = _merge(data.get("proactive"), DEFAULT_PROACTIVE, "proactive")
+
+    sock = str(proactive["socket_path"])
+    if not sock.startswith("/"):
+        raise ConfigError("proactive.socket_path must be an absolute path")
+    if sock.startswith(("/srv/hermes/channel-gateway/app",
+                        "/srv/hermes/channel-gateway/venv")):
+        # Those two directories are root-owned and read-only to the service
+        # precisely so it cannot rewrite its own code; a socket there would
+        # either fail to bind or require loosening that.
+        raise ConfigError(
+            "proactive.socket_path must not live under app/ or venv/"
+        )
+    if not (60 <= int(proactive["quota_cache_seconds"]) <= 21600):
+        raise ConfigError(
+            "proactive.quota_cache_seconds must be 60..21600 (section 80 "
+            "suggests 15-60 minutes)"
+        )
 
     if not (1 <= int(limits["max_active_requests"]) <= 8):
         raise ConfigError("limits.max_active_requests must be 1..8 on this host")
@@ -298,6 +342,7 @@ def parse_config(data: dict, path: str = "<memory>") -> Config:
         hermes=hermes,
         limits=limits,
         retention=retention,
+        proactive=proactive,
         secrets=secrets,
         raw=data,
     )

@@ -1,0 +1,141 @@
+# Hermes Attention Engine — sample configuration.
+#
+# Carries no credential, and cannot: the engine has no token. LINE and Discord
+# are reached only through the gateway's unix socket, which fixes the
+# recipient to the configured owner and keeps both tokens on its own side.
+#
+# Every default here is the conservative one. A half-configured engine is
+# quiet, not noisy.
+
+paths:
+  state_db: /srv/hermes/attention/state/attention.db
+  log_dir: /srv/hermes/attention/logs
+
+sources:
+  # Read with PRAGMA query_only = ON. The engine cannot modify any of these,
+  # which was measured rather than assumed.
+  events_db: /srv/hermes/hermes-data/events/events.db
+  jobs_db: /srv/hermes/hermes-data/jobs/jobs.db
+  discord_collector_db: /srv/hermes/knowledge/discord/messages.db
+  # Where the Hermes cron job that refreshes the LINE knowledge index writes
+  # its per-run report. Leave empty to disable that health probe entirely —
+  # section 14: a source that is not wired up is not invented.
+  line_refresh_output_dir: ""
+  # An unauthenticated GET, used only to tell "the API is answering" from
+  # "the API is gone". Leave empty to skip.
+  hermes_health_url: ""
+  disk_path: /srv/hermes
+
+gateway:
+  socket_path: /srv/hermes/channel-gateway/run/proactive.sock
+  timeout_seconds: 30
+
+schedule:
+  # Section 92. Every five minutes is enough for a 30-minute due window and
+  # cheap enough for a USB flash disk; a one-minute scan would be 1440 writes
+  # a day to answer the same question (section 138).
+  scan_interval_seconds: 300
+  timezone: Asia/Tokyo
+
+quiet_hours:
+  enabled: true
+  start: "23:00"
+  end: "08:00"
+
+channels:
+  # LINE is never the routine feed (section 10).
+  default_channel: discord
+  discord_enabled: true
+  line_escalation_enabled: true
+  routine_line_enabled: false
+
+notifications:
+  event_notifications: true
+  coding_completion_notifications: true
+  health_notifications: true
+  daily_digest_enabled: true
+  # "特に何もありません" every morning trains the reader to ignore the
+  # channel (section 61).
+  empty_digest_enabled: false
+  max_immediate_per_cycle: 3
+  digest_max_items: 8
+  # One dedupe key may not fire twice inside this window. A genuinely new
+  # reminder uses a different key — a different due window — rather than a
+  # shorter cooldown (section 64).
+  cooldown_seconds: 21600
+  health_cooldown_seconds: 21600
+  max_delivery_attempts: 3
+
+events:
+  # Hours before a deadline at which a reminder becomes due. Which of these an
+  # event qualifies for depends on how actionable it is (section 23) — not
+  # every deadline earns three messages.
+  due_windows_hours: [24, 3, 0.5]
+  min_confidence_notify: 0.7
+  min_confidence_digest: 0.5
+  min_actionability_notify: 0.5
+  # An event whose underlying message is older than this is history, however
+  # recently it was extracted. D.1 backfilled a fortnight of Discord in one
+  # afternoon; without this the first scan announces all of it (section 25).
+  max_source_age_days: 3
+  overdue_grace_minutes: 30
+  overdue_max_age_days: 7
+  statuses_open: [open]
+  statuses_ignored: [resolved, ignored, cancelled, superseded, done, closed]
+
+coding:
+  # Only these two are ever notified. Everything else — RUNNING, VALIDATING,
+  # WAITING_REVIEW, REVIEWING, IMPLEMENTATION_ACCEPTED — is the fix loop
+  # working, and interrupting someone about it is section 29's mistake.
+  notify_statuses: [COMPLETED, WAITING_HUMAN]
+  max_age_hours: 48
+
+health:
+  enabled: true
+  # How long a service must STAY broken before it is worth telling anyone.
+  # One reconnect is not an incident (sections 35, 37).
+  sustained_seconds:
+    gateway: 900
+    discord_collector: 1800
+    coding_supervisor: 1800
+    line_refresh: 172800
+    # A per-reason override: the job reporting its own failure twice in a
+    # row is evidence now, not in two days.
+    "line_refresh:script_failed": 3600
+    hermes_api: 900
+    disk: 3600
+  queue_stuck_seconds: 900
+  collector_heartbeat_seconds: 600
+  disk_warn_percent: 10
+  disk_critical_percent: 5
+  recovery_notifications: true
+
+line_budget:
+  # Fractions of whatever LINE reports as this month's target — never of a
+  # number written down here (section 6).
+  healthy_above: 0.5
+  conserve_above: 0.2
+  # Not available to routine traffic at all (section 101).
+  emergency_reserve_fraction: 0.25
+  # Spend at most this share of "what is left, divided by the days left in the
+  # month" on any one day (section 100).
+  daily_spend_factor: 0.7
+  min_daily_allowance: 1
+  # With no quota reading at all: urgent and critical only, and barely
+  # (section 8).
+  unknown_max_per_day: 1
+  max_per_day_hard_cap: 6
+
+first_run:
+  # Everything that already existed at install is history. One digest saying
+  # what is outstanding is useful; thirteen pushes about deadlines that passed
+  # last week are not (sections 25, 96).
+  baseline_digest: true
+  baseline_max_items: 8
+
+llm:
+  # Off. Section 73 requires a deterministic template for every important
+  # notification anyway; once those exist and are correct, a model in the path
+  # buys wording and costs a dependency, a failure mode and a token bill on a
+  # five-minute schedule (sections 19, 21).
+  enabled: false

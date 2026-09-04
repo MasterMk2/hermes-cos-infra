@@ -1,0 +1,108 @@
+[Unit]
+Description=Hermes Attention Engine (proactive chief of staff)
+After=network-online.target channel-gateway.service
+Wants=network-online.target
+# /srv/hermes is the USB disk. Starting before it mounts would create a second,
+# invisible state database on the SD card — and with the notification ledger
+# living in that database, "have I already told them this?" would answer no to
+# everything, which on a metered channel costs real money.
+RequiresMountsFor=/srv/hermes
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Substituted by install-root.sh. The engine runs as the account that OWNS the
+# source data, and it has to: measured on 2026-09-04, reading a WAL-mode
+# SQLite database requires write access to the directory holding it, because
+# SQLite must create the -shm index before it can read anything. A dedicated
+# reader account with a read-only bind mount fails with "attempt to write a
+# readonly database" on every scan. What isolates this service is therefore
+# not a different uid but the InaccessiblePaths below, plus PRAGMA query_only
+# on every source connection.
+User=@ENGINE_USER@
+Group=@ENGINE_GROUP@
+WorkingDirectory=/srv/hermes/attention
+
+ExecStart=/srv/hermes/attention/venv/bin/python -u /srv/hermes/attention/app/att_engine.py --config /srv/hermes/attention/config/config.yaml
+
+Restart=on-failure
+RestartSec=20
+# Exit 78 (EX_CONFIG): a broken configuration or an unreachable source. A
+# restart cannot fix either, and retrying would just re-read the same file.
+RestartPreventExitStatus=78
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=attention-engine
+
+# --- Hardening ------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+# The engine needs nothing from any home directory, including the one
+# belonging to the account it runs as.
+ProtectHome=tmpfs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# AF_UNIX for the gateway's proactive socket; AF_INET for the one HTTP health
+# probe against the local Hermes API. No AF_PACKET, no AF_NETLINK.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Empty: drop every supplementary group the account has. That is what removes
+# `docker` group membership, and with it the ability to reach the daemon
+# socket at all (section 111).
+SupplementaryGroups=
+UMask=0077
+MemoryMax=200M
+TasksMax=32
+
+# Section 111, enforced rather than asserted. Each of these would otherwise be
+# readable by this account, since it is the account that owns the Hermes data
+# directory. `att_engine.py --selftest` opens every one of them and prints the
+# errno, so the claim in the phase report is a measurement.
+#
+# The leading '-' makes each optional: a path that does not exist on this host
+# is not a reason for the unit to refuse to start.
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/srv/hermes/hermes-data/.env
+InaccessiblePaths=-/srv/hermes/hermes-data/auth.json
+InaccessiblePaths=-/srv/hermes/hermes-data/sessions
+InaccessiblePaths=-/srv/hermes/hermes-data/memories
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+InaccessiblePaths=-/srv/hermes/docker
+InaccessiblePaths=-/srv/hermes/channel-gateway/state
+InaccessiblePaths=-/srv/hermes/channel-gateway/config
+
+# ProtectSystem=strict makes everything read-only, so name what must be
+# writable — and note that two of these are writable ONLY because SQLite needs
+# to create a -shm file next to a WAL database in order to read it. The engine
+# never issues a write against them: every source connection sets
+# PRAGMA query_only = ON, which was measured to refuse both UPDATE and
+# CREATE TABLE on the live events database.
+ReadWritePaths=/srv/hermes/attention/state
+ReadWritePaths=/srv/hermes/attention/logs
+ReadWritePaths=/srv/hermes/hermes-data/events
+ReadWritePaths=/srv/hermes/hermes-data/jobs
+ReadWritePaths=-/srv/hermes/knowledge/discord
+# Connecting to a unix socket needs write permission on the socket inode.
+ReadWritePaths=/srv/hermes/channel-gateway/run
+
+[Install]
+WantedBy=multi-user.target

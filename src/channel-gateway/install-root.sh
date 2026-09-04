@@ -48,6 +48,28 @@ for d in "$ROOT/state" "$ROOT/logs"; do
   chown "$USER_NAME:$USER_NAME" "$d"; chmod 0750 "$d"
 done
 
+# --- proactive socket directory (phase G.2) --------------------------------
+# The Attention Engine reaches the gateway through a unix socket here, and the
+# ACCESS CONTROL IS THIS DIRECTORY, not the socket's own mode: 2770 means only
+# the gateway (owner) and the engine's group can traverse it, so nothing else
+# on the host can connect. The setgid bit makes the socket inherit that group
+# without the gateway process having to be a member of it.
+#
+# ENGINE_GROUP is the account the Attention Engine runs as. It must already
+# exist; creating a group here would let a typo silently produce a socket that
+# the engine cannot reach and that nothing explains.
+ENGINE_GROUP="${ENGINE_GROUP:-}"
+if [ -n "$ENGINE_GROUP" ] && getent group "$ENGINE_GROUP" >/dev/null; then
+  if [ -d "$ROOT/run" ]; then say "$ROOT/run" "exists"; else
+    mkdir -p "$ROOT/run"; say "$ROOT/run" "created"
+  fi
+  chown "$USER_NAME:$ENGINE_GROUP" "$ROOT/run"; chmod 2770 "$ROOT/run"
+  say "run/ group" "$ENGINE_GROUP (2770)"
+else
+  say "run/" "SKIPPED — ENGINE_GROUP unset or unknown"
+  echo "     set ENGINE_GROUP=<group> and re-run to enable the proactive API" >&2
+fi
+
 # --- secrets directory -----------------------------------------------------
 # Created here so the operator's `install` command has somewhere to land. Note
 # 0700 root:root — the service user cannot read this directory at all, which

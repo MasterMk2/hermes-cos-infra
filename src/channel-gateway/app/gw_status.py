@@ -104,6 +104,28 @@ def main(argv=None) -> int:
           " COALESCE(error_category,'') AS category"
           " FROM delivery_attempts ORDER BY id DESC LIMIT 10")
 
+    # G.2. Proactive notifications are the messages nobody asked for, so they
+    # are shown separately from the reply traffic: a LINE row here is a push
+    # the Attention Engine chose to spend, and that is the number worth
+    # noticing on a metered channel.
+    table(con, "能動通知 (G.2 Attention Engine)",
+          "SELECT channel, state, delivery_mode,"
+          " SUM(quota_consumed) AS quota, COUNT(*) AS n"
+          " FROM proactive_deliveries GROUP BY channel, state, delivery_mode"
+          " ORDER BY n DESC")
+
+    table(con, "能動通知 (直近 8 件・本文なし)",
+          "SELECT substr(created_at,1,19) AS at, channel, severity, state,"
+          " COALESCE(reason,'') AS reason, length(body) AS chars"
+          " FROM proactive_deliveries ORDER BY rowid DESC LIMIT 8")
+
+    table(con, "LINE quota キャッシュ (gateway が API から読んだ値)",
+          "SELECT ok, COALESCE(quota_type,'') AS type,"
+          " COALESCE(limit_value,'') AS target,"
+          " COALESCE(used,'') AS used,"
+          " COALESCE(error_category,'') AS error,"
+          " substr(fetched_at,1,19) AS fetched FROM line_quota_cache")
+
     table(con, "監査 (本文は含まない・直近 12 件)",
           "SELECT at, event, COALESCE(platform,'') AS platform,"
           " COALESCE(detail,'') AS detail"

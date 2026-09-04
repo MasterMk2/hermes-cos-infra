@@ -305,7 +305,14 @@ class TestConnectionsStayInTheirThread(GatewayTestCase):
         recovered, purged = await self.gw._in_thread(
             self.gw._housekeep, retention_days=14
         )
-        self.assertEqual(recovered, {"requeued": 0, "failed": 0})
+        # G.2 folded the proactive-delivery watchdog into the same pass, so
+        # the recovery report gained two counters. Assert the invariant —
+        # nothing needed recovering — rather than the exact key set, which
+        # would break again the next time a queue is added.
+        self.assertTrue(all(v == 0 for v in recovered.values()))
+        self.assertEqual({"requeued", "failed"} & set(recovered),
+                         {"requeued", "failed"})
+        self.assertIn("proactive_requeued", recovered)
         self.assertIn("inbound_cleared", purged)
 
 

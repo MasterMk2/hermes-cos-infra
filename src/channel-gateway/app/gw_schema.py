@@ -12,6 +12,15 @@ everything that must survive a restart:
                       flight at a time, and the session id we reuse
   audit_events        who asked, whether they were the owner, what happened
 
+Phase G.2 adds two more, both about messages nobody asked for:
+
+  proactive_deliveries  one row per (notification, channel) the Attention
+                        Engine asked us to deliver. The uniqueness is the
+                        whole of duplicate suppression across a crash.
+  line_quota_cache      the last answer from LINE's quota endpoints, so a
+                        restart neither loses the numbers nor forgets that
+                        the token was refused an hour ago.
+
 The gateway is not an agent. Nothing here holds personal knowledge, memory or
 reasoning state — those stay inside Hermes. What is stored is the minimum
 needed to answer "did we already handle this?" and "did the reply go out?".
@@ -25,7 +34,10 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+#: 2 adds the two G.2 tables. The bump is informational: every statement in
+#: SCHEMA is CREATE ... IF NOT EXISTS, so applying version 2 to a version 1
+#: database adds the new tables and touches nothing that exists (section 144).
+SCHEMA_VERSION = 2
 
 # Inbound lifecycle (spec section 57). Terminal states are RESPONDED, FAILED
 # and CANCELLED; everything else is expected to move.
@@ -42,6 +54,18 @@ INBOUND_STATES = (
 TERMINAL_INBOUND = frozenset({"RESPONDED", "FAILED", "CANCELLED"})
 
 OUTBOUND_STATES = ("PENDING", "SENDING", "SENT", "FAILED", "ABANDONED")
+
+# Proactive lifecycle (G.2 spec section 45). SENDING is the dangerous one: it
+# means an adapter call was started and its outcome is not yet known, which is
+# exactly the state a crash leaves behind.
+PROACTIVE_STATES = ("PENDING", "SENDING", "SENT", "FAILED")
+
+PROACTIVE_CHANNELS = ("discord", "line")
+
+# Canonical severities (section 52). The gateway does not interpret these — it
+# records them and lets the engine's policy decide the channel — but it
+# refuses an unknown one so a typo cannot become a new severity by accident.
+SEVERITIES = ("INFO", "IMPORTANT", "URGENT", "CRITICAL")
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -137,6 +161,55 @@ CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_events(at);
 CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_events(gateway_request_id);
 
 CREATE TABLE IF NOT EXISTS metrics (key TEXT PRIMARY KEY, value TEXT);
+
+-- ---------------------------------------------------------------- G.2 ----
+
+-- One row per (notification, channel). Deliberately NOT part of
+-- outbound_messages: that table has a foreign key to inbound_messages, and a
+-- proactive notification has no inbound message — reusing it would mean
+-- forging one, which would corrupt every count that reads the inbound queue.
+CREATE TABLE IF NOT EXISTS proactive_deliveries (
+  delivery_id      TEXT PRIMARY KEY,   -- derived from (notification_id, channel)
+  notification_id  TEXT NOT NULL,      -- the engine's id; ours to honour, not mint
+  channel          TEXT NOT NULL,      -- 'discord' | 'line'
+  severity         TEXT NOT NULL,
+  dedupe_key       TEXT,               -- the engine's, for the audit trail only
+  reason           TEXT,               -- machine-readable decision reason
+  content_revision TEXT NOT NULL,      -- sha256 of the exact text delivered
+  body             TEXT NOT NULL,
+  target_user_id   TEXT NOT NULL,      -- always the configured owner
+  state            TEXT NOT NULL,
+  delivery_mode    TEXT,               -- 'push' (line) | 'dm' (discord)
+  attempts         INTEGER NOT NULL DEFAULT 0,
+  quota_consumed   INTEGER NOT NULL DEFAULT 0,
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  sent_at          TEXT,
+  updated_at       TEXT NOT NULL
+);
+-- Redundant with the primary key, on purpose: the id is derived from these
+-- two columns, and if that derivation is ever changed or broken this index
+-- still refuses the second charge for the same notification.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proactive_once
+  ON proactive_deliveries(notification_id, channel);
+CREATE INDEX IF NOT EXISTS idx_proactive_state
+  ON proactive_deliveries(state, created_at);
+CREATE INDEX IF NOT EXISTS idx_proactive_sent
+  ON proactive_deliveries(channel, state, sent_at);
+
+-- Exactly one row. Survives a restart so the engine does not pay a quota call
+-- to rediscover what was read four minutes ago, and so an authentication
+-- failure is still remembered after a crash-restart (section 120).
+CREATE TABLE IF NOT EXISTS line_quota_cache (
+  id             INTEGER PRIMARY KEY CHECK (id = 1),
+  ok             INTEGER NOT NULL,
+  quota_type     TEXT,
+  limit_value    INTEGER,
+  used           INTEGER,
+  error_category TEXT,
+  fetched_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);
 """
 
 ADDITIVE = {

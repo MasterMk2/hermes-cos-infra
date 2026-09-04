@@ -91,6 +91,32 @@ retention:
   # lives in Hermes, not in this pipe.
   days: 14
 
+# Phase G.2 — the owner-notification surface used by the Attention Engine.
+#
+# This is the ONLY way anything other than a reply leaves the gateway, and it
+# is deliberately narrow: a channel, a severity and a text. There is no
+# recipient field, so no caller can address anyone but the configured owner,
+# and an unrecognised key in a request is a 400 rather than an ignored field.
+#
+# The socket is reached through the permissions on its directory:
+#
+#     /srv/hermes/channel-gateway/run   2770 <gateway user>:<engine group>
+#
+# Only accounts in that group can connect. The Hermes container mounts none
+# of this, so the assistant — the component most exposed to hostile text —
+# has no path to it.
+proactive:
+  enabled: false
+  socket_path: /srv/hermes/channel-gateway/run/proactive.sock
+  # How long a LINE quota reading stays fresh. The gateway also adjusts the
+  # cached usage figure immediately after it spends a push, so this only
+  # bounds drift from sends made by something else.
+  quota_cache_seconds: 1800
+  # A delivery left SENDING longer than this belonged to a process that died;
+  # the maintenance pass returns it to PENDING so it is retried rather than
+  # sitting in a state nothing ever leaves.
+  stuck_lease_seconds: 180
+
 secrets:
   # credential_name is the LoadCredential name in the unit file;
   # fallback_file is used when the service is run outside systemd.

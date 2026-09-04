@@ -91,6 +91,9 @@ class InterfaceBot(discord.Client):
             DISCORD_MAX_MESSAGE_CHARS,
         )
         self._max_chunks = int(cfg.discord.get("max_chunks") or 4)
+        # Resolved lazily by `owner_dm_channel`, cleared whenever opening it
+        # fails so a transient error cannot pin a broken handle forever.
+        self._owner_dm = None
 
     # -- lifecycle -----------------------------------------------------
 
@@ -184,18 +187,67 @@ class InterfaceBot(discord.Client):
         return chunk_text(body, self._chunk_chars, self._max_chunks)
 
     async def send_chunks(self, channel_id: int, chunks: list) -> tuple:
-        """Deliver to a DM channel. Returns (sent_count, error_or_None).
-
-        Stops at the first failure rather than pressing on: a partial answer
-        in order beats a scrambled complete one, and the unsent chunks stay
-        PENDING for the retry.
-        """
+        """Deliver to a DM channel. Returns (sent_count, error_or_None)."""
         try:
             channel = self.get_channel(int(channel_id)) or \
                 await self.fetch_channel(int(channel_id))
         except discord.HTTPException as exc:
             return 0, f"channel_unavailable:{exc.code}"
+        return await self._send_to(channel, chunks)
 
+    async def owner_dm_channel(self):
+        """The DM channel with the configured owner, opened if it is not open.
+
+        The reply path never needs this — an inbound DM already tells the
+        gateway which channel to answer in. A proactive notification has no
+        inbound message, so the channel has to be resolved from the owner id
+        (G.2 section 50): the id comes from configuration, never from a
+        request body.
+
+        `get_user` almost always misses here: the bot runs with intents 4096
+        and no member cache, so there is nothing to hit. The first send costs
+        one `fetch_user` and one `create_dm`; discord.py then keeps the DM
+        channel on the user object, and this instance keeps it too, so
+        subsequent notifications cost neither.
+        """
+        if self._owner_dm is not None:
+            return self._owner_dm
+        uid = int(self.cfg.owner_discord_user_id)
+        user = self.get_user(uid) or await self.fetch_user(uid)
+        channel = user.dm_channel or await user.create_dm()
+        self._owner_dm = channel
+        return channel
+
+    async def send_owner_dm(self, chunks: list) -> tuple:
+        """Deliver a proactive notification. Returns (sent_count, error).
+
+        Discord has no idempotency key, so unlike the LINE push this cannot
+        prove to the platform that a retry is a retry. The caller's
+        `proactive_deliveries` row is the only guard, and a crash in the
+        window between `channel.send` returning and that row being written
+        can duplicate a DM. That residual is real and is stated rather than
+        hidden; it is one message to one person on the cheap channel, which
+        is why the expensive channel is the one that got the retry key.
+        """
+        if not self.cfg.owner_discord_user_id:
+            return 0, "owner_not_configured"
+        try:
+            channel = await self.owner_dm_channel()
+        except discord.HTTPException as exc:
+            self._owner_dm = None
+            return 0, f"owner_dm_unavailable:{exc.status}:{exc.code}"
+        except Exception as exc:  # pragma: no cover - transport
+            self._owner_dm = None
+            return 0, f"owner_dm_unavailable:{type(exc).__name__}"
+        return await self._send_to(channel, chunks)
+
+    async def _send_to(self, channel, chunks: list) -> tuple:
+        """Send chunks in order. Returns (sent_count, error_or_None).
+
+        Stops at the first failure rather than pressing on: a partial answer
+        in order beats a scrambled complete one, and the unsent chunks stay
+        PENDING for the retry.
+        """
         sent = 0
         for chunk in chunks:
             try:

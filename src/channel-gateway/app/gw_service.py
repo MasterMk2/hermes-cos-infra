@@ -41,6 +41,7 @@ import signal
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
@@ -75,6 +76,8 @@ from gw_line import (
     verify_signature,
 )
 from gw_line_client import LineClient
+from gw_proactive import ProactiveServer
+from gw_quota import QuotaSnapshot, LineQuotaClient
 from gw_schema import open_db
 
 EXIT_CONFIG = 78
@@ -183,6 +186,18 @@ class Gateway:
             if cfg.line_ready and secrets.get("line_channel_access_token")
             else None
         )
+        # G.2: the quota reader shares the LINE credential with the sender
+        # and, like it, never leaves this process. The Attention Engine asks
+        # the gateway for numbers; it is never given a token (section 48).
+        self.line_quota = (
+            LineQuotaClient(
+                secrets["line_channel_access_token"],
+                cache_seconds=int(cfg.proactive["quota_cache_seconds"]),
+            )
+            if cfg.line_ready and secrets.get("line_channel_access_token")
+            else None
+        )
+        self.proactive = ProactiveServer(self) if cfg.proactive_ready else None
         self.discord_bot = None       # set in run() when enabled
         self.session: aiohttp.ClientSession | None = None
 
@@ -365,23 +380,48 @@ class Gateway:
             )
         except HermesUnavailable as exc:
             log.warning("hermes unavailable for %s: %s", request_id, exc)
+            await self._note_hermes(False)
             await self.deliver(row, message, user_facing_error("unavailable"))
             return
         except HermesRejected as exc:
             log.error("hermes rejected %s: %s", request_id, exc)
+            await self._note_hermes(False)
             await self.deliver(row, message, user_facing_error("internal"))
             return
 
         if result.status == "timeout":
+            await self._note_hermes(False)
             await self.deliver(row, message, user_facing_error("timeout"),
                                run_id=result.run_id)
             return
         if not result.ok or not result.text.strip():
+            await self._note_hermes(False)
             await self.deliver(row, message, user_facing_error("internal"),
                                run_id=result.run_id)
             return
 
+        await self._note_hermes(True)
         await self.deliver(row, message, result.text, run_id=result.run_id)
+
+    async def _note_hermes(self, ok: bool):
+        """Record whether the assistant itself answered (G.2 sections 39, 40).
+
+        A RESPONDED row proves only that something was delivered, and
+        "いま応答できません" is something. G.1's worst failure was a gateway
+        that stayed connected, kept its queue empty and answered every single
+        message with an error — indistinguishable from health by every metric
+        that existed at the time. This is the metric that distinguishes them.
+        """
+        def _write(con):
+            if ok:
+                store.stamp(con, "last_hermes_success_at")
+            else:
+                store.stamp(con, "last_hermes_failure_at")
+                store.bump(con, "hermes_failed")
+        try:
+            await self._in_thread(_write)
+        except Exception:
+            log.exception("could not record the hermes outcome")
 
     # -- outbound -----------------------------------------------------
 
@@ -573,10 +613,13 @@ class Gateway:
     # -- housekeeping -------------------------------------------------
 
     @staticmethod
-    def _housekeep(con, *, retention_days: int) -> tuple:
-        """Both periodic chores on one connection, inside one thread."""
-        return (store.recover_stale(con),
-                store.purge_expired(con, retention_days=retention_days))
+    def _housekeep(con, *, retention_days: int, stuck_lease: int = 180) -> tuple:
+        """Every periodic chore on one connection, inside one thread."""
+        recovered = store.recover_stale(con)
+        recovered.update(
+            store.recover_stuck_proactive(con, lease_seconds=stuck_lease)
+        )
+        return recovered, store.purge_expired(con, retention_days=retention_days)
 
     async def maintenance(self):
         while not self.stop.is_set():
@@ -584,6 +627,7 @@ class Gateway:
                 recovered, purged = await self._in_thread(
                     self._housekeep,
                     retention_days=int(self.cfg.retention["days"]),
+                    stuck_lease=int(self.cfg.proactive["stuck_lease_seconds"]),
                 )
                 # Both helpers return a dict of counters, and a dict of zeros
                 # is truthy — so test the values, not the dict, or the log
@@ -602,8 +646,45 @@ class Gateway:
 
     # -- lifecycle ----------------------------------------------------
 
+    def _seed_quota_cache(self):
+        """Adopt the last quota answer that survived the restart (section 80).
+
+        Two things are restored, and the second matters more: the numbers, so
+        a restart does not cost an API call, and the memory of a 401, so a
+        crash-restart loop does not become a retry storm against a credential
+        that will refuse it again (section 120).
+        """
+        if self.line_quota is None:
+            return
+        con = self.db()
+        try:
+            row = store.load_quota_cache(con)
+        finally:
+            con.close()
+        if row is None:
+            return
+        try:
+            fetched = datetime.fromisoformat(row["fetched_at"])
+            if fetched.tzinfo is None:
+                fetched = fetched.replace(tzinfo=timezone.utc)
+            age = max(0.0, (datetime.now(timezone.utc) - fetched).total_seconds())
+        except (TypeError, ValueError):
+            return
+        self.line_quota.seed(
+            QuotaSnapshot(
+                ok=bool(row["ok"]), quota_type=row["quota_type"],
+                limit=row["limit_value"], used=row["used"],
+                error_category=row["error_category"],
+                fetched_at=row["fetched_at"],
+            ),
+            age_seconds=age,
+        )
+        log.info("line quota cache restored (age=%ds ok=%s)", int(age),
+                 bool(row["ok"]))
+
     async def run(self):
         self.session = aiohttp.ClientSession()
+        self._seed_quota_cache()
         tasks = [asyncio.create_task(self.worker(), name="worker"),
                  asyncio.create_task(self.maintenance(), name="maintenance")]
         runner = None
@@ -635,9 +716,17 @@ class Gateway:
             log.info("discord interface bot starting (intents=%s)",
                      self.discord_bot.intents.value)
 
+        if self.proactive is not None:
+            # Started last: the socket is the signal that the gateway is ready
+            # to accept proactive work, and it should not appear before the
+            # worker and the channels that will carry it.
+            await self.proactive.start(self.cfg.proactive["socket_path"])
+
         await self.stop.wait()
         log.info("shutting down")
 
+        if self.proactive is not None:
+            await self.proactive.stop()
         if self.discord_bot is not None:
             await self.discord_bot.close()
         for t in tasks:
@@ -728,6 +817,31 @@ def run_check(cfg) -> int:
 
     log.info("channels    : line_ready=%s discord_ready=%s",
              cfg.line_ready, cfg.discord_ready)
+
+    # G.2. Reported even when disabled, because "the engine cannot reach the
+    # gateway" is otherwise a silent failure on the engine's side only.
+    sock = cfg.proactive["socket_path"]
+    sock_dir = os.path.dirname(sock)
+    if cfg.proactive_ready:
+        if os.path.isdir(sock_dir):
+            try:
+                st = os.stat(sock_dir)
+                import grp
+                import pwd
+                log.info("proactive   : enabled, socket dir %s (%s:%s %o)",
+                         sock_dir, pwd.getpwuid(st.st_uid).pw_name,
+                         grp.getgrgid(st.st_gid).gr_name,
+                         st.st_mode & 0o7777)
+            except (KeyError, OSError):
+                log.info("proactive   : enabled, socket dir %s exists", sock_dir)
+        else:
+            log.error("proactive is enabled but %s does not exist; create it "
+                      "as root (owner: the gateway user, group: the engine's "
+                      "account) before starting", sock_dir)
+            ok = False
+    else:
+        log.info("proactive   : disabled (proactive.enabled=%s)",
+                 cfg.proactive.get("enabled"))
     if not cfg.any_channel_ready:
         log.error("no channel is ready: set owner ids and enable a platform "
                   "in %s", cfg.path)
