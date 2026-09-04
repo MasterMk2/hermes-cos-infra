@@ -24,6 +24,20 @@ SQLite reads, one row written, no network call, no model. That is the normal
 case and it is what makes running 288 times a day acceptable on a Pi whose
 disk is a USB stick.
 
+"Acceptable" is a measurement, not a hope. Sampled from `/proc/PID/io` across
+two steady-state scan intervals, with the section 138 write-skip in place:
+
+```text
+write_bytes            190 KiB per scan   (60 KiB of it cancelled)
+net                    130 KiB per scan  ->  ~38 MB/day, ~14 GB/year
+duration               120-136 ms per scan
+```
+
+Against a 29 GB stick that is a decade of headroom; the figure is recorded
+because the alternative — 25 signal rows rewritten every five minutes — was
+what the code did before section 138 was applied, and nothing would have
+noticed.
+
 ## 2. The decisions that shaped it
 
 ### 2.1 A read-only reader was impossible, and that was measured
@@ -133,6 +147,32 @@ inconclusive, two consecutive failures are an incident. Waiting for the
 episode threshold that "the job has not run at all" deserves (two days) would
 be the wrong instrument for a job that has told us it failed.
 
+### 2.7 The release half of DEFER, and what nearly hid it
+
+`DEFER` is the only decision with a second half — it is correct only if
+something later lets the item out. The first attempt to prove that half
+jumped the clock from 23:30 straight to 08:05 and got a `recovery` digest
+instead: a nine-hour gap between scans is, quite reasonably, an outage.
+`_digest_kind` tests recovery before catch-up, so the catch-up path stayed
+unproven while looking proven.
+
+Simulating the night properly — scans every fifteen minutes, under the
+twenty-minute downtime threshold — produced what it should:
+
+```text
+23:15 JST  one URGENT signal notified immediately   (quiet_hours_urgent_time_sensitive)
+08:00 JST  kind=catchup, 2 items, one Discord DM, both deferred ids released
+```
+
+The release turns out to be narrower than "everything deferred last night",
+and deliberately so. A morning scan re-decides any signal the collectors
+still emit, and `deferred_due` only returns rows whose DEFER is still the
+latest decision. So an item that still matters at 08:00 gets the
+notification it would have got at any other hour, and only an item that has
+stopped recurring — the deadline passed, the incident closed — is swept into
+the catch-up. Without that, every morning would repeat the previous night.
+Three tests in `test_engine.py` now pin both halves.
+
 ## 3. The policy
 
 Ordered, deterministic, first match wins. No model is consulted — which makes
@@ -194,7 +234,9 @@ daily        = floor(148 / 27 * 0.7)               = 3
 | gateway unavailable | notification stayed `PENDING`, never `DELIVERED` |
 | gateway recovery | retried on the next scan, delivered, attempts=2 |
 | quiet hours (injected clock) | 22:59 → 3 sent; 23:30 → 0 sent, 4 deferred |
-| health episode | one alert after the threshold; rescan → none |
+| quiet-hours exception | one URGENT time-sensitive signal was let through |
+| catch-up release | a simulated night → `kind=catchup`, 1 message, no repeat |
+| health episode | one alert, then silence — on a **shortened** threshold |
 | coding | COMPLETED and WAITING_HUMAN sent; RUNNING and WAITING_REVIEW silent |
 | LLM calls | 0 |
 
@@ -238,9 +280,15 @@ src/channel-gateway/
   Suppression is available as `att_engine.py --suppress <dedupe_key>`.
 * **No LLM wording.** The configuration has `llm.enabled: false` and there is
   no code path to a model. Deterministic templates only.
+* **The production health thresholds have not themselves elapsed.** The
+  episode machinery — open, sustain, alert once, dedupe, close, recover once
+  — was proven against a shortened 60-second threshold. The configured values
+  (900s for the gateway, 172800s for the LINE refresh job) are arithmetic on
+  the same code path, but only the mechanism has been watched end to end.
 * **The catch-up digest and `chief-morning-review` have not yet run on the
-  same morning.** They are designed not to overlap — the catch-up carries
-  only what was deferred overnight, the review is the day's brief — but that
-  has not been observed in production.
+  same morning.** The catch-up itself is now proven (§2.7); what has not been
+  observed is the two of them landing together. They are designed not to
+  overlap — the catch-up carries only what was deferred overnight, the review
+  is the day's brief.
 * **`line_refresh_daily.sh` is still failing** (§2.6). Detected, reported,
   not fixed.

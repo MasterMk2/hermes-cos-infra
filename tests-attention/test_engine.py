@@ -24,6 +24,7 @@ import att_gateway
 import att_store as store
 import att_fixtures as fx
 from att_gateway import Result
+from att_schema import set_meta
 
 EVENTS_SCHEMA = """
 CREATE TABLE events (
@@ -488,6 +489,132 @@ class TestDigests(EngineCase):
                           recovery=True, baseline_done=True)
         self.assertEqual(gw.calls, [])
         con.close()
+
+
+class TestOvernightRelease(EngineCase):
+    """Section 57 — what was held back at night has to come out in the morning.
+
+    DEFER is the one canonical decision with a second half: the decision is
+    only correct if something later releases it. That release had never run
+    anywhere — not here, and not in production, because the first attempt at
+    it jumped the clock eight hours and tripped the downtime rule instead,
+    which folds the backlog into a `recovery` digest and hides whether
+    `catchup` works at all.
+
+    The distinction these tests pin down: a deferred signal that the morning
+    scan sees again is decided fresh, on its merits; only one that is no
+    longer being emitted is released by the catch-up. Both halves matter —
+    the first is why the morning is not a duplicate of the night, the second
+    is why nothing is silently dropped.
+    """
+
+    #: Far enough after quiet hours end that the morning scan still sees a
+    #: live deadline, close enough that the night scan judges it worth
+    #: raising at all.
+    MORNING_DEADLINE = "2026-09-05T09:00"
+
+    def _defer_overnight(self, gw):
+        """One scan inside quiet hours, leaving a DEFER behind."""
+        self.add_event(event_id="evt_overnight",
+                       due_at=fx.clock_at(self.MORNING_DEADLINE).now_iso(),
+                       occurred_at=fx.ago(self.clock, hours=1),
+                       created_at=fx.ago(self.clock, hours=1))
+        self.past_first_run()
+        eng = self.engine(gateway=gw, clock=fx.clock_at("2026-09-04T23:30"))
+        eng.scan()
+        con = self.state()
+        deferred = [r["signal_id"] for r in con.execute(
+            "SELECT signal_id FROM attention_decisions WHERE decision='DEFER'")]
+        con.close()
+        self.assertTrue(deferred, "the fixture did not produce a deferral")
+        self.assertEqual(gw.calls, [], "quiet hours were not respected")
+        return deferred
+
+    def _morning(self, gw, at="2026-09-05T08:05", last_scan="2026-09-05T07:55"):
+        """A scan after quiet hours end, with the night's scans accounted for.
+
+        `last_scan_finished_at` is set explicitly: without it the nine-hour
+        jump reads as an outage and the recovery rule pre-empts the catch-up.
+        A real engine writes that key every five minutes all night.
+        """
+        from att_schema import open_db
+
+        clock = fx.clock_at(at)
+        con = open_db(self.state_db)
+        set_meta(con, "last_scan_finished_at",
+                 fx.clock_at(last_scan).now_iso())
+        con.commit()
+        con.close()
+        eng = self.engine(gateway=gw, clock=clock)
+        eng.scan()
+        return eng
+
+    def _digests(self):
+        con = self.state()
+        rows = [dict(r) for r in con.execute(
+            "SELECT kind, signal_ids, notification_id FROM digests")]
+        con.close()
+        return rows
+
+    def test_a_signal_that_stopped_recurring_is_released_by_the_catchup(self):
+        # The event is resolved overnight, so the morning collector does not
+        # emit it again. Without a catch-up it would sit deferred for ever.
+        gw = fx.FakeGateway(budget=fx.QUOTA_HEALTHY,
+                            liveness=fx.HEALTHY_LIVENESS)
+        deferred = self._defer_overnight(gw)
+
+        con = sqlite3.connect(self.events_db)
+        con.execute("UPDATE events SET status = 'resolved'")
+        con.commit()
+        con.close()
+
+        self._morning(gw)
+
+        kinds = [d["kind"] for d in self._digests()]
+        self.assertEqual(kinds, ["catchup"], f"digest kinds were {kinds}")
+        carried = self._digests()[0]["signal_ids"]
+        for sig in deferred:
+            self.assertIn(sig, carried)
+        self.assertEqual(len(gw.calls), 1)
+        self.assertEqual(gw.calls[0]["channel"], "discord",
+                         "a digest must never spend a push")
+        self.assertEqual(gw.calls[0]["severity"], "INFO")
+
+    def test_the_catchup_is_sent_once(self):
+        gw = fx.FakeGateway(budget=fx.QUOTA_HEALTHY,
+                            liveness=fx.HEALTHY_LIVENESS)
+        self._defer_overnight(gw)
+        con = sqlite3.connect(self.events_db)
+        con.execute("UPDATE events SET status = 'resolved'")
+        con.commit()
+        con.close()
+
+        self._morning(gw)
+        first = len(gw.calls)
+        self._morning(gw, at="2026-09-05T08:10", last_scan="2026-09-05T08:05")
+        self.assertEqual(len(gw.calls), first,
+                         "the catch-up digest was sent twice")
+        self.assertEqual([d["kind"] for d in self._digests()], ["catchup"])
+
+    def test_a_signal_still_present_in_the_morning_is_decided_fresh(self):
+        # The deadline is still open at 08:05, so the morning scan sees the
+        # same event and judges it on its merits rather than summarising it.
+        # This is the reason the catch-up is usually empty, and it is
+        # deliberate: an item that still matters deserves the notification it
+        # would have got at any other hour, not a bullet in a list.
+        gw = fx.FakeGateway(budget=fx.QUOTA_HEALTHY,
+                            liveness=fx.HEALTHY_LIVENESS)
+        self._defer_overnight(gw)
+        self._morning(gw)
+
+        self.assertTrue(gw.calls, "the morning produced nothing at all")
+        con = self.state()
+        latest = con.execute(
+            "SELECT decision FROM attention_decisions"
+            " ORDER BY decision_id DESC LIMIT 1").fetchone()[0]
+        con.close()
+        self.assertNotEqual(latest, "DEFER",
+                            "the item was still being held after quiet hours")
 
 
 if __name__ == "__main__":
