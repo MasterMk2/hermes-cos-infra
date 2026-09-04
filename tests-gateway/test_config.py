@@ -41,7 +41,7 @@ class TestListenHost(unittest.TestCase):
         the same LAN, so a loopback-only bind is unreachable from it. A named
         private address is the correct surface.
         """
-        for host in ("192.168.1.10", "10.0.0.5", "172.16.4.4"):
+        for host in ("<PI_LAN_IP>", "10.0.0.5", "172.16.4.4"):
             with self.subTest(host=host):
                 self.assertEqual(self._host(host).line["listen_host"], host)
 
@@ -109,7 +109,7 @@ class TestNoCredentialsInConfig(unittest.TestCase):
 
 class TestHermesReachability(unittest.TestCase):
     def test_lan_and_loopback_allowed(self):
-        for url in ("http://127.0.0.1:8642", "http://192.168.1.10:8642",
+        for url in ("http://127.0.0.1:8642", "http://<PI_LAN_IP>:8642",
                     "http://10.1.2.3:8642", "http://172.16.0.9:8642"):
             with self.subTest(url=url):
                 parse_config(fx.config_dict(hermes={"base_url": url}))

@@ -145,13 +145,10 @@ Hermes を呼ぶのは worker で、両者は**コミット済みの DB 行**で
 ```
 [WAN] :443
   → [router NAPT]
-  → <PROXY_HOST>:30443       (Caddy コンテナ。別マシン)
+  → <PROXY_LAN_IP>:30443  (<PROXY_HOST>)
   → <PUBLIC_DOMAIN>/line/webhook
-  → <PI_LAN_IP>:8790         (channel-gateway.service)
+  → <PI_LAN_IP>:8790     (channel-gateway.service)
 ```
-
-（このリポジトリは公開なので、実アドレスとドメインはプレースホルダにしてある。
-設計判断は literal な住所に依存しないので、置き換えても根拠は失われない。）
 
 - Hermes API (8642) と Dashboard は**公開しない**。新しい受信ポートも開けない。
 - Caddy には POST 以外を 405 で弾くガードを入れてある。
@@ -162,10 +159,9 @@ Hermes を呼ぶのは worker で、両者は**コミット済みの DB 行**で
   `dial tcp [::1]:2019: connect: connection refused` で失敗する。
   反映はコンテナの再起動で行う（`RestartPolicy=unless-stopped`、
   compose project `<PROXY_PROJECT>` / service `caddy`）。
-  再起動中は同じ terminator 配下の全サービスが一瞬落ちる。
+  再起動中は <PUBLIC_DOMAIN> 配下の全サービスが一瞬落ちる。
 
-同じ terminator には**別の公式LINE取り込み口**が既にあり
-（別サブドメイン → 別ホストの 8788）、そちらとは
+既存の `<EXISTING_LINE_DOMAIN>`（医薬祭の公式LINE取り込み口、`<EXISTING_LINE_ADDR>`）とは
 **別の LINE チャネル**を使う。1 つのチャネルに設定できる Webhook URL は
 1 つだけなので、既存チャネルの資格情報を流用すると
 **既存の取り込みが無言で止まる**。
@@ -218,8 +214,8 @@ Gateway は Hermes の `.env` を読めない。`ProtectSystem=strict` は読み
 
    ```
    LISTEN  <PI_LAN_IP>:8642        (0.0.0.0 でも 127.0.0.1 でもない)
-   127.0.0.1:8642/health     -> URLError: Connection refused
-   <PI_LAN_IP>:8642/health   -> 200 {"status": "ok", ...}
+   127.0.0.1:8642/health      -> URLError: Connection refused
+   <PI_LAN_IP>:8642/health  -> 200 {"status": "ok", ...}
    ```
 
    値を直すだけでは同じことが繰り返されるので、**`--check` に到達性検査を
@@ -366,7 +362,7 @@ PYTHONPATH="src/channel-gateway/app:tests-gateway" \
 | Discord DM 往復 | ✓ 受信 11:14:00 → 配信 11:14:16（16 秒、mode=dm） |
 | **intents 4096 で DM 本文が届くか** | **✓ 実証**（§9.3 参照） |
 | 公開面 | `POST /line/webhook` → 403（署名なし）、`GET` → 405 |
-| 既存の別 LINE 取り込み口 | ✓ 無傷（403 のまま） |
+| 既存の医薬祭取り込み | ✓ 無傷（`<EXISTING_LINE_DOMAIN>` → 403 のまま） |
 | 権限制限 | ✓ シェル探索は `NO_SHELL_TOOL_FOUND`、ジョブ作成は `CANNOT_CREATE_JOB` |
 
 ### reply ではなく push になった
