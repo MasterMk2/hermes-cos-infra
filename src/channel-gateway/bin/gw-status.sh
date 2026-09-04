@@ -26,9 +26,23 @@ ss -ltn 2>/dev/null | awk 'NR==1 || /:8790/' | sed 's/^/   /'
 echo
 
 echo "== healthz =="
-curl -s -m 5 "http://$(awk '/listen_host:/{print $2}' "$DEST/config/config.yaml" 2>/dev/null):8790/healthz" 2>/dev/null \
-  | sed 's/^/   /' || echo "   応答なし"
-echo
+# アドレスもポートも設定から読む。以前は 8790 を決め打ちし、失敗しても
+# 「応答なし」としか言わなかった — 何が起きたのか分からない出力だった。
+# HTTP コードは常に表示する。
+CONF="$DEST/config/config.yaml"
+HOST="$(sed -n 's/^[[:space:]]*listen_host:[[:space:]]*//p' "$CONF" 2>/dev/null | head -1)"
+PORT="$(sed -n 's/^[[:space:]]*listen_port:[[:space:]]*//p' "$CONF" 2>/dev/null | head -1)"
+URL="http://${HOST:-127.0.0.1}:${PORT:-8790}/healthz"
+BODY="$(mktemp)"
+CODE="$(curl -s -m 5 -o "$BODY" -w '%{http_code}' "$URL" 2>/dev/null)"
+if [ "${CODE:-000}" = "200" ]; then
+  echo "   $URL -> 200"
+  sed 's/^/   /' "$BODY"; echo
+else
+  echo "   $URL -> ${CODE:-接続失敗}"
+  echo "   (サービスが起動しているか、listen_host が実際の bind 先か確認)"
+fi
+rm -f "$BODY"
 echo
 
 # DB は 0750 サービスユーザー所有。root か channelgateway で実行する必要がある。
