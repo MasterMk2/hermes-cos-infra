@@ -1,0 +1,11 @@
+/srv/hermes/calendar/logs/*.log {
+    weekly
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su hermescalendar hermescalendar
+    create 0640 hermescalendar hermescalendar
+}

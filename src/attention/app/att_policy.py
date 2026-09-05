@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 
 import att_budget as budget_mod
 import att_store as store
-from att_signals import SOURCE_CODING, SOURCE_EVENT, SOURCE_HEALTH
+from att_signals import SOURCE_CALENDAR, SOURCE_CODING, SOURCE_EVENT, SOURCE_HEALTH
 from att_time import parse_iso
 
 NOTIFY_NOW = "NOTIFY_NOW"
@@ -64,6 +64,9 @@ R_HEALTH_FAILURE = "health_sustained_failure"
 R_HEALTH_RECOVERED = "health_recovered"
 R_NEW_ITEM = "new_actionable_item"
 R_ROUTINE = "routine"
+R_CALENDAR_CHANGED = "calendar_significant_change"
+R_CALENDAR_CANCELLED = "calendar_event_cancelled"
+R_CALENDAR_ROUTINE = "calendar_routine_suppressed"
 
 DISCORD = "discord"
 LINE = "line"
@@ -122,6 +125,7 @@ def _source_enabled(source_type: str, cfg) -> bool:
         SOURCE_EVENT: bool(n.get("event_notifications", True)),
         SOURCE_CODING: bool(n.get("coding_completion_notifications", True)),
         SOURCE_HEALTH: bool(n.get("health_notifications", True)),
+        SOURCE_CALENDAR: bool(n.get("calendar_notifications", True)),
     }.get(source_type, True)
 
 
@@ -156,6 +160,8 @@ def base_reason(row) -> str:
         "coding_failed_to_start": R_WAITING_HUMAN,
         "health_degraded": R_HEALTH_FAILURE,
         "health_recovered": R_HEALTH_RECOVERED,
+        "calendar_event_changed": R_CALENDAR_CHANGED,
+        "calendar_event_cancelled": R_CALENDAR_CANCELLED,
     }.get(row["signal_type"], R_ROUTINE)
 
 
@@ -275,6 +281,11 @@ def decide(con, row, cfg, clock, ctx: Context) -> Decision:
     # 9. Nothing for the owner to do about it. Worth having in a digest,
     #    not worth an interruption.
     actionability = float(row["actionability"] or 0.0)
+    # Calendar itself owns normal reminders.  A Calendar event becomes an
+    # interruption only for an explicitly configured important keyword, or
+    # when it materially moved/cancelled.  This avoids a duplicate feed.
+    if row["source_type"] == SOURCE_CALENDAR and row["signal_type"] == "calendar_upcoming_event":
+        return out(SUPPRESS, R_CALENDAR_ROUTINE)
     if (severity == "INFO" and row["source_type"] == SOURCE_EVENT
             and actionability < float(cfg.events["min_actionability_notify"])):
         return out(DIGEST, R_LOW_ACTIONABILITY)

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sqlite3
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ SVC_SUPERVISOR = "coding_supervisor"
 SVC_LINE_REFRESH = "line_refresh"
 SVC_HERMES = "hermes_api"
 SVC_DISK = "disk"
+SVC_CALENDAR = "calendar"
 
 #: How bad each failure is. Only two things reach CRITICAL: no space left,
 #: and a notification path that cannot deliver — everything else is IMPORTANT,
@@ -76,6 +78,9 @@ SEVERITY_BY_REASON = {
     "job_stalled": "IMPORTANT",
     "script_failed": "IMPORTANT",
     "not_running": "IMPORTANT",
+    "auth_required": "IMPORTANT",
+    "watch_expired": "IMPORTANT",
+    "sync_stuck": "IMPORTANT",
 }
 
 JAPANESE_REASON = {
@@ -94,6 +99,9 @@ JAPANESE_REASON = {
     "job_stalled": "Coding job が進行しないまま停止しています",
     "script_failed": "LINE 知識の更新ジョブが失敗し続けています",
     "not_running": "定期ジョブが実行されていません",
+    "auth_required": "Google Calendar の再認証が必要です",
+    "watch_expired": "Google Calendar の push watch が期限切れです",
+    "sync_stuck": "Google Calendar の同期キューが滞留しています",
 }
 
 
@@ -341,6 +349,39 @@ def probe_line_refresh(cfg, clock) -> Probe:
     return Probe(SVC_LINE_REFRESH, True, facts={"age_hours": int(age / 3600)})
 
 
+# --------------------------------------------------------- calendar sync
+
+
+def probe_calendar(cfg, clock) -> Probe:
+    """Health from the published Calendar status snapshot, never its OAuth DB."""
+    path = cfg.sources.get("calendar_index_db") or ""
+    if not path or not os.path.isfile(path):
+        return Probe(SVC_CALENDAR, True, inconclusive=True,
+                     detail="calendar index not published yet")
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        con.row_factory = sqlite3.Row
+        rows = con.execute("SELECT * FROM calendar_status").fetchall()
+        con.close()
+    except sqlite3.Error as exc:
+        return Probe(SVC_CALENDAR, False, "state_unreadable", type(exc).__name__)
+    if not rows:
+        return Probe(SVC_CALENDAR, True, inconclusive=True,
+                     detail="Calendar authorization/selection is pending")
+    now_ms = int(clock.now().timestamp() * 1000)
+    for row in rows:
+        facts = {"calendar_id": row["calendar_id"], "pending_sync_age_seconds": row["pending_sync_age_seconds"]}
+        if str(row["auth_state"]) == "AUTH_REQUIRED":
+            return Probe(SVC_CALENDAR, False, "auth_required", "authorization is required", facts=facts)
+        expiry = row["watch_expiration_ms"]
+        if expiry is not None and int(expiry) < now_ms:
+            return Probe(SVC_CALENDAR, False, "watch_expired", "watch expiration passed", facts=facts)
+        pending = row["pending_sync_age_seconds"]
+        if pending is not None and int(pending) > int(cfg.health["queue_stuck_seconds"]):
+            return Probe(SVC_CALENDAR, False, "sync_stuck", "sync queue is not advancing", facts=facts)
+    return Probe(SVC_CALENDAR, True, facts={"selected_calendars": len(rows)})
+
+
 # ------------------------------------------------------- hermes / disk
 
 
@@ -387,6 +428,7 @@ def probe_all(cfg, clock, gateway) -> list:
         (probe_collector, (cfg, clock)),
         (probe_supervisor, (cfg, clock)),
         (probe_line_refresh, (cfg, clock)),
+        (probe_calendar, (cfg, clock)),
         (probe_hermes, (cfg, clock)),
         (probe_disk, (cfg, clock)),
     ):

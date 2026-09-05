@@ -45,6 +45,9 @@ DEFAULT_SOURCES = {
     "hermes_health_url": "",
     "coding_bridge_socket": "",
     "disk_path": "/srv/hermes",
+    # Calendar is read from its published no-WAL index.  Attention does not
+    # receive the Calendar service's canonical DB or OAuth credentials.
+    "calendar_index_db": "/srv/hermes/calendar/index/index.db",
 }
 
 DEFAULT_GATEWAY = {
@@ -86,6 +89,7 @@ DEFAULT_NOTIFICATIONS = {
     "coding_completion_notifications": True,
     "health_notifications": True,
     "event_notifications": True,
+    "calendar_notifications": True,
     "daily_digest_enabled": True,
     # "特に何もありません" every morning is a notification that trains the
     # reader to ignore the channel (section 61).
@@ -122,6 +126,14 @@ DEFAULT_EVENTS = {
                          "done", "closed"],
 }
 
+DEFAULT_CALENDAR = {
+    "enabled": True,
+    # Routine calendar reminders stay with Google Calendar. Hermes only raises
+    # an approaching event when the owner deliberately configures a keyword.
+    "upcoming_hours": 24,
+    "important_keywords": [],
+}
+
 DEFAULT_CODING = {
     "notify_statuses": ["COMPLETED", "WAITING_HUMAN"],
     # Section 29: everything else is an internal transition. Listing the ones
@@ -146,6 +158,10 @@ DEFAULT_HEALTH = {
         "coding_supervisor": 1800,
         "hermes_api": 900,
         "disk": 3600,
+        "calendar": 1800,
+        "calendar:auth_required": 1800,
+        "calendar:watch_expired": 3600,
+        "calendar:sync_stuck": 1800,
     },
     "queue_stuck_seconds": 900,
     "collector_heartbeat_seconds": 600,
@@ -199,6 +215,7 @@ SECTION_DEFAULTS = {
     "channels": DEFAULT_CHANNELS,
     "notifications": DEFAULT_NOTIFICATIONS,
     "events": DEFAULT_EVENTS,
+    "calendar": DEFAULT_CALENDAR,
     "coding": DEFAULT_CODING,
     "health": DEFAULT_HEALTH,
     "line_budget": DEFAULT_LINE_BUDGET,
@@ -237,6 +254,7 @@ class Config:
     channels: dict
     notifications: dict
     events: dict
+    calendar: dict
     coding: dict
     health: dict
     line_budget: dict
@@ -340,6 +358,13 @@ def parse_config(data: dict, path: str = "<memory>") -> Config:
     if any(w <= 0 for w in windows):
         raise ConfigError("events.due_windows_hours must be positive")
     ev["due_windows_hours"] = windows
+
+    cal = merged["calendar"]
+    if not (1 <= int(cal["upcoming_hours"]) <= 168):
+        raise ConfigError("calendar.upcoming_hours must be 1..168")
+    if not isinstance(cal["important_keywords"], list) or any(
+            not isinstance(item, str) for item in cal["important_keywords"]):
+        raise ConfigError("calendar.important_keywords must be a list of strings")
 
     n = merged["notifications"]
     if not (1 <= int(n["max_immediate_per_cycle"]) <= 10):

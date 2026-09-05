@@ -25,6 +25,8 @@ sources:
   # "the API is gone". Leave empty to skip.
   hermes_health_url: ""
   disk_path: /srv/hermes
+  # Published read-only Calendar snapshot. This contains no OAuth token.
+  calendar_index_db: /srv/hermes/calendar/index/index.db
 
 gateway:
   socket_path: /srv/hermes/channel-gateway/run/proactive.sock
@@ -51,6 +53,7 @@ channels:
 
 notifications:
   event_notifications: true
+  calendar_notifications: true
   coding_completion_notifications: true
   health_notifications: true
   daily_digest_enabled: true
@@ -83,6 +86,13 @@ events:
   statuses_open: [open]
   statuses_ignored: [resolved, ignored, cancelled, superseded, done, closed]
 
+calendar:
+  enabled: true
+  # Google Calendar owns routine reminders. Add explicit important keywords
+  # only for schedules Hermes should proactively flag.
+  upcoming_hours: 24
+  important_keywords: []
+
 coding:
   # Only these two are ever notified. Everything else — RUNNING, VALIDATING,
   # WAITING_REVIEW, REVIEWING, IMPLEMENTATION_ACCEPTED — is the fix loop
@@ -104,6 +114,10 @@ health:
     "line_refresh:script_failed": 3600
     hermes_api: 900
     disk: 3600
+    calendar: 1800
+    "calendar:auth_required": 1800
+    "calendar:watch_expired": 3600
+    "calendar:sync_stuck": 1800
   queue_stuck_seconds: 900
   collector_heartbeat_seconds: 600
   disk_warn_percent: 10

@@ -1,0 +1,14 @@
+# Place this route alongside the existing /line/webhook route on the existing
+# public Caddy vhost; substitute only the Pi LAN address at deployment time.
+# Validate with the production Caddy configuration before restarting Caddy.
+handle /google/calendar/watch {
+    # The channel token is an opaque callback authenticator. The Calendar
+    # service retains only its hash, and the public proxy must not log it.
+    log_skip
+    @notpost not method POST
+    respond @notpost 405
+    request_body {
+        max_size 1KB
+    }
+    reverse_proxy <PI_LAN_ADDRESS>:8791
+}

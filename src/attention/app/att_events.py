@@ -132,8 +132,18 @@ def collect(cfg, clock, *, initialized_at=None) -> list:
     finally:
         con.close()
 
+    # A deterministic Calendar link is higher-authority evidence of the
+    # current scheduled time/status.  Keep the original Event Layer row
+    # untouched, but do not manufacture a second chat-derived reminder.
+    try:
+        from att_calendar import linked_event_layer_ids
+        calendar_linked = linked_event_layer_ids(cfg)
+    except Exception:
+        calendar_linked = set()
     out = []
     for row in rows:
+        if str(row["event_id"]) in calendar_linked:
+            continue
         try:
             out.extend(signals_for_event(row, cfg, clock))
         except Exception:

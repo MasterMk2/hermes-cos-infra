@@ -79,6 +79,7 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 | - | [docs/F2-FINAL-REPORT.md](docs/F2-FINAL-REPORT.md) | F.2 実測レポート (real fix loop / 隔離実測 / usage / 回帰) |
 | 9 | [docs/09-phase-d1-discord-knowledge.md](docs/09-phase-d1-discord-knowledge.md) | Discord read-only Knowledge (collector / 増分index / discord_* MCP / Event統合) |
 | - | [docs/D1-STATUS-REPORT.md](docs/D1-STATUS-REPORT.md) | D.1 実測レポート (実Discord E2E / 敵対的監査 / 除外判断の根拠) |
+| 10 | [docs/12-phase-h1-calendar-authority.md](docs/12-phase-h1-calendar-authority.md) | Google Calendar Authority Layer (COMPLETED: read-only OAuth / authority sync / production regression) |
 | - | [docs/lessons-learned.md](docs/lessons-learned.md) | 実測で見つかった落とし穴と修正 |
 
 ## Code Snapshot (`src/`)
@@ -115,6 +116,10 @@ src/
 │   ├── events/                 discord_event_extract.py (既存Event Layerへ接続)
 │   ├── systemd/ + install-root.sh + bin/   専用user・LoadCredential・配備
 │   └── config/config.yaml      allowlist (default deny)。tokenは絶対に置かない
+├── calendar/                   Phase H.1 — Google Calendar Authority Layer
+│   ├── app/                    syncToken sync / OAuth transport / webhook / index
+│   ├── mcp/calendar_mcp.py     calendar_search / calendar_get / calendar_status
+│   └── systemd/ + install-root.sh + bin/  dedicated identity / credential boundary
 └── docker-compose.hermes.yaml  実機 deploy 対象 (digest pin)
 
 tests/                          F.2 回帰テスト (repo root、src/ の外。unittest 129 tests)

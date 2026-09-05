@@ -1,0 +1,41 @@
+# Hermes Google Calendar Authority Layer -- no OAuth values belong here.
+
+paths:
+  authority_db: /srv/hermes/calendar/state/calendar.db
+  # A replacement-file snapshot mounted read-only into Hermes and read by G.2.
+  index_db: /srv/hermes/calendar/index/index.db
+  log_dir: /srv/hermes/calendar/logs
+  event_layer_db: /srv/hermes/hermes-data/events/events.db
+
+oauth:
+  # Empty means systemd's CREDENTIALS_DIRECTORY. This config never stores a
+  # client ID, client secret, refresh token, or access token.
+  credential_dir: ""
+  scopes:
+    - https://www.googleapis.com/auth/calendar.events.readonly
+    - https://www.googleapis.com/auth/calendar.calendarlist.readonly
+
+calendars:
+  # Default deny. Populate only after `cal_oauth.py` + discovery has displayed
+  # the stable IDs to the operator; Calendar names are not an allowlist key.
+  selected_ids: []
+
+server:
+  # Caddy is the only public HTTPS terminator. This listener has no API,
+  # dashboard, or OAuth callback; it accepts only the verified watch route.
+  bind_host: 0.0.0.0
+  port: 8791
+  path: /google/calendar/watch
+  public_callback_url: ""
+  max_body_bytes: 1024
+
+sync:
+  # Push is low-latency; this 15-minute poll recovers missed pushes.
+  poll_interval_seconds: 900
+  worker_tick_seconds: 5
+  projection_past_days: 30
+  projection_future_days: 365
+  projection_refresh_seconds: 21600
+  max_retry_delay_seconds: 900
+  watch_ttl_seconds: 604800
+  watch_renewal_margin_seconds: 86400

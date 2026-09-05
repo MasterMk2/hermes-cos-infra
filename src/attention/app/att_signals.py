@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 SOURCE_EVENT = "event"
 SOURCE_CODING = "coding"
 SOURCE_HEALTH = "health"
+SOURCE_CALENDAR = "calendar"
 
 # Signal types. Each is a fact about a thing, not an instruction about what to
 # do with it — the policy decides that.
@@ -48,6 +49,11 @@ SIG_JOB_FAILED_TO_START = "coding_failed_to_start"
 
 SIG_HEALTH_DEGRADED = "health_degraded"
 SIG_HEALTH_RECOVERED = "health_recovered"
+
+SIG_CALENDAR_UPCOMING = "calendar_upcoming_event"
+SIG_CALENDAR_DUE_SOON = "calendar_important_due_soon"
+SIG_CALENDAR_CHANGED = "calendar_event_changed"
+SIG_CALENDAR_CANCELLED = "calendar_event_cancelled"
 
 SEVERITIES = ("INFO", "IMPORTANT", "URGENT", "CRITICAL")
 SEVERITY_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
@@ -129,7 +135,7 @@ class Signal:
     def __post_init__(self):
         if self.severity not in SEVERITIES:
             raise ValueError(f"unknown severity {self.severity!r}")
-        if self.source_type not in (SOURCE_EVENT, SOURCE_CODING, SOURCE_HEALTH):
+        if self.source_type not in (SOURCE_EVENT, SOURCE_CODING, SOURCE_HEALTH, SOURCE_CALENDAR):
             raise ValueError(f"unknown source_type {self.source_type!r}")
 
     def with_severity(self, severity: str) -> "Signal":

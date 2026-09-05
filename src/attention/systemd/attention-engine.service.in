@@ -89,6 +89,7 @@ InaccessiblePaths=-/var/run/docker.sock
 InaccessiblePaths=-/srv/hermes/docker
 InaccessiblePaths=-/srv/hermes/channel-gateway/state
 InaccessiblePaths=-/srv/hermes/channel-gateway/config
+InaccessiblePaths=-/srv/hermes/calendar/state
 
 # ProtectSystem=strict makes everything read-only, so name what must be
 # writable — and note that two of these are writable ONLY because SQLite needs
@@ -101,6 +102,9 @@ ReadWritePaths=/srv/hermes/attention/logs
 ReadWritePaths=/srv/hermes/hermes-data/events
 ReadWritePaths=/srv/hermes/hermes-data/jobs
 ReadWritePaths=-/srv/hermes/knowledge/discord
+# Published no-WAL snapshot only; the canonical Calendar state and OAuth
+# credentials are not reachable from Attention.
+ReadOnlyPaths=-/srv/hermes/calendar/index
 # Connecting to a unix socket needs write permission on the socket inode.
 ReadWritePaths=/srv/hermes/channel-gateway/run
 

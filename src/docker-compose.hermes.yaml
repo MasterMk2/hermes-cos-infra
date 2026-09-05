@@ -10,6 +10,10 @@ services:
     volumes:
       - /srv/hermes/hermes-data:/opt/data
       - /home/<PI_USER>/coding-worker/bridge-sock:/hermes-coding
+      # Mount the directory, not the SQLite file: the calendar service
+      # atomically replaces each verified published snapshot. OAuth
+      # credentials and the canonical Calendar DB are host-only.
+      - /srv/hermes/calendar/index:/opt/calendar:ro
     environment:
       - HERMES_UID=1000
       - HERMES_GID=1000

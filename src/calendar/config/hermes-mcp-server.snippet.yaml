@@ -1,0 +1,8 @@
+# Insert this one server under Hermes config.yaml's existing mcp_servers map.
+# Do not replace or reorder existing servers.
+calendar:
+  command: /opt/hermes/.venv/bin/python3
+  args:
+    - /opt/data/tools/calendar/calendar_mcp.py
+  env:
+    HERMES_CALENDAR_INDEX: /opt/calendar/index.db

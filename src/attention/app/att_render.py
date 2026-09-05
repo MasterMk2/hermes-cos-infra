@@ -107,6 +107,24 @@ def render_event(row, clock) -> tuple:
     return subject, body
 
 
+# ----------------------------------------------------------- calendar
+
+
+def render_calendar(row, clock) -> tuple:
+    meta = _meta(row)
+    summary = row["summary"]
+    when = _due_phrase(row, clock).replace("期限は", "予定は") if row["due_at"] else ""
+    location = meta.get("location") or ""
+    kind = row["signal_type"]
+    if kind == "calendar_event_cancelled":
+        return ("予定が取り消されました", _lines(f"「{summary}」は Calendar 上で取り消されました。", when))
+    if kind == "calendar_event_changed":
+        return ("予定が変更されました", _lines(f"「{summary}」の Calendar 上の予定が変更されました。", when, f"場所: {location}" if location else ""))
+    if kind == "calendar_important_due_soon":
+        return ("重要な予定が近づいています", _lines(f"「{summary}」が近づいています。", when, f"場所: {location}" if location else ""))
+    return ("予定があります", _lines(f"「{summary}」", when))
+
+
 # ------------------------------------------------------------- coding
 
 
@@ -192,6 +210,7 @@ def render_health(row, clock) -> tuple:
 
 RENDERERS = {
     "event": render_event,
+    "calendar": render_calendar,
     "coding": render_coding,
     "health": render_health,
 }
@@ -237,6 +256,10 @@ DIGEST_ORDER = {
     "coding_completed": 5,
     "new_high_confidence_commitment": 6,
     "health_recovered": 7,
+    "calendar_event_cancelled": 1,
+    "calendar_event_changed": 2,
+    "calendar_important_due_soon": 2,
+    "calendar_upcoming_event": 8,
 }
 
 

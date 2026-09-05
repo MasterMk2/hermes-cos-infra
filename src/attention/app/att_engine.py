@@ -45,6 +45,7 @@ import time
 from pathlib import Path
 
 import att_budget
+import att_calendar
 import att_coding
 import att_events
 import att_health
@@ -151,6 +152,8 @@ class Engine:
 
         # --- collect -------------------------------------------------
         signals = []
+        signals += att_calendar.collect(self.cfg, clock,
+                                        initialized_at=initialized_at)
         signals += att_events.collect(self.cfg, clock,
                                       initialized_at=initialized_at)
         signals += att_coding.collect(self.cfg, clock,

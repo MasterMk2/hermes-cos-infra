@@ -1,0 +1,78 @@
+[Unit]
+Description=Hermes Google Calendar Authority Sync (read-only)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/hermes
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=hermescalendar
+Group=hermescalendar
+WorkingDirectory=/srv/hermes/calendar
+
+# systemd reads root-only credential files; the service sees per-unit copies
+# in $CREDENTIALS_DIRECTORY and has no access to /etc/hermes-secrets itself.
+LoadCredential=client-id:/etc/hermes-secrets/google-calendar/client-id
+LoadCredential=client-secret:/etc/hermes-secrets/google-calendar/client-secret
+LoadCredential=refresh-token:/etc/hermes-secrets/google-calendar/refresh-token
+
+ExecStart=/srv/hermes/calendar/venv/bin/python -u /srv/hermes/calendar/app/cal_service.py --config /srv/hermes/calendar/config/config.yaml
+Restart=on-failure
+RestartSec=20
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-calendar
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+SupplementaryGroups=
+UMask=0077
+MemoryMax=220M
+TasksMax=48
+
+# Calendar must reconcile against the Event Layer, but may not access Hermes
+# auth/session/memory material, channel tokens, coding credentials, or Docker.
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/etc/hermes-secrets/line-channel-access-token
+InaccessiblePaths=-/etc/hermes-secrets/discord-interface-token
+InaccessiblePaths=-/etc/hermes-secrets/discord-knowledge-token
+InaccessiblePaths=-/srv/hermes/hermes-data/.env
+InaccessiblePaths=-/srv/hermes/hermes-data/auth.json
+InaccessiblePaths=-/srv/hermes/hermes-data/sessions
+InaccessiblePaths=-/srv/hermes/hermes-data/memories
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+InaccessiblePaths=-/srv/hermes/channel-gateway
+InaccessiblePaths=-/srv/hermes/coding-worker
+
+ReadWritePaths=/srv/hermes/calendar/state
+ReadWritePaths=/srv/hermes/calendar/index
+ReadWritePaths=/srv/hermes/calendar/logs
+ReadOnlyPaths=-/srv/hermes/hermes-data/events
+
+[Install]
+WantedBy=multi-user.target
