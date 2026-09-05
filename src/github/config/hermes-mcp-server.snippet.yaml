@@ -1,0 +1,7 @@
+﻿# Snippet to add to /srv/hermes/hermes-data/config.yaml under mcp_servers:
+  github:
+    command: /opt/hermes/.venv/bin/python3
+    args:
+      - /opt/data/tools/github/github_mcp.py
+    env:
+      GITHUB_CONFIG: /opt/data/tools/github/config.yaml

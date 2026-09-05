@@ -1,28 +1,30 @@
-# Hermes H.2 Resume
+# Hermes H.3 Resume
 
 ## Objective
 
-Complete the Gmail Intelligence and Commitment Ingestion phase without
-weakening the completed Calendar, gateway, or credential boundaries.
+Deliver frontend research capability (strictly read-only GitHub MCP access for Personal Hermes) and provider/model resilience with automated fallback chains without weakening existing security boundaries.
 
-## Completed: COMPLETED (2026-09-05)
+## Completed: COMPLETED (2026-09-06)
 
-- The isolated Gmail service, read-only OAuth flow, Pub/Sub pull path, bounded
-  baseline, incremental history sync, canonical store, and published search
-  snapshot are deployed and operational.
-- A production restart recovered from an index-write stall. Published-index
-  writes are content-change-gated, and the Gmail service resumed normal
-  incremental operation (1,215 messages, 1,088 threads, 0 failures).
-- Published-index reader permissions validated (2750/0440 hermesreconcile,
-  ro-mounted to container, write rejected with EROFS, sensitive state inaccessible).
-- hermes-gmail-event-ingest timer/service operational (scanned 1,017 items to Event Layer).
-- Reconcile projection (calendar-reconcile.db) operational; Calendar service links cleanly.
-- Attention Engine probe_gmail verified (ok=True, watch_state=ACTIVE); proactive notifications operational.
-- Existing services regression clean (Gateway, Discord Knowledge, Calendar, Attention, Hermes agent all active).
-- 379 tests passing on Pi (tests-gateway 181, tests-attention 152, tests-gmail 31, tests-calendar 15).
-- Test environment isolation fixed in tests-attention/test_engine.py.
+- Personal Hermes frontend GitHub read capability operational via stdio JSON-RPC MCP server (`/opt/data/tools/github/github_mcp.py`).
+- Read-only methods exposed: `github_repo_status`, `github_list_commits`, `github_get_commit`, `github_get_file`, `github_list_prs`, `github_get_pr`, `github_list_issues`, `github_get_issue`.
+- All mutation endpoints strictly absent (no write logic, no branch/commit/push/PR modification).
+- Allowlist validation enforced (`MasterMk2/hermes-cos-infra`, `MasterMk2/hermes-pi-setup`).
+- Negative write test PASSED: Personal Hermes rejected write/commit requests on `hermes-cos-infra` and recognized read-only execution constraints.
+- Positive E2E query PASSED: Personal Hermes queried latest commit (`e16288a`) and summarized details accurately.
+- Provider fallback chain operational:
+  - Primary: `z-ai/glm-5.3-flash` (via auto/CommandCode)
+  - Fallback #1: `laguna-s-2.1-free` (via opencode-free)
+  - Fallback #2: `deepseek-v4-flash-free` (via opencode-free)
+- Error classification verified: Rate limits (429), quota (402), server errors (500, 502, 503), timeouts failover properly; context overflow (400) triggers compression instead.
+- Antigravity direct integration documented as unsupported / not exposed as external HTTP API.
+- All test suites passing on Pi (474 tests total):
+  - tests-github: 25 / 25
+  - tests-gmail: 31 / 31
+  - tests-calendar: 15 / 15
+  - tests-attention: 152 / 152
+  - tests-gateway: 251 / 251
 
 ## Next phase
 
-- Next: Phase H.3 (or next scheduled capability / hardening)
-
+- Next: Phase I.1 (or next scheduled capability)

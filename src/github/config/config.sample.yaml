@@ -1,0 +1,16 @@
+﻿# Hermes GitHub Read Authority -- Sample Configuration
+#
+# Dedicated read-only configuration for Personal Hermes.
+# This config carries NO tokens directly; tokens are read from
+# root-only credentials (/etc/hermes-secrets/github/read-token).
+
+allowed_repositories:
+  - MasterMk2/hermes-cos-infra
+  - MasterMk2/hermes-pi-setup
+
+token_path: /etc/hermes-secrets/github/read-token
+api_base_url: https://api.github.com
+timeout_seconds: 15.0
+file_content_max_bytes: 64000
+default_limit: 10
+max_limit: 50
