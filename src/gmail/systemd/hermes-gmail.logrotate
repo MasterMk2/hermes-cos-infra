@@ -1,0 +1,11 @@
+/srv/hermes/gmail/logs/*.log {
+    weekly
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su hermesgmail hermesgmail
+    create 0640 hermesgmail hermesgmail
+}

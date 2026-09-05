@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Hermes Gmail Event Layer bridge regularly
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+Persistent=true
+Unit=hermes-gmail-event-ingest.service
+
+[Install]
+WantedBy=timers.target

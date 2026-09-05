@@ -329,5 +329,54 @@ class TestLineRefreshProbe(unittest.TestCase):
             self.assertTrue(p.ok, p.reason)
 
 
+class TestGmailProbe(unittest.TestCase):
+    def make_index(self, tmpdir, *, auth="AUTHORIZED", expiry=None, pending=None):
+        import os
+        import sqlite3
+
+        path = os.path.join(tmpdir, f"gmail-{auth}-{expiry}-{pending}.db")
+        con = sqlite3.connect(path)
+        con.execute(
+            """CREATE TABLE gmail_status (
+              singleton INTEGER PRIMARY KEY, auth_state TEXT, history_id_present INTEGER,
+              initialized_at TEXT,last_full_sync_at TEXT,last_incremental_sync_at TEXT,
+              last_api_success_at TEXT,last_message_ingested_at TEXT,last_error_code TEXT,
+              consecutive_failures INTEGER,history_reset_count INTEGER,message_count INTEGER,
+              thread_count INTEGER,oldest_received_at TEXT,newest_received_at TEXT,
+              watch_state TEXT,watch_expiration_ms INTEGER,last_notification_at TEXT,
+              pending_sync_age_seconds INTEGER,published_at TEXT
+            )"""
+        )
+        con.execute(
+            "INSERT INTO gmail_status VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, auth, 1, None, None, None, None, None, None, 0, 0, 0, 0, None, None,
+             "ACTIVE", expiry, None, pending, "2026-09-04T00:00:00+00:00"),
+        )
+        con.commit(); con.close()
+        return path
+
+    def test_authorization_and_progress_failures_are_measurable(self):
+        import tempfile
+
+        clock = fx.clock_at("2026-09-04T12:00")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.make_index(tmp, auth="AUTH_REQUIRED")
+            p = health.probe_gmail(fx.config(sources={"gmail_index_db": path}), clock)
+            self.assertFalse(p.ok)
+            self.assertEqual(p.reason, "gmail_auth_required")
+            path = self.make_index(tmp, pending=3601)
+            p = health.probe_gmail(fx.config(sources={"gmail_index_db": path}), clock)
+            self.assertFalse(p.ok)
+            self.assertEqual(p.reason, "gmail_sync_stuck")
+
+    def test_pending_setup_is_inconclusive_not_an_alert(self):
+        p = health.probe_gmail(
+            fx.config(sources={"gmail_index_db": "/not-configured/gmail.db"}),
+            fx.clock_at("2026-09-04T12:00"),
+        )
+        self.assertTrue(p.ok)
+        self.assertTrue(p.inconclusive)
+
+
 if __name__ == "__main__":
     unittest.main()

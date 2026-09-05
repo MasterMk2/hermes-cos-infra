@@ -48,6 +48,9 @@ DEFAULT_SOURCES = {
     # Calendar is read from its published no-WAL index.  Attention does not
     # receive the Calendar service's canonical DB or OAuth credentials.
     "calendar_index_db": "/srv/hermes/calendar/index/index.db",
+    # Gmail is likewise only visible through its published no-WAL snapshot.
+    # The canonical store and Gmail OAuth credential are inaccessible.
+    "gmail_index_db": "/srv/hermes/gmail/index/index.db",
 }
 
 DEFAULT_GATEWAY = {
@@ -162,6 +165,10 @@ DEFAULT_HEALTH = {
         "calendar:auth_required": 1800,
         "calendar:watch_expired": 3600,
         "calendar:sync_stuck": 1800,
+        "gmail": 1800,
+        "gmail:auth_required": 1800,
+        "gmail:watch_expired": 3600,
+        "gmail:sync_stuck": 1800,
     },
     "queue_stuck_seconds": 900,
     "collector_heartbeat_seconds": 600,

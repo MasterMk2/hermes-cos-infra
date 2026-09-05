@@ -17,6 +17,10 @@ DEFAULT_PATHS = {
     "index_db": "/srv/hermes/calendar/index/index.db",
     "log_dir": "/srv/hermes/calendar/logs",
     "event_layer_db": "/srv/hermes/hermes-data/events/events.db",
+    # H.2 publishes only the Event fields required for reconciliation.  This
+    # lets Calendar retain a strict credential boundary instead of traversing
+    # the Personal Hermes data tree.
+    "reconciliation_index_db": "/srv/hermes/gmail-event/reconcile/calendar-reconcile.db",
 }
 DEFAULT_OAUTH = {
     # In production this resolves to systemd's unit-private credential tmpfs.

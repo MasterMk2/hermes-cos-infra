@@ -1,0 +1,36 @@
+# Hermes Gmail Intelligence & Commitment Ingestion -- no credential values.
+
+paths:
+  authority_db: /srv/hermes/gmail/state/gmail.db
+  index_db: /srv/hermes/gmail/index/index.db
+  log_dir: /srv/hermes/gmail/logs
+
+oauth:
+  # Empty uses systemd's unit-private credential directory. Never put client
+  # IDs, client secrets, refresh tokens, or access tokens in this file.
+  credential_dir: ""
+  scopes:
+    - https://www.googleapis.com/auth/gmail.readonly
+
+mailbox:
+  # Bounded historical baseline. It is indexed as baseline and creates no
+  # individual Attention notifications.
+  initial_days: 30
+
+pubsub:
+  # Pull is preferred: the Pi initiates outbound connections and no public
+  # Gmail endpoint is added. Both values remain empty until the Cloud project
+  # topic/subscription have been deliberately created.
+  topic_name: ""
+  subscription_name: ""
+  credential_filename: pubsub-service-account.json
+  pull_batch_size: 10
+
+sync:
+  # Polling history.list is the missed-notification recovery path.
+  poll_interval_seconds: 900
+  worker_tick_seconds: 5
+  max_retry_delay_seconds: 900
+  auth_retry_delay_seconds: 21600
+  # Gmail watches must be renewed before their seven-day maximum expiration.
+  watch_renewal_margin_seconds: 129600

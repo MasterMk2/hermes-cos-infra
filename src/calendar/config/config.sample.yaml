@@ -6,6 +6,9 @@ paths:
   index_db: /srv/hermes/calendar/index/index.db
   log_dir: /srv/hermes/calendar/logs
   event_layer_db: /srv/hermes/hermes-data/events/events.db
+  # H.2 no-WAL minimum reconciliation projection. Calendar prefers it when
+  # present rather than traversing the Personal Hermes data directory.
+  reconciliation_index_db: /srv/hermes/gmail-event/reconcile/calendar-reconcile.db
 
 oauth:
   # Empty means systemd's CREDENTIALS_DIRECTORY. This config never stores a

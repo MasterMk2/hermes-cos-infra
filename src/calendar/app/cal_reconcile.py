@@ -46,7 +46,13 @@ def deterministic_candidates(events_db: str, calendar_row, *, tolerance_seconds:
 
 
 def reconcile_calendar(con, *, events_db: str, calendar_id: str) -> int:
-    """Create only a unique deterministic candidate link, never an LLM guess."""
+    """Link explicit records first, then only unique deterministic candidates.
+
+    An H.2 reconciliation projection contains no Personal Hermes secrets and
+    can therefore be safely read by the Calendar service. It may additionally
+    carry an operator-confirmed explicit source mapping; title similarity alone
+    never creates that mapping.
+    """
     count = 0
     rows = con.execute(
         "SELECT * FROM events WHERE calendar_id=? AND status!='cancelled'", (calendar_id,)
@@ -54,6 +60,30 @@ def reconcile_calendar(con, *, events_db: str, calendar_id: str) -> int:
     for row in rows:
         linked = con.execute("SELECT 1 FROM event_source_links WHERE calendar_source_id=?", (row["source_id"],)).fetchone()
         if linked:
+            continue
+        # Explicit links are checked per exact Calendar source identifier.
+        source = sqlite3.connect(f"file:{events_db}?mode=ro", uri=True, timeout=5)
+        source.row_factory = sqlite3.Row
+        try:
+            table = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_calendar_links'"
+            ).fetchone()
+            explicit = []
+            if table:
+                explicit = source.execute(
+                    """SELECT event_id,confidence FROM event_calendar_links
+                       WHERE calendar_source_id=? AND link_type='explicit'""",
+                    (row["source_id"],),
+                ).fetchall()
+        finally:
+            source.close()
+        if explicit:
+            for item in explicit:
+                cal_store.link_event(
+                    con, row["source_id"], str(item["event_id"]),
+                    link_type="explicit", confidence=float(item["confidence"]),
+                )
+                count += 1
             continue
         candidates = deterministic_candidates(events_db, row)
         if len(candidates) == 1:

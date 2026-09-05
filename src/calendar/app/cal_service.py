@@ -146,7 +146,8 @@ class CalendarService:
                         past_days=int(self.cfg.sync["projection_past_days"]),
                         future_days=int(self.cfg.sync["projection_future_days"]),
                     )
-                events_db = str(self.cfg.paths.get("event_layer_db") or "")
+                projected = str(self.cfg.paths.get("reconciliation_index_db") or "")
+                events_db = projected if projected and os.path.isfile(projected) else str(self.cfg.paths.get("event_layer_db") or "")
                 if events_db and os.path.isfile(events_db):
                     cal_reconcile.reconcile_calendar(con, events_db=events_db, calendar_id=calendar_id)
                 with con:

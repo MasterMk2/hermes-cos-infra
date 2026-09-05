@@ -1,0 +1,75 @@
+[Unit]
+Description=Hermes Gmail Intelligence Ingestion (read-only)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/hermes
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=hermesgmail
+Group=hermesgmail
+WorkingDirectory=/srv/hermes/gmail
+
+# Each credential is a private per-unit copy in CREDENTIALS_DIRECTORY.  The
+# service cannot read the root-managed source directory or Calendar's files.
+LoadCredential=client-id:/etc/hermes-secrets/google-gmail/client-id
+LoadCredential=client-secret:/etc/hermes-secrets/google-gmail/client-secret
+LoadCredential=refresh-token:/etc/hermes-secrets/google-gmail/refresh-token
+LoadCredential=pubsub-service-account.json:/etc/hermes-secrets/google-gmail/pubsub-service-account.json
+
+ExecStart=/srv/hermes/gmail/venv/bin/python -u /srv/hermes/gmail/app/gm_service.py --config /srv/hermes/gmail/config/config.yaml
+Restart=on-failure
+RestartSec=20
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-gmail
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+SupplementaryGroups=
+UMask=0077
+MemoryMax=280M
+TasksMax=48
+
+# Gmail can write only its own canonical state, published index and logs. It
+# cannot reach Personal Hermes credentials, Calendar OAuth, gateway state,
+# coding, or Docker.
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/srv/hermes/hermes-data
+InaccessiblePaths=-/srv/hermes/calendar
+InaccessiblePaths=-/srv/hermes/channel-gateway
+InaccessiblePaths=-/srv/hermes/coding-worker
+InaccessiblePaths=-/srv/hermes/gmail-event
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+
+ReadWritePaths=/srv/hermes/gmail/state
+ReadWritePaths=/srv/hermes/gmail/index
+ReadWritePaths=/srv/hermes/gmail/logs
+
+[Install]
+WantedBy=multi-user.target

@@ -49,7 +49,9 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
 AmbientCapabilities=
-SupplementaryGroups=
+# H.2 reconciliation snapshot only; it does not grant Calendar access to
+# Gmail state or Personal Hermes data.
+SupplementaryGroups=hermesreconcile
 UMask=0077
 MemoryMax=220M
 TasksMax=48
@@ -73,6 +75,9 @@ ReadWritePaths=/srv/hermes/calendar/state
 ReadWritePaths=/srv/hermes/calendar/index
 ReadWritePaths=/srv/hermes/calendar/logs
 ReadOnlyPaths=-/srv/hermes/hermes-data/events
+# H.2 event bridge publishes only event id/title/due/status/link metadata.
+# Calendar has no route to Gmail OAuth state, bodies, headers, or attachments.
+ReadOnlyPaths=-/srv/hermes/gmail-event/reconcile
 
 [Install]
 WantedBy=multi-user.target

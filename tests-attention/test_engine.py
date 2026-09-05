@@ -88,6 +88,7 @@ class EngineCase(unittest.TestCase):
             "sources": {"events_db": self.events_db, "jobs_db": self.jobs_db,
                         "discord_collector_db": "", "hermes_health_url": "",
                         "line_refresh_output_dir": "",
+                        "calendar_index_db": "", "gmail_index_db": "",
                         "disk_path": self.tmp.name},
             "health": {"enabled": False},
         }

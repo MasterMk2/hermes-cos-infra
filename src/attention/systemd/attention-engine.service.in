@@ -67,7 +67,10 @@ AmbientCapabilities=
 # Empty: drop every supplementary group the account has. That is what removes
 # `docker` group membership, and with it the ability to reach the daemon
 # socket at all (section 111).
-SupplementaryGroups=
+# Read only the published Gmail evidence snapshot through the dedicated
+# reconciliation group; this does not grant Gmail OAuth or canonical-state
+# access, and still excludes docker membership.
+SupplementaryGroups=hermesreconcile
 UMask=0077
 MemoryMax=200M
 TasksMax=32
@@ -90,6 +93,8 @@ InaccessiblePaths=-/srv/hermes/docker
 InaccessiblePaths=-/srv/hermes/channel-gateway/state
 InaccessiblePaths=-/srv/hermes/channel-gateway/config
 InaccessiblePaths=-/srv/hermes/calendar/state
+InaccessiblePaths=-/srv/hermes/gmail/state
+InaccessiblePaths=-/srv/hermes/gmail-event
 
 # ProtectSystem=strict makes everything read-only, so name what must be
 # writable — and note that two of these are writable ONLY because SQLite needs
@@ -105,6 +110,8 @@ ReadWritePaths=-/srv/hermes/knowledge/discord
 # Published no-WAL snapshot only; the canonical Calendar state and OAuth
 # credentials are not reachable from Attention.
 ReadOnlyPaths=-/srv/hermes/calendar/index
+# Published Gmail snapshot only; no canonical Gmail state or OAuth material.
+ReadOnlyPaths=-/srv/hermes/gmail/index
 # Connecting to a unix socket needs write permission on the socket inode.
 ReadWritePaths=/srv/hermes/channel-gateway/run
 

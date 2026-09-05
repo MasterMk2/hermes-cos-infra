@@ -57,6 +57,7 @@ SVC_LINE_REFRESH = "line_refresh"
 SVC_HERMES = "hermes_api"
 SVC_DISK = "disk"
 SVC_CALENDAR = "calendar"
+SVC_GMAIL = "gmail"
 
 #: How bad each failure is. Only two things reach CRITICAL: no space left,
 #: and a notification path that cannot deliver — everything else is IMPORTANT,
@@ -81,6 +82,9 @@ SEVERITY_BY_REASON = {
     "auth_required": "IMPORTANT",
     "watch_expired": "IMPORTANT",
     "sync_stuck": "IMPORTANT",
+    "gmail_auth_required": "IMPORTANT",
+    "gmail_watch_expired": "IMPORTANT",
+    "gmail_sync_stuck": "IMPORTANT",
 }
 
 JAPANESE_REASON = {
@@ -102,6 +106,9 @@ JAPANESE_REASON = {
     "auth_required": "Google Calendar の再認証が必要です",
     "watch_expired": "Google Calendar の push watch が期限切れです",
     "sync_stuck": "Google Calendar の同期キューが滞留しています",
+    "gmail_auth_required": "Gmail の再認証が必要です",
+    "gmail_watch_expired": "Gmail の push watch が期限切れです",
+    "gmail_sync_stuck": "Gmail の同期キューが滞留しています",
 }
 
 
@@ -382,6 +389,46 @@ def probe_calendar(cfg, clock) -> Probe:
     return Probe(SVC_CALENDAR, True, facts={"selected_calendars": len(rows)})
 
 
+# ------------------------------------------------------------ Gmail sync
+
+
+def probe_gmail(cfg, clock) -> Probe:
+    """Health from Gmail's published snapshot, never Gmail OAuth/state."""
+    path = cfg.sources.get("gmail_index_db") or ""
+    if not path or not os.path.isfile(path):
+        return Probe(SVC_GMAIL, True, inconclusive=True,
+                     detail="gmail index not published yet")
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT * FROM gmail_status WHERE singleton=1").fetchone()
+        con.close()
+    except sqlite3.Error as exc:
+        return Probe(SVC_GMAIL, False, "state_unreadable", type(exc).__name__)
+    if row is None:
+        return Probe(SVC_GMAIL, True, inconclusive=True,
+                     detail="Gmail authorization is pending")
+    facts = {
+        "pending_sync_age_seconds": row["pending_sync_age_seconds"],
+        "watch_state": row["watch_state"],
+    }
+    if str(row["auth_state"]) == "AUTH_REQUIRED":
+        return Probe(SVC_GMAIL, False, "gmail_auth_required",
+                     "authorization is required", facts=facts)
+    # No recorded expiration means Cloud Pub/Sub setup has not completed; it
+    # is a human gate, not an outage. Once Gmail provided an expiration, an
+    # elapsed value is a measurable service degradation.
+    expiry = row["watch_expiration_ms"]
+    if expiry is not None and int(expiry) < int(clock.now().timestamp() * 1000):
+        return Probe(SVC_GMAIL, False, "gmail_watch_expired",
+                     "watch expiration passed", facts=facts)
+    pending = row["pending_sync_age_seconds"]
+    if pending is not None and int(pending) > int(cfg.health["queue_stuck_seconds"]):
+        return Probe(SVC_GMAIL, False, "gmail_sync_stuck",
+                     "sync queue is not advancing", facts=facts)
+    return Probe(SVC_GMAIL, True, facts=facts)
+
+
 # ------------------------------------------------------- hermes / disk
 
 
@@ -429,6 +476,7 @@ def probe_all(cfg, clock, gateway) -> list:
         (probe_supervisor, (cfg, clock)),
         (probe_line_refresh, (cfg, clock)),
         (probe_calendar, (cfg, clock)),
+        (probe_gmail, (cfg, clock)),
         (probe_hermes, (cfg, clock)),
         (probe_disk, (cfg, clock)),
     ):

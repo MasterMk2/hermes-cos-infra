@@ -1,0 +1,55 @@
+[Unit]
+Description=Hermes LINE Knowledge daily read-only refresh
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/srv/hermes
+
+[Service]
+Type=oneshot
+User=@ENGINE_USER@
+Group=@ENGINE_GROUP@
+WorkingDirectory=/srv/hermes/hermes-data/tools/line-knowledge
+Environment=MYLINE_SSH_HOST=line-source
+Environment=HOME=@ENGINE_HOME@
+ExecStart=/srv/hermes/hermes-data/tools/line-knowledge/refresh-line.sh
+TimeoutStartSec=5min
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=@ENGINE_HOME@/.ssh
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# The refresh owns only its snapshot/index/log outputs.  It has no access to
+# Hermes, Gateway, Calendar, Gmail, or Docker secrets.  The one bind-mounted
+# SSH directory is needed solely for the pre-existing MyLINE read path.
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/srv/hermes/gmail
+InaccessiblePaths=-/srv/hermes/calendar
+InaccessiblePaths=-/srv/hermes/channel-gateway
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+ReadOnlyPaths=/srv/hermes/hermes-data/tools/line-knowledge
+ReadWritePaths=/srv/hermes/knowledge/line
+ReadWritePaths=/srv/hermes/hermes-data/knowledge-index/line
+ReadWritePaths=/srv/hermes/hermes-data/logs
+
