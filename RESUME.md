@@ -1,3 +1,43 @@
+# Hermes H.3.2 Resume
+
+## Objective
+
+Establish Gemini 3.8 Flash via Google Antigravity consumer quota as the Primary model for Personal Hermes frontend by deploying it as a constrained delegated read-only agent backend with native MCP tools, hard security boundaries, SSE streaming, and a resilient fallback chain.
+
+## Completed: COMPLETED (2026-09-06)
+
+- Constrained Delegated Read-Only Agent Backend:
+  - Antigravity CLI v1.1.27 operational as a delegated read-only agent backend.
+  - Native MCP tools mounted: GitHub, Calendar, Gmail, Discord knowledge, LINE knowledge, Event Layer.
+- Hard Security Boundaries Enforced:
+  - `permissions.deny: ["command(*)", "file(*)", "browser(*)", "terminal(*)"]` in Antigravity settings.json.
+  - Shell execution (`run_command`), file mutation, and browser operations strictly blocked at core policy layer.
+- Server-Sent Events (SSE) Streaming:
+  - Bridge server enhanced with OpenAI-compatible SSE streaming (`stream: True`), eliminating stream drops.
+- Personal Hermes E2E Verification (/v1/runs):
+  - Primary Model query: Correctly retrieved latest commit (`e16288afc06056509f5c2d82b00a516090a09339`) from `MasterMk2/hermes-cos-infra`.
+  - Negative Security Test: Explicitly refused commit creation requests, enforcing read-only boundary.
+  - Failover Test: When Bridge was stopped, Hermes automatically transitioned to Fallback #1 (`z-ai/glm-5.3-flash` via CommandCode), executed GitHub MCP, and returned answer.
+  - Recovery Test: When Bridge was restarted, Hermes automatically restored Primary (`gemini-3.8-flash-medium`) and answered greetings normally.
+- Resilience Fallback Chain Active in Production:
+  - Primary: `gemini-3.8-flash-medium` via Antigravity Bridge (`http://172.18.0.1:8765/v1`)
+  - Fallback #1: `z-ai/glm-5.3-flash` via `commandcode`
+  - Fallback #2: `laguna-s-2.1-free` via `opencode-free`
+  - Fallback #3: `deepseek-v4-flash-free` via `opencode-free`
+- Regression Test Suites (484 tests ALL PASS on Pi):
+  - tests-antigravity: 16 / 16 passed
+  - tests-github + model_resilience: 26 / 26 passed
+  - tests-gmail: 31 / 31 passed
+  - tests-calendar: 15 / 15 passed
+  - tests-attention: 145 / 145 passed
+  - tests-gateway: 251 / 251 passed
+
+## Next phase
+
+- Next: Phase I.1 (or next scheduled capability)
+
+---
+
 # Hermes H.3.1 Resume
 
 ## Objective

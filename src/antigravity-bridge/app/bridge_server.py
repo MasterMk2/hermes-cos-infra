@@ -170,6 +170,11 @@ def execute_antigravity(
             }
 
         response_text = cli_out.get("response", "")
+        denied = cli_out.get("denied_actions", [])
+        if not response_text and denied:
+            denied_names = ", ".join(d.get("display_name", d.get("action", "unknown")) for d in denied)
+            response_text = f"I am a strictly read-only assistant. I do not have permission to perform mutation actions ({denied_names})."
+
         usage_info = cli_out.get("usage", {})
         
         # Build OpenAI chat completion response
@@ -236,6 +241,63 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_sse_stream(self, response_text: str, model: str, usage_info: Dict[str, Any]):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        req_id = f"chatcmpl-antigravity-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+
+        chunk_size = 64
+        for i in range(0, max(1, len(response_text)), chunk_size):
+            chunk = response_text[i:i + chunk_size] if response_text else ""
+            delta: Dict[str, Any] = {"content": chunk}
+            if i == 0:
+                delta["role"] = "assistant"
+            data = {
+                "id": req_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            line = f"data: {json.dumps(data)}\n\n"
+            self.wfile.write(line.encode("utf-8"))
+
+        stop_data = {
+            "id": req_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": usage_info.get("input_tokens", 0),
+                "completion_tokens": usage_info.get("output_tokens", 0),
+                "total_tokens": usage_info.get("total_tokens", 0),
+            },
+        }
+        stop_line = f"data: {json.dumps(stop_data)}\n\n"
+        self.wfile.write(stop_line.encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        self.close_connection = True
+
     def do_GET(self):
         if self.path in {"/health", "/status"}:
             uptime = time.time() - metrics.start_time
@@ -251,7 +313,9 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
                 "authenticated": is_auth,
                 "auth_method": "consumer",
                 "quota_project": None,
-                "tool_calling_support": "unsupported_in_headless_agent_loop",
+                "tool_calling_support": (
+                    "delegated_mcp_agent" if self.config.allow_delegated_mcp else "unsupported_in_headless_agent_loop"
+                ),
                 "uptime_seconds": round(uptime, 1),
                 "metrics": {
                     "total_requests": metrics.total_requests,
@@ -290,27 +354,32 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
             model = payload.get("model", self.config.default_model)
             tools = payload.get("tools", [])
 
-            # Tool Calling Verification (Section 14, 15, 16)
+            # Tool Calling Verification (Section 14, 15, 16 & Phase H.3.2)
             # Antigravity CLI does not expose an external function calling API.
-            # Invoking tool tasks in headless print mode intercepts them with internal agent tools.
+            # In Phase H.3.2, constrained delegated MCP agent mode allows Antigravity
+            # to fulfill read-only tool requirements via its own mounted MCP servers.
             if tools:
-                logger.warning("Tool calling requested on Antigravity provider bridge.")
-                if not self.config.allow_tool_emulation:
-                    # Return 501 / Failover-eligible error so Hermes cleanly triggers fallback chain
-                    metrics.failed_requests += 1
-                    err_msg = (
-                        "Antigravity CLI headless runtime owns its internal agent loop and does not expose "
-                        "a raw OpenAI function-calling API. Tool calls must fall back to capable provider (GLM-5.3-Flash)."
-                    )
-                    metrics.last_error = err_msg
-                    self._send_json(501, {
-                        "error": {
-                            "message": err_msg,
-                            "type": "unsupported_tool_calls",
-                            "code": 501,
-                        }
-                    })
-                    return
+                if not self.config.allow_delegated_mcp:
+                    if not self.config.allow_tool_emulation:
+                        # Return 501 / Failover-eligible error so Hermes cleanly triggers fallback chain
+                        metrics.failed_requests += 1
+                        err_msg = (
+                            "Antigravity CLI headless runtime owns its internal agent loop and does not expose "
+                            "a raw OpenAI function-calling API. Tool calls must fall back to capable provider (GLM-5.3-Flash)."
+                        )
+                        metrics.last_error = err_msg
+                        self._send_json(501, {
+                            "error": {
+                                "message": err_msg,
+                                "type": "unsupported_tool_calls",
+                                "code": 501,
+                            }
+                        })
+                        return
+                else:
+                    logger.info(f"Delegating tool request (tools: {len(tools)}) to constrained Antigravity read-only agent backend.")
+
+            stream = bool(payload.get("stream", False))
 
             prompt = format_messages_to_prompt(messages)
             if not prompt:
@@ -322,6 +391,13 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
                 config=self.config,
                 model=model,
             )
+            if stream and status_code == 200:
+                choices = response_data.get("choices", [])
+                content = choices[0].get("message", {}).get("content", "") if choices else ""
+                usage = response_data.get("usage", {})
+                self._send_sse_stream(content, model, usage)
+                return
+
             self._send_json(status_code, response_data)
             return
 

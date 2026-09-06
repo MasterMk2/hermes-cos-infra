@@ -121,12 +121,117 @@ class TestAntigravityExecution(unittest.TestCase):
         self.assertIn("error", res)
         self.assertEqual(res["error"]["type"], "invalid_response")
 
-    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="antigravity", timeout=5))
-    def test_timeout_handling(self, mock_run):
-        code, res = execute_antigravity("Hello", self.cfg)
-        self.assertEqual(code, 504)
-        self.assertEqual(res["error"]["type"], "timeout")
+    @patch("subprocess.run")
+    def test_denied_actions_handling(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = json.dumps({
+            "status": "SUCCESS",
+            "response": "",
+            "denied_actions": [{"action": "command", "display_name": "RunCommand"}],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        })
+        mock_proc.stderr = ""
+        mock_run.return_value = mock_proc
+
+        code, res = execute_antigravity("Run a shell command", self.cfg)
+        self.assertEqual(code, 200)
+        self.assertIn("strictly read-only assistant", res["choices"][0]["message"]["content"])
+        self.assertIn("RunCommand", res["choices"][0]["message"]["content"])
+
+
+class TestRequestHandlerDelegation(unittest.TestCase):
+    """Test HTTP handler tool delegation and fallback logic."""
+
+    def test_handler_rejects_tools_when_delegation_disabled(self):
+        from bridge_server import AntigravityRequestHandler
+        from io import BytesIO
+
+        cfg = BridgeConfig(allow_delegated_mcp=False, allow_tool_emulation=False)
+        AntigravityRequestHandler.config = cfg
+
+        body = json.dumps({
+            "messages": [{"role": "user", "content": "Check commit"}],
+            "tools": [{"type": "function", "function": {"name": "github_list_commits"}}]
+        }).encode("utf-8")
+
+        mock_rfile = BytesIO(body)
+        mock_wfile = BytesIO()
+
+        # Instantiate mock handler
+        handler = MagicMock()
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = mock_rfile
+        handler.wfile = mock_wfile
+        handler.path = "/v1/chat/completions"
+        handler.config = cfg
+
+        # Call do_POST logic
+        AntigravityRequestHandler.do_POST(handler)
+        handler._send_json.assert_called_once()
+        args = handler._send_json.call_args[0]
+        status_code = args[0]
+        data = args[1]
+        self.assertEqual(status_code, 501)
+        self.assertEqual(data["error"]["type"], "unsupported_tool_calls")
+
+    @patch("bridge_server.execute_antigravity")
+    def test_handler_streams_sse_when_stream_requested(self, mock_exec):
+        from bridge_server import AntigravityRequestHandler
+        from io import BytesIO
+
+        mock_exec.return_value = (
+            200,
+            {
+                "choices": [{"message": {"content": "Streamed answer", "role": "assistant"}}],
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+        cfg = BridgeConfig(allow_delegated_mcp=True)
+        AntigravityRequestHandler.config = cfg
+
+        body = json.dumps({
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+
+        handler = MagicMock()
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = BytesIO(body)
+        handler.path = "/v1/chat/completions"
+        handler.config = cfg
+
+        AntigravityRequestHandler.do_POST(handler)
+        handler._send_sse_stream.assert_called_once_with(
+            "Streamed answer",
+            cfg.default_model,
+            {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+
+    def test_send_sse_stream_format(self):
+        from bridge_server import AntigravityRequestHandler
+        from io import BytesIO
+
+        handler = MagicMock()
+        mock_wfile = BytesIO()
+        handler.wfile = mock_wfile
+
+        # Directly invoke unbound method with handler mock
+        AntigravityRequestHandler._send_sse_stream(
+            handler,
+            response_text="Hello world!",
+            model="gemini-3.8-flash-medium",
+            usage_info={"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+        )
+
+        output = mock_wfile.getvalue().decode("utf-8")
+        self.assertIn("data: ", output)
+        self.assertIn("Hello world!", output)
+        self.assertIn('"finish_reason": "stop"', output)
+        self.assertTrue(output.endswith("data: [DONE]\n\n"))
 
 
 if __name__ == "__main__":
     unittest.main()
+

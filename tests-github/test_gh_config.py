@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import tempfile
@@ -54,6 +54,22 @@ class TestGitHubConfig(unittest.TestCase):
                 self.assertEqual(cfg.read_token(), "env-override-token")
             finally:
                 del os.environ["GITHUB_READ_TOKEN"]
+
+    def test_read_token_fallback_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            host_dir = Path(tmp) / "srv" / "hermes" / "hermes-data" / "tools" / "github"
+            host_dir.mkdir(parents=True)
+            token_file = host_dir / "read-token"
+            token_file.write_text("my-host-token", encoding="utf-8")
+
+            # Config configured with container path /opt/data
+            cfg = parse_config({"token_path": "/opt/data/tools/github/read-token"})
+            # Override host candidate path test via GITHUB_TOKEN_PATH
+            os.environ["GITHUB_TOKEN_PATH"] = str(token_file)
+            try:
+                self.assertEqual(cfg.read_token(), "my-host-token")
+            finally:
+                del os.environ["GITHUB_TOKEN_PATH"]
 
 
 if __name__ == "__main__":

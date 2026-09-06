@@ -19,17 +19,20 @@ class TestBridgeConfig(unittest.TestCase):
         self.assertEqual(cfg.port, 8765)
         self.assertEqual(cfg.default_model, "gemini-3.8-flash-medium")
         self.assertFalse(cfg.allow_tool_emulation)
+        self.assertTrue(cfg.allow_delegated_mcp)
 
     def test_env_overrides(self):
         with patch.dict(os.environ, {
             "ANTIGRAVITY_BRIDGE_HOST": "127.0.0.1",
             "ANTIGRAVITY_BRIDGE_PORT": "9999",
             "ANTIGRAVITY_DEFAULT_MODEL": "gemini-3.8-flash-high",
+            "ANTIGRAVITY_ALLOW_DELEGATED_MCP": "false",
         }):
             cfg = load_config()
             self.assertEqual(cfg.host, "127.0.0.1")
             self.assertEqual(cfg.port, 9999)
             self.assertEqual(cfg.default_model, "gemini-3.8-flash-high")
+            self.assertFalse(cfg.allow_delegated_mcp)
 
 
 if __name__ == "__main__":

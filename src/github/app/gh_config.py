@@ -38,13 +38,23 @@ class GitHubConfig:
         token = os.environ.get("GITHUB_READ_TOKEN")
         if token and token.strip():
             return token.strip()
-        p = Path(self.token_path)
-        try:
-            if p.is_file():
-                t = p.read_text(encoding="utf-8").strip()
-                return t or None
-        except OSError:
-            return None
+        env_token_path = os.environ.get("GITHUB_TOKEN_PATH", "").strip()
+        candidates = []
+        if env_token_path:
+            candidates.append(Path(env_token_path))
+        candidates.extend([
+            Path(self.token_path),
+            Path(self.token_path.replace("/opt/data", "/srv/hermes/hermes-data")),
+            Path(self.token_path.replace("/srv/hermes/hermes-data", "/opt/data")),
+        ])
+        for p in candidates:
+            try:
+                if p.is_file():
+                    t = p.read_text(encoding="utf-8").strip()
+                    if t:
+                        return t
+            except OSError:
+                continue
         return None
 
 

@@ -14,8 +14,9 @@ class BridgeConfig:
     port: int = 8765
     binary_path: str = "/home/<PI_USER>/antigravity-test-bin/antigravity"
     default_model: str = "gemini-3.8-flash-medium"
-    timeout_seconds: int = 60
+    timeout_seconds: int = 120
     allow_tool_emulation: bool = False  # Section 15: strictly no ad-hoc prompt parsers
+    allow_delegated_mcp: bool = True    # Phase H.3.2: constrained delegated read-only agent
     supported_models: list = field(
         default_factory=lambda: [
             "gemini-3.8-flash-medium",
@@ -48,6 +49,8 @@ def load_config(config_path: Optional[str] = None) -> BridgeConfig:
                 cfg.timeout_seconds = int(data["timeout_seconds"])
             if "allow_tool_emulation" in data:
                 cfg.allow_tool_emulation = bool(data["allow_tool_emulation"])
+            if "allow_delegated_mcp" in data:
+                cfg.allow_delegated_mcp = bool(data["allow_delegated_mcp"])
             if "supported_models" in data and isinstance(data["supported_models"], list):
                 cfg.supported_models = data["supported_models"]
 
@@ -63,5 +66,7 @@ def load_config(config_path: Optional[str] = None) -> BridgeConfig:
         cfg.binary_path = os.environ["ANTIGRAVITY_BIN"]
     if "ANTIGRAVITY_DEFAULT_MODEL" in os.environ:
         cfg.default_model = os.environ["ANTIGRAVITY_DEFAULT_MODEL"]
+    if "ANTIGRAVITY_ALLOW_DELEGATED_MCP" in os.environ:
+        cfg.allow_delegated_mcp = os.environ["ANTIGRAVITY_ALLOW_DELEGATED_MCP"].lower() in {"1", "true", "yes"}
 
     return cfg
