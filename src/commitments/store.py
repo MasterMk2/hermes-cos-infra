@@ -164,6 +164,17 @@ def save_commitment(
                     (cmt.commitment_id, now_iso, f, old_v, new_v, actor, reason),
                 )
 
+        # If existing is already superseded by a merge, preserve superseded state during backfill
+        if row_dict.get("currentness") == "superseded" and cmt.currentness != "superseded":
+            cmt.currentness = "superseded"
+            cmt.work_state = row_dict.get("work_state") or "CANCELLED"
+            cmt.notes = row_dict.get("notes")
+
+        # Preserve higher source_count from existing/evidence table
+        cur.execute("SELECT COUNT(*) FROM commitment_evidence WHERE commitment_id = ?", (cmt.commitment_id,))
+        ev_count = cur.fetchone()[0]
+        cmt.source_count = max(cmt.source_count, ev_count, row_dict.get("source_count") or 1)
+
         cur.execute(
             """
             UPDATE commitments SET

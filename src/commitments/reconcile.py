@@ -252,6 +252,9 @@ def merge_commitments(
     save_commitment(conn, source, actor=actor, reason=f"merged_into:{target_id}")
 
     # Save target updates
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM commitment_evidence WHERE commitment_id = ?", (target_id,))
+    target.source_count = cur.fetchone()[0]
     save_commitment(conn, target, actor=actor, reason=f"{reason}:{source_id}")
     return get_commitment(conn, target_id)
 
