@@ -1,0 +1,67 @@
+"""Configuration for Antigravity Provider Bridge (Phase H.3.1)."""
+
+from dataclasses import dataclass, field
+import os
+from typing import Any, Dict, Optional
+import yaml
+
+
+@dataclass
+class BridgeConfig:
+    """Settings for the local Antigravity provider bridge."""
+
+    host: str = "0.0.0.0"
+    port: int = 8765
+    binary_path: str = "/home/<PI_USER>/antigravity-test-bin/antigravity"
+    default_model: str = "gemini-3.8-flash-medium"
+    timeout_seconds: int = 60
+    allow_tool_emulation: bool = False  # Section 15: strictly no ad-hoc prompt parsers
+    supported_models: list = field(
+        default_factory=lambda: [
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-low",
+            "gemini-3.7-flash-medium",
+            "gemini-3.6-flash-medium",
+            "gemini-3.1-pro-high",
+        ]
+    )
+
+
+def load_config(config_path: Optional[str] = None) -> BridgeConfig:
+    """Load configuration from YAML file or environment variables."""
+    cfg = BridgeConfig()
+
+    path = config_path or os.environ.get("ANTIGRAVITY_BRIDGE_CONFIG")
+    if path and os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            if "host" in data:
+                cfg.host = str(data["host"])
+            if "port" in data:
+                cfg.port = int(data["port"])
+            if "binary_path" in data:
+                cfg.binary_path = str(data["binary_path"])
+            if "default_model" in data:
+                cfg.default_model = str(data["default_model"])
+            if "timeout_seconds" in data:
+                cfg.timeout_seconds = int(data["timeout_seconds"])
+            if "allow_tool_emulation" in data:
+                cfg.allow_tool_emulation = bool(data["allow_tool_emulation"])
+            if "supported_models" in data and isinstance(data["supported_models"], list):
+                cfg.supported_models = data["supported_models"]
+
+    # Environment overrides
+    if "ANTIGRAVITY_BRIDGE_HOST" in os.environ:
+        cfg.host = os.environ["ANTIGRAVITY_BRIDGE_HOST"]
+    if "ANTIGRAVITY_BRIDGE_PORT" in os.environ:
+        try:
+            cfg.port = int(os.environ["ANTIGRAVITY_BRIDGE_PORT"])
+        except ValueError:
+            pass
+    if "ANTIGRAVITY_BIN" in os.environ:
+        cfg.binary_path = os.environ["ANTIGRAVITY_BIN"]
+    if "ANTIGRAVITY_DEFAULT_MODEL" in os.environ:
+        cfg.default_model = os.environ["ANTIGRAVITY_DEFAULT_MODEL"]
+
+    return cfg
