@@ -126,6 +126,17 @@ def collect(cfg, clock, *, initialized_at=None) -> list:
             log.warning("event source has no events table: %s", path)
             return []
         rows = con.execute("SELECT * FROM events").fetchall()
+        dismissed_event_ids = set()
+        if table_exists(con, "commitments"):
+            try:
+                d_rows = con.execute(
+                    "SELECT ce.source_id FROM commitment_evidence ce "
+                    "JOIN commitments c ON ce.commitment_id = c.commitment_id "
+                    "WHERE c.work_state = 'DISMISSED'"
+                ).fetchall()
+                dismissed_event_ids = {str(r[0]) for r in d_rows}
+            except Exception:
+                pass
     except Exception:
         log.exception("event source query failed")
         return []
@@ -143,6 +154,8 @@ def collect(cfg, clock, *, initialized_at=None) -> list:
     out = []
     for row in rows:
         if str(row["event_id"]) in calendar_linked:
+            continue
+        if str(row["event_id"]) in dismissed_event_ids or str(row["source_id"] or "") in dismissed_event_ids:
             continue
         try:
             out.extend(signals_for_event(row, cfg, clock))

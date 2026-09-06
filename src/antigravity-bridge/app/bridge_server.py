@@ -62,7 +62,12 @@ metrics = BridgeMetrics()
 
 def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     """Format OpenAI messages into a clean prompt string for Antigravity CLI."""
-    lines = []
+    lines = [
+        "[System Instruction]\n"
+        "You are a delegated read-only assistant operating under a strict security sandbox.\n"
+        "Do NOT call filesystem or shell tools (e.g. list_dir, view_file, run_command).\n"
+        "Use ONLY the permitted read-only MCP tools (for calendar, event, discord, line, gmail, github).\n"
+    ]
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
