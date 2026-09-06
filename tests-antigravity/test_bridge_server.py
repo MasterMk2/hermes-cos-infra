@@ -231,6 +231,75 @@ class TestRequestHandlerDelegation(unittest.TestCase):
         self.assertIn('"finish_reason": "stop"', output)
         self.assertTrue(output.endswith("data: [DONE]\n\n"))
 
+    def test_auth_token_enforcement(self):
+        from bridge_server import AntigravityRequestHandler
+        from io import BytesIO
+
+        cfg = BridgeConfig(auth_token="expected-bridge-token-xyz")
+        AntigravityRequestHandler.config = cfg
+
+        # Case 1: Missing Authorization header
+        handler = MagicMock()
+        handler.headers = {}
+        handler.config = cfg
+        self.assertFalse(AntigravityRequestHandler._is_authorized(handler))
+
+        # Case 2: Wrong Bearer token
+        handler.headers = {"Authorization": "Bearer wrong-token"}
+        self.assertFalse(AntigravityRequestHandler._is_authorized(handler))
+
+        # Case 3: Correct Bearer token
+        handler.headers = {"Authorization": "Bearer expected-bridge-token-xyz"}
+        self.assertTrue(AntigravityRequestHandler._is_authorized(handler))
+
+    def test_unauthorized_post_returns_401(self):
+        from bridge_server import AntigravityRequestHandler
+        from io import BytesIO
+
+        cfg = BridgeConfig(auth_token="expected-bridge-token-xyz")
+        AntigravityRequestHandler.config = cfg
+
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode("utf-8")
+        handler = MagicMock()
+        handler.headers = {"Content-Length": str(len(body)), "Authorization": "Bearer bad-token"}
+        handler.rfile = BytesIO(body)
+        handler.path = "/v1/chat/completions"
+        handler.config = cfg
+        handler._is_authorized = lambda: AntigravityRequestHandler._is_authorized(handler)
+
+        AntigravityRequestHandler.do_POST(handler)
+        handler._send_json.assert_called_once()
+        args = handler._send_json.call_args[0]
+        status_code = args[0]
+        data = args[1]
+        self.assertEqual(status_code, 401)
+        self.assertEqual(data["error"]["code"], 401)
+
+    def test_health_sanitized_no_binary_or_secrets(self):
+        from bridge_server import AntigravityRequestHandler
+
+        cfg = BridgeConfig(
+            binary_path="/sensitive/host/path/antigravity",
+            auth_token="secret-bridge-token",
+        )
+        AntigravityRequestHandler.config = cfg
+
+        handler = MagicMock()
+        handler.headers = {}
+        handler.path = "/health"
+        handler.config = cfg
+
+        AntigravityRequestHandler.do_GET(handler)
+        handler._send_json.assert_called_once()
+        args = handler._send_json.call_args[0]
+        status_code = args[0]
+        data = args[1]
+        self.assertEqual(status_code, 200)
+        self.assertNotIn("binary_path", data)
+        self.assertNotIn("quota_project", data)
+        self.assertNotIn("secret-bridge-token", json.dumps(data))
+        self.assertEqual(data["status"], "healthy")
+
 
 if __name__ == "__main__":
     unittest.main()

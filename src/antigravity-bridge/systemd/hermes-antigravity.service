@@ -1,0 +1,26 @@
+[Unit]
+Description=Hermes Antigravity Provider Bridge (Phase H.3.2-S)
+After=network.target
+
+[Service]
+Type=simple
+User=hermesantigravity
+Group=hermesantigravity
+WorkingDirectory=/srv/hermes/antigravity
+Environment="HOME=/home/hermesantigravity"
+Environment="ANTIGRAVITY_BRIDGE_CONFIG=/srv/hermes/antigravity/config/bridge.yaml"
+Environment="PYTHONPATH=/srv/hermes/antigravity/app"
+ExecStart=/srv/hermes/antigravity/venv/bin/python3 /srv/hermes/antigravity/app/bridge_server.py
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Security Hardening & Sandboxing (Section 4 & 7)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/hermes/antigravity/state /srv/hermes/antigravity/logs /home/hermesantigravity
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

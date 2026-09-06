@@ -1,3 +1,46 @@
+# Hermes H.3.2-S Resume
+
+## Objective
+
+Harden the Antigravity runtime isolation and complete security closeout (dedicated service identity `hermesantigravity`, 25 exact MCP tool allowlist, bridge caller isolation and internal bearer token authentication, `/health` endpoint sanitization, and regression test resolution).
+
+## Completed: COMPLETED (2026-09-06)
+
+- Dedicated Service Account `hermesantigravity` (UID 994, GID 979, shell `/usr/sbin/nologin`, home `/home/hermesantigravity` 0700):
+  - Completely isolated from privileged groups (`docker`, `sudo`, `adm`, `root`).
+  - Read access to published Gmail index via `hermesreconcile` group.
+  - Dedicated Google OAuth token in `/home/hermesantigravity/.gemini/antigravity-cli/antigravity-oauth-token` (0600).
+  - Managed under host systemd service `hermes-antigravity.service`.
+- Exact 25 MCP Read-Only Tools Allowlist:
+  - Wildcard `mcp(*)` eliminated; replaced by exact 25 entries across GitHub (8), Gmail (4), Calendar (3), Discord (3), LINE (3), Event (4).
+  - Explicit deny rules for execution (`command(*)`, `file(*)`, `browser(*)`, `terminal(*)`) and mutations (`mcp(event/event_mark_*)`, etc.).
+  - Verified allowed tool execution and denial interception.
+- Bridge Caller Isolation & Authentication:
+  - Bound exclusively to `172.18.0.1:8765` (Docker bridge gateway interface); LAN connections refused.
+  - Internal Bearer token authentication enforced on completions and models endpoints.
+  - Sanitized `/health` and `/status` endpoints with zero secret, path, or project leakage.
+- Regression Test Count Discrepancy Resolved (Item D):
+  - Explained 145 (G.2 baseline) vs 152 (H.1/H.2 with calendar and gmail probes).
+  - All 152 attention tests running and passing on Pi with test isolation intact.
+- Full Regression Test Suite (493 / 493 PASS, 100%):
+  - tests-antigravity: 19 / 19 PASS
+  - tests-github: 25 / 25 PASS
+  - tests-gmail: 31 / 31 PASS
+  - tests-calendar: 15 / 15 PASS
+  - tests-attention: 152 / 152 PASS
+  - tests-gateway: 251 / 251 PASS
+- Production E2E Verification (/v1/runs):
+  - Primary Gemini 3.8 Flash query with GitHub MCP: PASS (commit `e16288af...` summarized).
+  - Mutation rejection: PASS (autonomous read-only invariant refusal).
+  - Failover to CommandCode fallback and automatic recovery verified.
+- Quota Invariant: Consumer Antigravity quota verified (`authMethod=consumer`, `quotaProject=` blank). Zero paid GCP billing.
+
+## Next phase
+
+- Next: Phase I.1 (or next scheduled capability)
+
+---
+
 # Hermes H.3.2 Resume
 
 ## Objective

@@ -1,0 +1,9 @@
+# Hermes Antigravity Provider Bridge Configuration (Phase H.3.2-S)
+host: "172.18.0.1"
+port: 8765
+binary_path: "/srv/hermes/antigravity/bin/antigravity"
+default_model: "gemini-3.8-flash-medium"
+timeout_seconds: 120
+allow_tool_emulation: false
+allow_delegated_mcp: true
+auth_token_file: "/srv/hermes/antigravity/secrets/bridge.token"

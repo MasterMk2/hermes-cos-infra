@@ -233,6 +233,17 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
 
     config: BridgeConfig = BridgeConfig()
 
+    def _is_authorized(self) -> bool:
+        """Verify Bearer token against configured internal secret."""
+        if not getattr(self.config, "auth_token", None):
+            return True
+        auth_header = self.headers.get("Authorization", "").strip()
+        if not auth_header.startswith("Bearer "):
+            return False
+        token = auth_header[7:].strip()
+        import hmac
+        return hmac.compare_digest(token, self.config.auth_token)
+
     def _send_json(self, status_code: int, data: Dict[str, Any]):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
@@ -305,14 +316,13 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
             token_path = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
             is_auth = os.path.isfile(token_path)
             
+            # Sanitized status payload (Section 18: zero secret/path leakage)
             data = {
                 "status": "healthy",
                 "provider": "antigravity",
-                "binary_path": self.config.binary_path,
                 "configured_model": self.config.default_model,
                 "authenticated": is_auth,
                 "auth_method": "consumer",
-                "quota_project": None,
                 "tool_calling_support": (
                     "delegated_mcp_agent" if self.config.allow_delegated_mcp else "unsupported_in_headless_agent_loop"
                 ),
@@ -329,6 +339,9 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
             return
 
         if self.path in {"/v1/models", "/models"}:
+            if not self._is_authorized():
+                self._send_json(401, {"error": {"message": "Unauthorized: valid Bearer token required", "type": "authentication_error", "code": 401}})
+                return
             models_data = [
                 {"id": m, "object": "model", "created": int(metrics.start_time), "owned_by": "google-antigravity"}
                 for m in self.config.supported_models
@@ -340,6 +353,10 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path in {"/v1/chat/completions", "/chat/completions"}:
+            if not self._is_authorized():
+                metrics.failed_requests += 1
+                self._send_json(401, {"error": {"message": "Unauthorized: valid Bearer token required", "type": "authentication_error", "code": 401}})
+                return
             metrics.total_requests += 1
             content_len = int(self.headers.get("Content-Length", 0))
             raw_body = self.rfile.read(content_len).decode("utf-8", errors="replace")
