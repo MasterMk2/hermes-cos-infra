@@ -1,3 +1,73 @@
+# Hermes I.1-S Resume
+
+## Objective
+
+Execute Phase I.1-S Production Closeout for Unified Commitments & Agenda Layer (clean synthetic fixtures from production DB, enforce least-privilege filesystem boundary with HERMES_HOME_MODE=0710 and HERMES_GID=980, conduct real Discord and LINE frontend E2E retrieval queries via Antigravity primary, validate Attention Engine commitment noise suppression and new actionable signals, and resolve platform regression suite).
+
+## Completed: COMPLETED (2026-09-06)
+
+- A. Synthetic Production Data Cleanup:
+  - 4 synthetic commitments (`cmt_e2e_discord_req_b`, `cmt_e2e_gmail_req_b`, `cmt_ambig_1`, `cmt_ambig_2`) and 4 synthetic evidence rows safely purged.
+  - Mock evidence (`gmail:h2_e2e_mock_exam_confirm`) removed from real commitment `cmt_bf343048b742`; `source_count` restored to 1.
+  - Transactional cleanup executed; database integrity verified (`PRAGMA integrity_check: ok`, `PRAGMA foreign_key_check: ok`).
+  - Production DB count: commitments 737, evidence 737, history 737, events 656.
+  - Backfill idempotency re-run verified: 0 added, 0 duplicates, stable 737 rows.
+- B. Least-Privilege Filesystem Boundary:
+  - Reviewed broad `0755` permission model; reconfigured `docker-compose.yaml` with `HERMES_GID=980` (`hermesreconcile`) and `HERMES_HOME_MODE=0710`.
+  - Container-enforced startup permission sets `/srv/hermes/hermes-data` to `0710 <PI_USER>:hermesreconcile`.
+  - Subdirectories tightened: `events/` (0750) with `events.db` (0640), `knowledge-index/` (0750) with `discord/index.db` (0640) and `line/index.db` (0640).
+  - Sensitive files restricted: `config.yaml` (0600 <PI_USER>:<PI_USER>), `.env` (0600), `auth.json` (0600).
+  - Multi-user isolation validated: `hermesantigravity` can traverse and read required indexes, but CANNOT read `config.yaml`, `.env`, `auth.json`, or `/var/run/docker.sock`.
+  - Arbitrary local user (`nobody`) denied all access (`0/6 readable`).
+  - Coding Worker isolated in separate container without volume mounts.
+  - Verified persistence across container restart.
+- C. Real Discord / LINE Frontend E2E:
+  - Verified 3 real queries on Discord DM without manual `-t` flags (`今日やること何？`, `今、返事待ちって何がある？`, `期限過ぎてるものある？`).
+  - Verified 1 real query on LINE webhook listener (`今日やること何？`).
+  - Antigravity primary (`gemini-3.8-flash-medium`) utilized with 100% success; zero fallbacks triggered.
+  - `agenda_get` / `event_*` MCP tools invoked cleanly to generate accurate Japanese summaries.
+- D. Attention Integration / Flood Validation:
+  - Verified `att_events.py` lines 42-66 suppressing events linked to `DISMISSED` commitments (360 routine noise events suppressed).
+  - Verified historical baseline flood suppression: 0 proactive notifications generated on 737 commitments.
+  - Added unit test suite in `tests-attention/test_commitments_attention.py` covering dismissed noise suppression, new SELF actionable signal generation, and overdue transitions (all passed).
+- Full Regression Test Suite (510 / 510 PASS, 100%):
+  - tests-antigravity: 19 / 19 PASS
+  - tests-github: 26 / 26 PASS
+  - tests-gmail: 31 / 31 PASS
+  - tests-calendar: 15 / 15 PASS
+  - tests-attention: 155 / 155 PASS
+  - tests-commitments: 13 / 13 PASS
+  - tests-gateway: 251 / 251 PASS
+
+## Next phase
+
+- Next: Phase I.2 — Daily Planning / Morning Brief
+
+---
+
+# Hermes I.1 Resume
+
+## Objective
+
+Deliver Unified Commitments & Agenda Layer: ingest dispersed promises, requests, tasks, and follow-ups across LINE, Discord, Gmail, Calendar, and Event Layer into a canonical current-state commitment store with immutable evidence links, state/history separation, explicit responsibility and temporal semantics, agenda projections, and read-only MCP exposure for Personal Hermes.
+
+## Completed: COMPLETED (2026-09-06)
+
+- Production Event Profiling completed (656 raw events, 81 calendar events analyzed; noise and duplication patterns mapped).
+- Canonical Commitment Schema & Store implemented in `/srv/hermes/hermes-data/events/events.db`:
+  - `commitments`, `commitment_evidence`, `commitment_history` tables with strict integrity and foreign keys.
+- Immutable evidence linkage established linking events to commitments.
+- Reconcile engine implemented with responsibility (`SELF`, `COUNTERPARTY`, `MUTUAL`, `INFORMATIONAL`), work state (`ACTIONABLE`, `SCHEDULED`, `WAITING`, `COMPLETED`, `DISMISSED`, `ABANDONED`), and temporal state semantics.
+- Agenda projection engine (`agenda_get`) providing `today`, `upcoming`, `waiting`, `overdue`, `undated` projections.
+- Antigravity read-only MCP retrieval: `event_mcp.py` exposing `agenda_get`, `commitment_get`, `commitment_search`, `commitment_history`.
+- Backfill pipeline completed populating initial baseline commitments.
+
+## Next phase
+
+- Next: Phase I.1-S Production Closeout
+
+---
+
 # Hermes H.3.2-S Resume
 
 ## Objective
