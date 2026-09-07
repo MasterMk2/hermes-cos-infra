@@ -1,0 +1,104 @@
+# Hermes Daily Planning & Morning Brief — sample configuration.
+#
+# Installed to /srv/hermes/planning/config.yaml by install-root.sh, which never
+# overwrites an existing file. Override the location with
+# HERMES_PLANNING_CONFIG.
+#
+# =========================================================================
+#  CHANGING THE MORNING BRIEF TIME  (phase section 53 — single config source)
+# =========================================================================
+#   1. edit `morning_brief.time` below, in the INSTALLED file
+#        sudo nano /srv/hermes/planning/config.yaml
+#   2. re-run the installer so the systemd timer is re-rendered from it
+#        sudo bash <repo>/src/planning/install-root.sh
+#   3. confirm
+#        systemctl list-timers hermes-morning-brief.timer
+#
+# The value here is the ONLY place the time is written. The .timer file is
+# generated from it; editing the .timer directly is overwritten on the next
+# install and will silently disagree with the late-boot window computed by the
+# service. Do not edit /etc/systemd/system/hermes-morning-brief.timer by hand.
+# =========================================================================
+
+timezone: "Asia/Tokyo"
+
+morning_brief:
+  # HH:MM in `timezone` above. 08:30 preserves the owner's existing morning
+  # slot (the `chief-morning-review` job runs at 30 23 * * * UTC = 08:30 JST),
+  # which phase section 53 requires rather than replacing it with a fresh
+  # 08:00 default.
+  time: "08:30"
+
+  # Phase section 56. The Pi boots at 12:00 and the 08:30 run was missed:
+  # within this many hours of the slot, still send; later, skip the day.
+  # `--trigger manual` bypasses this window but never the idempotency check.
+  late_boot_grace_hours: 3
+
+  # Phase sections 61 and 99. "discord" is the only accepted value; anything
+  # else refuses to deliver rather than being honoured, and there is no code
+  # path from this service to LINE.
+  channel: "discord"
+
+  enabled: true
+
+  # Phase section 60. Off by default: a brief that cannot be generated is
+  # usually a source or configuration problem that persists for days, and a
+  # daily "it broke" push is the notification flood section 126 forbids. The
+  # health file and `journalctl -u hermes-morning-brief` are the primary
+  # channel. When true, a short Discord-only failure NOTICE (never a brief) is
+  # sent under its own `morning-brief-failure:` id.
+  notify_on_failure: false
+
+  # Seconds to wait on the gateway's unix socket.
+  socket_timeout_seconds: 30
+
+# Plan-size caps. See I2-AMENDMENT section F: these are the measured
+# production numbers, not guesses.
+limits:
+  scheduled: 5
+  must_do: 5
+  overdue: 5
+  next_up: 5
+  waiting_for: 7
+  backlog: 3
+
+overdue_per_counterparty_cap: 2
+
+windows:
+  next_up_hours: 72
+  imminent_hours: 3
+  followup_days: 7
+  conflict_default_duration_minutes: 60
+  dense_window_minutes: 90
+
+# Seconds after which a source is reported stale. A stale source adds
+# `data_freshness_warning` to the plan and marks the run degraded; it never
+# stops the brief (phase section 37).
+freshness_thresholds_seconds:
+  calendar: 86400
+  gmail: 86400
+  line: 172800
+  discord: 172800
+  commitments: 86400
+
+paths:
+  # Canonical truth. Opened read-only, and mounted read-only by the service
+  # unit as well (phase section 64).
+  events_db: "/srv/hermes/hermes-data/events/events.db"
+  # Planning state and the health file. The only directory this service may
+  # write (phase sections 65, 68).
+  planning_dir: "/srv/hermes/hermes-data/planning"
+  # The gateway's proactive socket. This service holds no Discord or LINE
+  # token; the gateway owns both and fixes the recipient (phase sections 51,
+  # 52, 69).
+  gateway_proactive_socket: "/srv/hermes/channel-gateway/run/proactive.sock"
+
+renderer:
+  # auto: try the LLM renderer, fall back to the deterministic template.
+  # The service unit grants AF_UNIX only, so an LLM client that needs a TCP
+  # socket fails closed and the template runs. That is the intended default;
+  # see the note in hermes-morning-brief.service.in before widening it.
+  mode: "auto"
+  timeout_seconds: 30
+  # The gateway rejects anything longer (gw_proactive.MAX_NOTIFICATION_CHARS).
+  max_chars: 1200

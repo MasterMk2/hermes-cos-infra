@@ -1,0 +1,168 @@
+# Hermes Morning Brief — the one-shot scheduled run.
+#
+# ==========================================================================
+#  THE BRIEF TIME IS NOT IN THIS FILE. It lives in
+#      /srv/hermes/planning/config.yaml   ->   morning_brief.time
+#  and is rendered into hermes-morning-brief.timer by install-root.sh
+#  (phase section 53). Change it there and re-run the installer.
+# ==========================================================================
+#
+# WHAT THIS SERVICE HOLDS: no Discord token, no LINE token, no OAuth
+# credential of any kind, and no recipient (phase sections 51, 52, 69). It
+# reads events.db read-only, renders text, and posts it to the channel
+# gateway's unix socket, which owns both tokens and fixes the recipient from
+# its own configuration. `hermesplanner` is a system account with
+# /usr/sbin/nologin and exactly two supplementary groups, listed below.
+
+[Unit]
+Description=Hermes Morning Brief (daily plan -> Discord owner DM via the gateway)
+Documentation=file:///srv/hermes/planning/config.yaml
+After=network-online.target channel-gateway.service
+# The gateway is where delivery happens. Wants, not Requires: if the gateway
+# is down the run records a delivery failure in the health file, which is more
+# useful than the unit refusing to start and leaving no trace.
+Wants=channel-gateway.service
+# /srv/hermes is the USB disk. Starting before it mounts would read a missing
+# events.db and create a second, invisible planning.db on the SD card — and
+# with the local delivery record living in that database, the morning's cheap
+# "already sent?" pre-check would answer no to everything.
+RequiresMountsFor=/srv/hermes
+
+[Service]
+Type=oneshot
+User=@PLANNER_USER@
+Group=@PLANNER_GROUP@
+WorkingDirectory=/srv/hermes/planning
+
+# Exactly two supplementary groups, and no others (phase section 69):
+#   @RECONCILE_GROUP@  read events.db, the Gmail status snapshot and the
+#                      knowledge indexes used for freshness (phase section 68)
+#   @PROACTIVE_GROUP@  write the gateway's proactive socket
+# Neither is docker, sudo or adm, and neither grants a GitHub, Gmail,
+# Calendar, LINE, Discord or Antigravity credential — the directories holding
+# those are owner-only to their own service accounts, and the InaccessiblePaths
+# below make that a measured fact rather than a claim.
+SupplementaryGroups=@RECONCILE_GROUP@ @PROACTIVE_GROUP@
+
+ExecStart=/srv/hermes/planning/venv/bin/python -m planning.cli --config /srv/hermes/planning/config.yaml run --trigger timer
+Environment=PYTHONPATH=/srv/hermes/planning/app
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Belt and braces alongside the OnCalendar suffix on the timer: every date the
+# service computes is derived from `timezone` in config.yaml via zoneinfo, so
+# this only affects log timestamps and anything that reads the process clock.
+Environment=TZ=Asia/Tokyo
+
+# The retry is bounded inside the service (3 attempts, phase section 59) and a
+# systemd-level restart would multiply that bound by an unbounded number of
+# restarts. A failed run is a failed unit, visible in `systemctl status`, and
+# tomorrow's timer is the retry.
+Restart=no
+# Exit 78 (EX_CONFIG): missing or malformed configuration. Kept for symmetry
+# with attention-engine.service; with Restart=no it is documentation.
+RestartPreventExitStatus=78
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-morning-brief
+
+# --- Hardening (phase sections 67-69, I2-CONTRACT.md section 6) -----------
+# Every line below is a capability NOT granted. The justification for each
+# thing that IS granted is in the comment next to it.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# No capability is needed to read a file, write a directory it owns, and
+# connect to a unix socket.
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+# Delivery is a unix socket, so AF_UNIX is the whole network requirement.
+# @RENDERER_ADDRESS_FAMILIES@ is `AF_UNIX` by default. It becomes
+# `AF_UNIX AF_INET AF_INET6` ONLY when the operator installs with
+# PLANNER_RENDERER_NET=1, which is needed only if the LLM renderer resolves to
+# a client that speaks TCP. Leave it off unless that is true: with AF_UNIX
+# alone an LLM client fails closed and renderer.py falls back to its
+# deterministic template, which produces a correct brief with no network at
+# all (I2-CONTRACT.md section 5). Failing closed to a correct brief is a
+# better default than a permanently open TCP capability.
+RestrictAddressFamilies=@RENDERER_ADDRESS_FAMILIES@
+
+# One-shot, small, and bounded on purpose (phase sections 103, 104). The Pi
+# has no swap headroom to lend; the run is killed rather than allowed to push
+# the host into swap.
+MemoryMax=300M
+TasksMax=32
+TimeoutStartSec=300
+
+# --- What must be writable -----------------------------------------------
+# Exactly one directory: the planning state and the health file
+# (phase sections 65, 68).
+ReadWritePaths=/srv/hermes/hermes-data/planning
+# Connecting to a unix socket requires write permission on the socket inode.
+# This grants the socket, not the gateway's state or configuration — both of
+# which are listed as inaccessible below.
+ReadWritePaths=/srv/hermes/channel-gateway/run
+
+# --- What must be readable, and read-only --------------------------------
+# Canonical truth (phase section 64). Measured on the Pi on 2026-09-08:
+# events.db is `journal_mode = delete` with no -wal/-shm companion, so a
+# read-only open needs no write access to this directory. That is what lets it
+# be mounted read-only here — an OS-level guarantee that the brief cannot
+# mutate commitments, commitment_evidence, commitment_history or events,
+# rather than a promise kept only by `PRAGMA query_only`.
+ReadOnlyPaths=/srv/hermes/hermes-data/events
+# Freshness sources only: published snapshots, never the canonical state or
+# the OAuth material, which live in sibling directories that are owner-only.
+ReadOnlyPaths=-/srv/hermes/calendar/index
+ReadOnlyPaths=-/srv/hermes/gmail/index
+ReadOnlyPaths=-/srv/hermes/hermes-data/knowledge-index
+ReadOnlyPaths=-/srv/hermes/planning
+
+# --- Phase section 69, enforced rather than asserted ----------------------
+# Each of these is denied at the mount namespace, so the claim survives a
+# future group change. The leading '-' makes a path that does not exist on
+# this host not a reason to refuse to start.
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+InaccessiblePaths=-/srv/hermes/docker
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/srv/hermes/hermes-data/.env
+InaccessiblePaths=-/srv/hermes/hermes-data/auth.json
+InaccessiblePaths=-/srv/hermes/hermes-data/sessions
+InaccessiblePaths=-/srv/hermes/hermes-data/memories
+InaccessiblePaths=-/srv/hermes/hermes-data/cron
+InaccessiblePaths=-/srv/hermes/channel-gateway/state
+InaccessiblePaths=-/srv/hermes/channel-gateway/config
+InaccessiblePaths=-/srv/hermes/calendar/state
+InaccessiblePaths=-/srv/hermes/gmail/state
+InaccessiblePaths=-/srv/hermes/gmail-event
+InaccessiblePaths=-/srv/hermes/github
+# I2-AMENDMENT A3: the morning brief must not read or write the attention
+# engine's state. Overlap with the attention catch-up digest is handled by
+# time separation alone — the digest fires just after quiet hours end at 08:00
+# and the brief runs at 08:30 — not by suppression rows, and not by widening
+# this service's reach.
+InaccessiblePaths=-/srv/hermes/attention/state
+InaccessiblePaths=-/srv/hermes/attention/config
+
+# No [Install] section on purpose: this unit is started by
+# hermes-morning-brief.timer and must never be enabled directly, which would
+# run it once at every boot regardless of the hour.
