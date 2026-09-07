@@ -1,0 +1,56 @@
+# Hermes Morning Brief — daily timer.
+#
+# ==========================================================================
+#  DO NOT EDIT THE INSTALLED COPY. THE TIME LIVES IN ONE PLACE:
+#      /srv/hermes/planning/config.yaml   ->   morning_brief.time
+#  install-root.sh renders @MORNING_TIME@ below from that value, so an edit
+#  here is overwritten on the next install AND would disagree with the
+#  late-boot window the service computes from the same key
+#  (phase section 53: a single, clearly documented config source).
+#
+#  To change the time:
+#      sudo nano /srv/hermes/planning/config.yaml     # morning_brief.time
+#      sudo bash <repo>/src/planning/install-root.sh
+#      systemctl list-timers hermes-morning-brief.timer
+# ==========================================================================
+#
+# TIMEZONE PINNING (phase section 54) — verified, not assumed.
+# The `Asia/Tokyo` suffix on OnCalendar= is an explicit timezone, independent
+# of the host's /etc/localtime. Measured on the Pi on 2026-09-08:
+#
+#     $ systemctl --version | head -1
+#     systemd 257 (257.13-1~deb13u1)
+#     $ systemd-analyze calendar "*-*-* 08:30:00 Asia/Tokyo"
+#     Normalized form: *-*-* 08:30:00 Asia/Tokyo
+#         Next elapse: Tue 2026-09-08 08:30:00 JST
+#            (in UTC): Mon 2026-09-07 23:30:00 UTC
+#
+# Calendar-specification timezone suffixes require systemd >= 252; this host
+# runs 257, and install-root.sh re-checks with `systemd-analyze calendar`
+# before installing, falling back to a bare `HH:MM:00` plus `Environment=TZ=`
+# on the service if the check ever fails on another host. The host timezone
+# happens to be Asia/Tokyo as well, but nothing here relies on that.
+
+[Unit]
+Description=Schedule the Hermes Morning Brief (@MORNING_TIME@ Asia/Tokyo)
+Documentation=file:///srv/hermes/planning/config.yaml
+
+[Timer]
+OnCalendar=*-*-* @MORNING_TIME@:00 Asia/Tokyo
+
+# Phase section 55. The Pi is not always on: without this a missed 08:30 is
+# simply lost. With it, a boot after the slot runs the unit immediately — and
+# the service, not the timer, then decides whether that is still wanted:
+# `late_boot_grace_hours` (default 3) sends, anything later records
+# `skipped_late_boot` and sends nothing (phase section 56).
+Persistent=true
+
+# The timer is the only trigger, so a spread would only make the delivery time
+# less predictable than the owner configured.
+AccuracySec=1min
+RandomizedDelaySec=0
+
+Unit=hermes-morning-brief.service
+
+[Install]
+WantedBy=timers.target

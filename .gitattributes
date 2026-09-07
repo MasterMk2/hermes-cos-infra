@@ -15,3 +15,9 @@
 *.md        text eol=lf
 *.txt       text eol=lf
 Dockerfile  text eol=lf
+
+# Phase I.2 planning: systemd timer templates and the generic *.in form. A
+# .timer with CRLF fails the same way a .service does.
+*.timer     text eol=lf
+*.timer.in  text eol=lf
+*.in        text eol=lf
