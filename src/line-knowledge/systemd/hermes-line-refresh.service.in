@@ -3,6 +3,7 @@ Description=Hermes LINE Knowledge daily read-only refresh
 Wants=network-online.target
 After=network-online.target
 RequiresMountsFor=/srv/hermes
+OnSuccess=hermes-line-reconcile.service
 
 [Service]
 Type=oneshot
@@ -13,7 +14,7 @@ Environment=MYLINE_SSH_HOST=line-source
 Environment=HOME=@ENGINE_HOME@
 ExecStart=/srv/hermes/hermes-data/tools/line-knowledge/refresh-line.sh
 TimeoutStartSec=5min
-UMask=0077
+UMask=0027
 
 NoNewPrivileges=true
 PrivateTmp=true

@@ -229,7 +229,7 @@ def merge_commitments(
             confidence=ev.confidence,
             snippet=ev.snippet,
         )
-        add_evidence(conn, target_id, ev_copy)
+        add_evidence(conn, target_id, ev_copy, auto_commit=False)
 
     # Authority and date resolution:
     # If source has calendar authority, target gains calendar authority and scheduled times
@@ -249,13 +249,14 @@ def merge_commitments(
     source.work_state = WorkState.CANCELLED.value
     source.currentness = Currentness.SUPERSEDED.value
     source.notes = (source.notes or "") + f" | Merged into {target_id}"
-    save_commitment(conn, source, actor=actor, reason=f"merged_into:{target_id}")
+    save_commitment(conn, source, actor=actor, reason=f"merged_into:{target_id}", auto_commit=False)
 
     # Save target updates
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM commitment_evidence WHERE commitment_id = ?", (target_id,))
     target.source_count = cur.fetchone()[0]
-    save_commitment(conn, target, actor=actor, reason=f"{reason}:{source_id}")
+    save_commitment(conn, target, actor=actor, reason=f"{reason}:{source_id}", auto_commit=False)
+    conn.commit()
     return get_commitment(conn, target_id)
 
 
@@ -278,7 +279,7 @@ def run_backfill(
 
     for row in event_rows:
         cmt = reconcile_event_row(row)
-        save_commitment(events_conn, cmt, actor=actor, reason="initial_backfill")
+        save_commitment(events_conn, cmt, actor=actor, reason="initial_backfill", auto_commit=False)
         processed_events += 1
         if cmt.work_state == WorkState.DISMISSED.value:
             dismissed_count += 1
@@ -295,8 +296,10 @@ def run_backfill(
         cal_cur.execute("SELECT * FROM calendar_events")
         for cal_row in cal_cur.fetchall():
             cal_cmt = reconcile_calendar_event(cal_row)
-            save_commitment(events_conn, cal_cmt, actor=actor, reason="calendar_backfill")
+            save_commitment(events_conn, cal_cmt, actor=actor, reason="calendar_backfill", auto_commit=False)
             cal_count += 1
+
+    events_conn.commit()
 
     return {
         "status": "completed",

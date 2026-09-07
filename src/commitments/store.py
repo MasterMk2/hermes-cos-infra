@@ -83,15 +83,13 @@ def save_commitment(
     conn: sqlite3.Connection,
     cmt: Commitment,
     actor: str = "system",
-    reason: Optional[str] = None,
+    reason: str = "create",
+    auto_commit: bool = True,
 ) -> Commitment:
-    """Insert or update a commitment, recording history on updates."""
+    """Insert or update a Commitment with field-level change history and evidence."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    if not cmt.created_at:
-        cmt.created_at = now_iso
-    cmt.updated_at = now_iso
-
     cur = conn.cursor()
+
     cur.execute("SELECT * FROM commitments WHERE commitment_id = ?", (cmt.commitment_id,))
     existing = cur.fetchone()
 
@@ -100,9 +98,9 @@ def save_commitment(
             """
             INSERT INTO commitments (
                 commitment_id, title, summary, responsibility, work_state,
-                counterparty, project_id, due_at, due_precision, scheduled_at,
-                scheduled_end_at, authority, confidence, currentness, notes,
-                created_at, updated_at, resolved_at, source_count
+                counterparty, project_id, due_at, due_precision,
+                scheduled_at, scheduled_end_at, authority, confidence,
+                currentness, notes, created_at, updated_at, resolved_at, source_count
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -121,8 +119,8 @@ def save_commitment(
                 cmt.confidence,
                 cmt.currentness,
                 cmt.notes,
-                cmt.created_at,
-                cmt.updated_at,
+                cmt.created_at or now_iso,
+                cmt.updated_at or now_iso,
                 cmt.resolved_at,
                 cmt.source_count,
             ),
@@ -131,22 +129,15 @@ def save_commitment(
             """
             INSERT INTO commitment_history (
                 commitment_id, changed_at, field, old_value, new_value, actor, reason
-            ) VALUES (?, ?, 'status', NULL, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (cmt.commitment_id, now_iso, cmt.work_state, actor, reason or "created"),
+            (cmt.commitment_id, now_iso, "status", None, cmt.work_state, actor, reason),
         )
     else:
-        # Check tracked fields for history recording
+        # Track changed fields
         tracked = [
-            "title",
-            "responsibility",
-            "work_state",
-            "due_at",
-            "scheduled_at",
-            "scheduled_end_at",
-            "currentness",
-            "counterparty",
-            "authority",
+            "title", "summary", "responsibility", "work_state", "counterparty",
+            "project_id", "due_at", "scheduled_at", "authority", "currentness"
         ]
         col_names = [col[0] for col in cur.description]
         row_dict = dict(zip(col_names, existing))
@@ -200,7 +191,7 @@ def save_commitment(
                 cmt.confidence,
                 cmt.currentness,
                 cmt.notes,
-                cmt.updated_at,
+                now_iso,
                 cmt.resolved_at,
                 cmt.source_count,
                 cmt.commitment_id,
@@ -209,9 +200,10 @@ def save_commitment(
 
     # Save evidence if any
     for ev in cmt.evidence:
-        add_evidence(conn, cmt.commitment_id, ev)
+        add_evidence(conn, cmt.commitment_id, ev, auto_commit=auto_commit)
 
-    conn.commit()
+    if auto_commit:
+        conn.commit()
     return cmt
 
 
@@ -219,6 +211,7 @@ def add_evidence(
     conn: sqlite3.Connection,
     commitment_id: str,
     ev: CommitmentEvidence,
+    auto_commit: bool = True,
 ) -> bool:
     """Attach evidence to commitment idempotently. Returns True if newly inserted."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -252,7 +245,8 @@ def add_evidence(
             """,
             (commitment_id, now_iso, commitment_id),
         )
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         return True
     except sqlite3.IntegrityError:
         # Already linked

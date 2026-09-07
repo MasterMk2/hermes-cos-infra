@@ -1,0 +1,44 @@
+[Unit]
+Description=Hermes Event Classification Fixed Broker
+RequiresMountsFor=/srv/hermes
+After=network.target hermes-antigravity.service
+Requires=hermes-antigravity.service
+
+[Service]
+Type=simple
+User=hermesantigravity
+Group=hermesreconcile
+WorkingDirectory=/srv/hermes/antigravity
+RuntimeDirectory=hermes
+RuntimeDirectoryMode=0775
+UMask=0007
+Environment=HERMES_CLASSIFIER_SOCK=/run/hermes/classifier.sock
+Environment=HERMES_BRIDGE_URL=http://172.18.0.1:8765/v1/chat/completions
+Environment=HERMES_BRIDGE_CONFIG=/srv/hermes/antigravity/config/bridge.yaml
+ExecStart=/usr/bin/python3 /srv/hermes/hermes-data/tools/events/event_broker.py
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=150M
+
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/opt/hermes-stack/.env
+InaccessiblePaths=-/home/<PI_USER>
+ReadOnlyPaths=/srv/hermes/antigravity/config
+ReadOnlyPaths=/srv/hermes/hermes-data/tools/events
+
+[Install]
+WantedBy=multi-user.target
