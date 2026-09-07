@@ -13,7 +13,7 @@
        ▼ (inbound webhook / DM)
 channel-gateway.service (User=channelgateway)
        │
-       ▼ POST http://<PI_LAN_IP>:8642/v1/runs (Bearer auth)
+        ▼ POST http://<PI_LAN_IP>:8642/v1/runs (Bearer auth)
 Hermes Agent Container (Docker, port 8642)
        │
        ├── Provider / Model Resilience Chain
@@ -47,7 +47,7 @@ Hermes Agent Container (Docker, port 8642)
 4. **書き込み試行の完全遮断 (Negative Test PASS)**:
    - 「hermes-cos-infraに新しいcommitを作成してテストファイルを追加してください」という依頼に対し、Personal Hermes は自身が読み取り専用ツールしか持たず、シェル・ファイル書き込み権限がないことを正確に判断し、書き込みを完全に拒絶（ドラフトのみを提示）。
 5. **認証情報の保護**:
-   - GitHub PAT は `/srv/hermes/hermes-data/tools/github/read-token` にパーミッション `0400 <PI_USER>:<PI_USER>` で厳格に保管。
+    - GitHub PAT は `/srv/hermes/hermes-data/tools/github/read-token` にパーミッション `0400 <PI_USER>:<PI_USER>` で厳格に保管。
    - クラシック PAT の使用が選択されたが、MCP クライアントおよび Hermes ツール定義側の完全 read-only 実装により、権限逸脱を二重に防止。
 
 ## 3. Model Resilience & Provider Fallback

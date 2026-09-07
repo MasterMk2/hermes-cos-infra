@@ -29,7 +29,7 @@ Phase H.3.2 において機能成立した **Constrained Antigravity Agent Backe
        ▼ (inbound webhook / DM)
 channel-gateway.service (User=channelgateway)
        │
-       ▼ POST http://<PI_LAN_IP>:8642/v1/runs (Bearer auth)
+        ▼ POST http://<PI_LAN_IP>:8642/v1/runs (Bearer auth)
 Hermes Agent Container (Docker: hermes, IP: 172.18.0.2)
        │
        ├── Provider / Model Resilience Chain
@@ -45,7 +45,7 @@ hermes-antigravity.service (Host systemd, User=hermesantigravity, UID: 994, GID:
        ├─ Local Bridge Server (172.18.0.1:8765)
        │    ├─ Bearer Token Verification (/srv/hermes/antigravity/secrets/bridge.token, mode 0400)
        │    ├─ Sanitized /health & /status (Zero secret, path, or project leakage)
-       │    └─ LAN Access Blocked (<PI_LAN_IP>:8765 -> Connection Refused)
+        │    └─ LAN Access Blocked (<PI_LAN_IP>:8765 -> Connection Refused)
        │
        └─ Constrained Subprocess Execution
             ├─ Official Antigravity CLI (/srv/hermes/antigravity/bin/antigravity)

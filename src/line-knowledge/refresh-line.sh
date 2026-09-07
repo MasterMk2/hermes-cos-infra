@@ -5,7 +5,8 @@
 # Exit codes: 0 ok | 3 ssh/token | 4 remote | 5 snapshot invalid | 6 index invalid | 10 locked
 set -euo pipefail
 
-# Default SSH alias from ~/.ssh/config (override with MYLINE_SSH_HOST / MYLINE_SSH)
+# SSH alias from ~/.ssh/config (override with MYLINE_SSH_HOST).
+# Pi migration: set MYLINE_SSH_HOST to your pre-existing SSH alias before running.
 export MYLINE_SSH_HOST="${MYLINE_SSH_HOST:-line-source}"
 
 TOOL_DIR=/srv/hermes/hermes-data/tools/line-knowledge

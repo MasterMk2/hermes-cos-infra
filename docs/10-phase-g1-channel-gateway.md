@@ -161,7 +161,7 @@ Hermes を呼ぶのは worker で、両者は**コミット済みの DB 行**で
   compose project `<PROXY_PROJECT>` / service `caddy`）。
   再起動中は <PUBLIC_DOMAIN> 配下の全サービスが一瞬落ちる。
 
-既存の `<EXISTING_LINE_DOMAIN>`（医薬祭の公式LINE取り込み口、`<EXISTING_LINE_ADDR>`）とは
+既存の `<EXISTING_LINE_DOMAIN>`（既存公式LINE取り込み口、`<EXISTING_LINE_ADDR>`）とは
 **別の LINE チャネル**を使う。1 つのチャネルに設定できる Webhook URL は
 1 つだけなので、既存チャネルの資格情報を流用すると
 **既存の取り込みが無言で止まる**。
@@ -213,9 +213,9 @@ Gateway は Hermes の `.env` を読めない。`ProtectSystem=strict` は読み
    E2E まで気づけず、「いま応答できません」だけが延々返る状態だった。
 
    ```
-   LISTEN  <PI_LAN_IP>:8642        (0.0.0.0 でも 127.0.0.1 でもない)
-   127.0.0.1:8642/health      -> URLError: Connection refused
-   <PI_LAN_IP>:8642/health  -> 200 {"status": "ok", ...}
+    LISTEN  <PI_LAN_IP>:8642        (0.0.0.0 でも 127.0.0.1 でもない)
+    127.0.0.1:8642/health      -> URLError: Connection refused
+    <PI_LAN_IP>:8642/health  -> 200 {"status": "ok", ...}
    ```
 
    値を直すだけでは同じことが繰り返されるので、**`--check` に到達性検査を

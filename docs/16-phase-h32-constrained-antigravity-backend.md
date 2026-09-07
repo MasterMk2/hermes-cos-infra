@@ -16,7 +16,7 @@
        ▼ (inbound webhook / DM)
 channel-gateway.service (User=channelgateway)
        │
-       ▼ POST http://<PI_LAN_IP>:8642/v1/runs (Bearer auth)
+        ▼ POST http://<PI_LAN_IP>:8642/v1/runs (Bearer auth)
 Hermes Agent Container (Docker, port 8642)
        │
        ├── Provider / Model Resilience Chain

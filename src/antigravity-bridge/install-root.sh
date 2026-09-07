@@ -37,9 +37,14 @@ install -d -m 0750 -o hermesantigravity -g hermesantigravity "$DEST/state"
 install -d -m 0750 -o hermesantigravity -g hermesantigravity "$DEST/logs"
 install -d -m 0700 -o hermesantigravity -g hermesantigravity "$DEST/secrets"
 
-# 3. Binary Placement
-if [ -f "/home/<PI_USER>/antigravity-test-bin/antigravity" ]; then
-  install -m 0755 -o root -g root "/home/<PI_USER>/antigravity-test-bin/antigravity" "$DEST/bin/antigravity"
+# 3. Binary Placement (operator staging path; override with ANTIGRAVITY_SRC_BIN)
+# Pi migration: set ANTIGRAVITY_SRC_BIN to the staged binary, or place it under
+# /home/${SUDO_USER}/antigravity-test-bin/antigravity before running.
+ANTIGRAVITY_SRC_BIN="${ANTIGRAVITY_SRC_BIN:-}"
+if [ -n "$ANTIGRAVITY_SRC_BIN" ] && [ -f "$ANTIGRAVITY_SRC_BIN" ]; then
+  install -m 0755 -o root -g root "$ANTIGRAVITY_SRC_BIN" "$DEST/bin/antigravity"
+elif [ -n "${SUDO_USER:-}" ] && [ -f "/home/${SUDO_USER}/antigravity-test-bin/antigravity" ]; then
+  install -m 0755 -o root -g root "/home/${SUDO_USER}/antigravity-test-bin/antigravity" "$DEST/bin/antigravity"
 fi
 
 # 4. Secret Bearer Token Provisioning

@@ -3,7 +3,8 @@
 # Silent on success (empty stdout = no delivery); prints only on failure.
 set -uo pipefail
 
-export MYLINE_SSH_HOST=line-source
+# Pi migration: export MYLINE_SSH_HOST with your SSH alias, or rename the alias to line-source.
+export MYLINE_SSH_HOST="${MYLINE_SSH_HOST:-line-source}"
 
 # If running inside Hermes container (/opt/data) where host SSH is not mounted,
 # verify that the host-level scheduled refresh (systemd hermes-line-refresh.timer)

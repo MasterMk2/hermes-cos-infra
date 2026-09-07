@@ -36,7 +36,7 @@ InaccessiblePaths=-/run/docker.sock
 InaccessiblePaths=-/var/run/docker.sock
 InaccessiblePaths=-/etc/hermes-secrets
 InaccessiblePaths=-/opt/hermes-stack/.env
-InaccessiblePaths=-/home/<PI_USER>
+InaccessiblePaths=-/home/
 ReadOnlyPaths=/srv/hermes/antigravity/config
 ReadOnlyPaths=/srv/hermes/hermes-data/tools/events
 

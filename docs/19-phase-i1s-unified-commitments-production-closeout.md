@@ -18,7 +18,7 @@ Phase I.1-S では、先行フェーズ I.1 で構築された Unified Commitmen
    - バックフィル再実行による冪等性を実証: 0件追加、0件重複、737件の整合性を完全維持。
 2. **Gate B: Least-Privilege Filesystem Boundary**
    - Docker Compose 設定 `HERMES_HOME_MODE=0755` を監査し、`HERMES_HOME_MODE=0710` および `HERMES_GID=980` (`hermesreconcile`) へ改修。
-   - `/srv/hermes/hermes-data` 直下の権限を `0710 <PI_USER>:hermesreconcile` に厳格化。
+    - `/srv/hermes/hermes-data` 直下の権限を `0710 <PI_USER>:hermesreconcile` に厳格化。
    - `hermesantigravity` ユーザーによるアクセス検証: `events.db`, `calendar`, `gmail`, `discord`, `line` の各 index.db は正常読み取り可能、一方 `.env`, `auth.json`, `config.yaml`, `docker.sock` は `Permission denied` (完全遮断)。
    - 任意ローカルユーザー (`nobody`) によるアクセス拒絶 (`ALL DENIED`) を実証。
    - コンテナ再作成 (`docker compose up -d`) 後の権限永続性を実証。
