@@ -13,6 +13,10 @@ Phase I.1 adds:
 - commitment_search
 - commitment_status
 - agenda_get
+
+Phase I.2 adds (read-only, no writes, no delivery):
+- daily_plan_get
+- morning_brief_get
 """
 
 import json
@@ -56,6 +60,23 @@ except ImportError:
         search_commitments = None
         get_commitment_status = None
         generate_agenda = None
+
+# Phase I.2 planning boundary. The adapter itself is stdlib-only and imports the
+# planner/renderer lazily, so this stays importable while src/planning is partial.
+try:
+    from planning.mcp_planning import (
+        daily_plan_get as planning_daily_plan_get,
+        morning_brief_get as planning_morning_brief_get,
+    )
+except ImportError:
+    try:
+        from src.planning.mcp_planning import (
+            daily_plan_get as planning_daily_plan_get,
+            morning_brief_get as planning_morning_brief_get,
+        )
+    except ImportError:
+        planning_daily_plan_get = None
+        planning_morning_brief_get = None
 
 try:
     from mcp.server.lowlevel import Server
@@ -500,6 +521,25 @@ def _agenda_get(args):
         con.close()
 
 
+# ==============================================================================
+# Phase I.2 — Daily Plan & Morning Brief Handlers (READ-ONLY)
+# ==============================================================================
+# Both handlers delegate to planning.mcp_planning, which opens its own read-only
+# connection (mode=ro + PRAGMA query_only) on EVENTS_DB. Nothing here writes,
+# mutates state, or delivers a notification.
+
+def _daily_plan_get(args):
+    if planning_daily_plan_get is None:
+        return {"error": "planning_module_unavailable"}
+    return planning_daily_plan_get(args, db_path=DB)
+
+
+def _morning_brief_get(args):
+    if planning_morning_brief_get is None:
+        return {"error": "planning_module_unavailable"}
+    return planning_morning_brief_get(args, db_path=DB)
+
+
 SEARCH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -608,6 +648,44 @@ AGENDA_GET_SCHEMA = {
     },
 }
 
+DAILY_PLAN_GET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Optional local date 'YYYY-MM-DD'. Defaults to today in `timezone`.",
+        },
+        "timezone": {
+            "type": "string",
+            "default": "Asia/Tokyo",
+            "description": "IANA timezone used for the local-day boundaries. Defaults to Asia/Tokyo.",
+        },
+    },
+}
+
+MORNING_BRIEF_GET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Optional local date 'YYYY-MM-DD'. Defaults to today in `timezone`.",
+        },
+        "timezone": {
+            "type": "string",
+            "default": "Asia/Tokyo",
+            "description": "IANA timezone used for the local-day boundaries. Defaults to Asia/Tokyo.",
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["auto", "template"],
+            "default": "auto",
+            "description": "'auto' = natural-language render with deterministic fallback; 'template' = deterministic only.",
+        },
+    },
+}
+
 
 async def _list_tools(ctx=None, params=None):
     return types.ListToolsResult(
@@ -689,6 +767,31 @@ async def _list_tools(ctx=None, params=None):
                 description="Get Chief of Staff prioritized agenda projection: today, soon, overdue, waiting_for, and scheduled.",
                 inputSchema=AGENDA_GET_SCHEMA,
             ),
+            # --- Phase I.2 Tools (read-only) ---
+            types.Tool(
+                name="daily_plan_get",
+                description=(
+                    "PRIMARY tool for \"what should I do today\". Returns one day's deterministic plan: "
+                    "what is scheduled today, what is due today, what is overdue, what is coming up next, "
+                    "what is waiting on someone else, plus schedule conflicts, per-category counts and "
+                    "source freshness. Use it for 今日何すればいい？ / 今日の予定まとめて / 何からやればいい？ / "
+                    "今日の優先順位は？ / what should I do today / today's plan / what should I start with / "
+                    "today's priorities. Prefer this over agenda_get whenever the question is about a single day. "
+                    "Read-only projection over canonical commitments and calendar authority."
+                ),
+                inputSchema=DAILY_PLAN_GET_SCHEMA,
+            ),
+            types.Tool(
+                name="morning_brief_get",
+                description=(
+                    "The same day plan as daily_plan_get, already rendered as a short Japanese brief "
+                    "(今日の予定 / 最優先 / 期限超過 / 次に見るもの / 返事待ち / 注意点). Use it when the user wants "
+                    "the day summarised as prose to read or forward (朝のブリーフ / 今日のまとめ / morning brief); "
+                    "use daily_plan_get instead when you need to reason over the individual items. Read-only; "
+                    "renders from the compact plan only, never from raw source messages."
+                ),
+                inputSchema=MORNING_BRIEF_GET_SCHEMA,
+            ),
         ]
     )
 
@@ -726,6 +829,10 @@ async def _call_tool(ctx=None, params=None):
             out = _commitment_status()
         elif name == "agenda_get":
             out = _agenda_get(arguments)
+        elif name == "daily_plan_get":
+            out = _daily_plan_get(arguments)
+        elif name == "morning_brief_get":
+            out = _morning_brief_get(arguments)
         else:
             out = {"error": f"unknown_tool:{name}"}
     except Exception as exc:
