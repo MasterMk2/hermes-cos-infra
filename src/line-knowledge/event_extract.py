@@ -395,7 +395,7 @@ def cand_type(cand):
 
 
 def main():
-    global SNAPSHOT, INDEX_DB
+    global SNAPSHOT, INDEX_DB, EVENTS_DIR, LOG_DIR
     import argparse
 
     ap = argparse.ArgumentParser()
@@ -410,6 +410,8 @@ def main():
     SNAPSHOT = Path(args.source)
     INDEX_DB = Path(args.index)
     STATE_OUT = Path(args.state)
+    EVENTS_DIR = Path(args.db).parent
+    LOG_DIR = EVENTS_DIR / "logs"
 
     EVENTS_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
