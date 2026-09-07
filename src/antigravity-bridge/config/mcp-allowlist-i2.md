@@ -38,11 +38,27 @@ Exactly two entries, appended to `permissions.allow`:
 |---|---|
 | Allowlist (apply here) | `/home/hermesantigravity/.gemini/antigravity-cli/settings.json` |
 | MCP server registration (no change needed) | `/home/hermesantigravity/.gemini/config/mcp_config.json` |
-| Deployed server script (must be updated first) | `/srv/hermes/hermes-data/tools/events/event_mcp.py` |
-| Planning package (must be deployed alongside) | `/srv/hermes/hermes-data/tools/events/planning/` |
+| Deployed server script — **Antigravity** (authoritative) | `/srv/hermes/antigravity/mcp/event/event_mcp.py` |
+| Planning package — **Antigravity** (authoritative) | `/srv/hermes/antigravity/mcp/event/planning/` |
+| Deployed server script — **Hermes container** (`event_layer`) | `/srv/hermes/hermes-data/tools/events/event_mcp.py` |
+| Planning package — **Hermes container** | `/srv/hermes/hermes-data/tools/events/planning/` |
 
 Both files under `/home/hermesantigravity` are unreadable to the operator account
 (home is `drwx------`), so every step below needs `sudo`.
+
+> **BOTH copies must be updated. Corrected during T6 integration.**
+> T5 wrote this procedure before the ownership of the two `event_mcp.py` copies was
+> settled and targeted only the `hermes-data/tools/events` path. The coordinator then
+> verified with root (recorded as AMENDMENT 2 in `I2-AMENDMENTS.md`) that
+> `hermesantigravity`'s `mcp_config.json` launches
+> `/srv/hermes/antigravity/venv/bin/python3 /srv/hermes/antigravity/mcp/event/event_mcp.py`
+> with `PYTHONPATH=/srv/hermes/antigravity/mcp/event` — so **that** copy is what the
+> constrained agent runs, and `planning/` must sit next to it, mirroring how I.1 shipped
+> `/srv/hermes/antigravity/mcp/event/commitments/`.
+> The `hermes-data/tools/events` copy is *not* dead: section 5.2 below shows it is the
+> live `event_layer` server for the Hermes agent container, which is what the Discord
+> frontend reaches. Updating only one of the two leaves the other advertising 14 tools —
+> precisely the silent half-landing section 5.1 warns about.
 
 ---
 
@@ -51,7 +67,21 @@ Both files under `/home/hermesantigravity` are unreadable to the operator accoun
 The allowlist entry must **not** land before the tool exists, or Antigravity will allow a
 tool the server does not advertise.
 
-1. **Deploy the code first.**
+1. **Deploy the code first — to both consumers.**
+
+   a. Antigravity (the constrained agent; `root:root`, matching the existing
+      `/srv/hermes/antigravity/mcp/event/commitments/`):
+   ```bash
+   sudo install -o root -g root -m 0644 \
+       event_mcp.py /srv/hermes/antigravity/mcp/event/event_mcp.py
+   sudo install -d -o root -g root -m 0755 \
+       /srv/hermes/antigravity/mcp/event/planning
+   sudo install -o root -g root -m 0644 \
+       mcp_planning.py planner.py renderer.py plan_models.py plan_config.py freshness.py \
+       /srv/hermes/antigravity/mcp/event/planning/
+   ```
+
+   b. The Hermes agent container's `event_layer` server (section 5.2):
    ```bash
    sudo install -o <PI_USER> -g <PI_USER> -m 0644 \
        event_mcp.py /srv/hermes/hermes-data/tools/events/event_mcp.py
@@ -61,11 +91,26 @@ tool the server does not advertise.
        mcp_planning.py planner.py renderer.py plan_models.py plan_config.py freshness.py \
        /srv/hermes/hermes-data/tools/events/planning/
    ```
-   `event_mcp.py` is launched with `PYTHONPATH=/srv/hermes/hermes-data/tools/events`
-   (I2-PROFILE.md K.4), so `planning/` sitting next to it is importable as `planning.*`.
+
+   Six modules, and **only** those six: `mcp_planning.py` imports the deterministic core
+   plus the renderer and nothing else. `delivery.py`, `brief_state.py`,
+   `brief_service.py` and `cli.py` must **not** be deployed here — they are the
+   scheduled-brief half, they belong to `hermesplanner` under `/srv/hermes/planning/app/`,
+   and shipping them into the MCP tree would put a delivery client inside the agent's
+   import path for no reason. `tests-planning/test_integration_pipeline.py` and
+   `test_mcp_planning.py` both pin that `mcp_planning` never reaches them.
+
+   Each server is launched with its own directory on the path — Antigravity via an
+   explicit `PYTHONPATH=/srv/hermes/antigravity/mcp/event`, the container via
+   `event_mcp.py`'s own `sys.path` bootstrap (section 5.2) — so in both trees `planning/`
+   sitting next to `event_mcp.py` is importable as `planning.*`.
    **This is the import path T5 relies on** — `planning.mcp_planning`, with
    `src.planning.mcp_planning` only as a repo-local fallback. `planning/__init__.py` is
    optional (namespace package), but shipping one is harmless.
+
+   `src/planning/install-root.sh` does **not** do any of this: it installs the
+   scheduled-brief app under `/srv/hermes/planning/` and deliberately never writes into
+   the Antigravity tree. The two halves of Phase I.2 have separate deployment steps.
 
 2. **Verify the server advertises 16 tools** before touching the allowlist:
    ```bash

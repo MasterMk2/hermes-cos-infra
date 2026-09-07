@@ -80,6 +80,17 @@ def make_plan(*, date="2026-09-12", timezone_name="Asia/Tokyo", conflicts=None,
     }
     plan["counts"]["conflicts"] = {"shown": len(plan["conflicts"]), "total": len(plan["conflicts"])}
     plan["counts"]["filtered_noise"] = {"shown": 0, "total": int(totals.get("filtered_noise", 0))}
+    # `build_daily_plan` always emits this counter (AMENDMENT 1 section D: a
+    # work_state this planner predates is counted, never silently dropped).
+    # A hand-built fixture that omitted it would let the renderer drift away
+    # from the real `counts` shape without any test noticing —
+    # test_integration_pipeline.py pins the two shapes against each other.
+    plan["counts"]["unknown_work_state"] = {
+        "shown": 0, "total": int(totals.get("unknown_work_state", 0))
+    }
+    # `source_freshness` stays optional on purpose: the renderer must tolerate a
+    # plan without it (it reads the block with `or {}`), and `busy_day_plan()`
+    # covers the present case.
     if source_freshness is not None:
         plan["source_freshness"] = source_freshness
     if warnings:

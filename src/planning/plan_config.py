@@ -21,6 +21,17 @@ holds the read-only paths I2-PROFILE.md section G verified are readable without
 root. Keeping them here rather than under ``paths`` means anything already
 reading ``paths`` keeps working.
 
+Phase I.2 integration (T6) reconciled three keys that were live in one module
+but absent here, so that this really is the single source of truth the contract
+claims: ``morning_brief.notify_on_failure`` and
+``morning_brief.socket_timeout_seconds`` (read by ``brief_service``, shipped in
+``config/planning.sample.yaml``) and ``renderer.llm.enabled`` (read by
+``renderer.resolve_client``). All three keep the value their consumer already
+defaulted to, so behaviour is unchanged; what changes is that
+``load_config()`` on a host with no config file now returns them, and
+``tests-planning/test_integration_pipeline.py`` pins the three sources —
+``DEFAULTS``, the sample YAML, and the consuming modules — against each other.
+
 Config file on the Pi: ``/srv/hermes/planning/config.yaml``
 (env override: ``HERMES_PLANNING_CONFIG``).
 """
@@ -46,6 +57,13 @@ DEFAULTS: Dict[str, Any] = {
         # Phase section 61 / G.2 policy: LINE is scarce escalation only.
         "channel": "discord",
         "enabled": True,
+        # Phase section 60 / 126. Off by default: a brief that cannot be built
+        # usually stays broken for days, and a daily "it broke" push is the
+        # notification flood section 126 forbids. `brief_service` reads this.
+        "notify_on_failure": False,
+        # Seconds to wait on the gateway's unix socket. `brief_service` reads
+        # this when it constructs the default `delivery.DeliveryClient`.
+        "socket_timeout_seconds": 30,
     },
     "limits": {
         # AMENDMENT 1 section F, measured against production supply.
@@ -97,6 +115,13 @@ DEFAULTS: Dict[str, Any] = {
         "timeout_seconds": 30,
         # The gateway's MAX_NOTIFICATION_CHARS.
         "max_chars": 1200,
+        # The scheduled brief ships TEMPLATE-ONLY (coordinator ruling on T3's
+        # open question). `renderer.resolve_client` returns None while this is
+        # false, so `mode: auto` degrades to the deterministic template without
+        # a network socket or a token. Turning it on also requires widening
+        # `RestrictAddressFamilies` in the unit — see the header of
+        # `systemd/hermes-morning-brief.service.in` before doing so.
+        "llm": {"enabled": False},
     },
 }
 

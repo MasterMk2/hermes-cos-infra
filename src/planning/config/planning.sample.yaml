@@ -93,12 +93,50 @@ paths:
   # 52, 69).
   gateway_proactive_socket: "/srv/hermes/channel-gateway/run/proactive.sock"
 
+# Read-only inputs the freshness probe uses to decide whether a source is
+# stale (I2-PROFILE.md section G verified every one of these is readable
+# without root). An empty string disables a probe rather than inventing a
+# source: that source then reports stale with an explicit reason instead of
+# silently claiming to be fresh. Change a path here if a source moves.
+freshness_sources:
+  calendar_index_db: "/srv/hermes/calendar/index/index.db"
+  gmail_status_json: "/srv/hermes/gmail/index/status.json"
+  gmail_index_db: "/srv/hermes/gmail/index/index.db"
+  line_reconcile_health_json: "/srv/hermes/hermes-data/events/line-reconcile-health.json"
+  line_index_db: "/srv/hermes/hermes-data/knowledge-index/line/index.db"
+  discord_collector_db: "/srv/hermes/knowledge/discord/messages.db"
+
 renderer:
   # auto: try the LLM renderer, fall back to the deterministic template.
-  # The service unit grants AF_UNIX only, so an LLM client that needs a TCP
-  # socket fails closed and the template runs. That is the intended default;
-  # see the note in hermes-morning-brief.service.in before widening it.
+  # With `llm.enabled: false` below there is no LLM client to try, so `auto`
+  # is the template — deterministically, with no network and no token.
   mode: "auto"
   timeout_seconds: 30
   # The gateway rejects anything longer (gw_proactive.MAX_NOTIFICATION_CHARS).
   max_chars: 1200
+
+  # =====================================================================
+  #  THE SCHEDULED BRIEF SHIPS TEMPLATE-ONLY.
+  # =====================================================================
+  # Phase section 108 makes an *unavoidable* security-boundary expansion a
+  # stop condition. This one is avoidable: the deterministic template is a
+  # complete brief (phase section 76), so the service needs no TCP socket
+  # (`RestrictAddressFamilies=AF_UNIX`) and no credential of any kind.
+  # A deterministic renderer also cannot invent a task or a deadline, which
+  # is the section 100 quality gate for free.
+  #
+  # LLM rendering is still demonstrated in this phase, on the on-demand
+  # Discord path: Antigravity renders `daily_plan_get` output under its own
+  # existing credentials and this service is not involved.
+  #
+  # Turning `enabled` on is a deliberate boundary change and needs BOTH:
+  #   1. `sudo PLANNER_RENDERER_NET=1 bash install-root.sh` — widens the unit
+  #      to AF_UNIX AF_INET AF_INET6;
+  #   2. a token readable by `hermesplanner` at `token_file`.
+  # Read the RENDERER NETWORK note in hermes-morning-brief.service.in first.
+  llm:
+    enabled: false
+    # url: "http://172.18.0.1:8765/v1/chat/completions"   # renderer.DEFAULT_BRIDGE_URL
+    # model: "gemini-3.8-flash-medium"                    # renderer.DEFAULT_MODEL
+    # token_file: ""
+    # token_env: "HERMES_BRIDGE_TOKEN"
