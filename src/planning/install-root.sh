@@ -25,9 +25,18 @@
 #   that group would hand it group-read on the attention state database and the
 #   Discord message store — a direct violation of section 69. Instead this
 #   script creates a dedicated `hermesproactive` group, gives the run directory
-#   to it (the directory is setgid 2770, so the socket inherits the group), and
+#   to it (the directory is setgid, so the socket inherits the group), and
 #   puts both the attention engine's account and hermesplanner in it. Nothing
 #   in the gateway's code or configuration changes.
+#
+#   It also NARROWS that directory from 2770 to 2750. Group-write on a
+#   directory is permission to unlink its entries, `proactive.sock` included,
+#   which is broader than section 68's "WRITE: planning state/log only" and
+#   would let a compromised planner replace the socket every proactive caller
+#   uses. The gateway creates the socket as its owner and needs no group-write
+#   here; the planner needs group `x` to traverse plus group `w` on the 0660
+#   socket inode. The mode is asserted, not preserved, and `--uninstall`
+#   restores whatever it was before (recorded in the backup's rollback.env).
 #
 # USAGE
 #   sudo ATTENTION_USER=<the account attention-engine runs as> \
@@ -35,7 +44,9 @@
 #
 #   --dry-run   print every change without making any of them
 #   --uninstall remove the units, the identity and the group memberships,
-#               restoring the run directory's original group
+#               restoring the run directory's original group AND mode.
+#               Both are read from ORIGINAL_RUN_GROUP / ORIGINAL_RUN_MODE;
+#               source `$BACKUP/rollback.env` from the install first.
 #
 # A gateway restart is required for the socket to be recreated with the new
 # group; this script performs it (and says so) unless --dry-run. The exact
@@ -101,9 +112,16 @@ ensure_mode() {
   [ -e "$path" ] || return 0
   local have; have="$(stat -c '%a' "$path")"
   [ "$have" = "$want" ] && return 0
-  # Numeric compare: a larger octal value is a broader permission set.
-  if [ "$((10#$have))" -lt "$((10#$want))" ]; then
-    die "refusing to widen $path from 0$have to 0$want. Inspect it and decide by hand."
+  # Per-bit compare, not a magnitude compare. Reading a mode as a decimal
+  # number gets the common cases right by accident and the interesting ones
+  # wrong: 0700 -> 0640 is "700 > 640", so a decimal test calls it a narrowing
+  # and adds group-read while reporting that it removed permissions. What
+  # actually matters is whether `want` sets a bit `have` does not.
+  local have_bits want_bits
+  have_bits="$((8#$have))"
+  want_bits="$((8#$want))"
+  if [ "$(( want_bits & ~have_bits ))" -ne 0 ]; then
+    die "refusing to widen $path from 0$have to 0$want (adds $(printf '0%o' "$(( want_bits & ~have_bits ))")). Inspect it and decide by hand."
   fi
   run chmod "0$want" "$path"
   did "mode $path" "0$have -> 0$want"
@@ -131,14 +149,39 @@ if [ "$UNINSTALL" -eq 1 ]; then
   done
   run systemctl daemon-reload
 
+  # Both halves of what the install changed on the gateway's run directory:
+  # the group AND the mode. The install narrows 2770 -> 2750; leaving the
+  # narrowed mode behind after an uninstall would silently change the
+  # gateway's own directory for whoever comes next. Both values are written to
+  # `$BACKUP/rollback.env` by the install; source that file, or pass them.
   ORIG_GROUP="${ORIGINAL_RUN_GROUP:-}"
+  ORIG_MODE="${ORIGINAL_RUN_MODE:-}"
+  RUN_DIR_RESTORED=0
   if [ -n "$ORIG_GROUP" ]; then
     run chgrp "$ORIG_GROUP" "$GATEWAY_RUN"
     did "run dir group" "restored to $ORIG_GROUP"
-    run systemctl restart channel-gateway.service
-    say "gateway" "restarted so the socket is recreated"
+    RUN_DIR_RESTORED=1
   else
     say "run dir group" "left as-is; pass ORIGINAL_RUN_GROUP=<group> to restore"
+  fi
+  if [ -n "$ORIG_MODE" ]; then
+    CURRENT_MODE="$(stat -c '%a' "$GATEWAY_RUN" 2>/dev/null || echo '')"
+    if [ "$CURRENT_MODE" = "$ORIG_MODE" ]; then
+      say "run dir mode" "already 0$ORIG_MODE"
+    else
+      # Deliberately NOT ensure_mode: restoring the operator's own directory to
+      # what it was before this phase is a widening by construction, and it is
+      # the one widening that is correct here. It is stated rather than silent.
+      run chmod "0$ORIG_MODE" "$GATEWAY_RUN"
+      did "run dir mode" "0$CURRENT_MODE -> 0$ORIG_MODE (restored)"
+      RUN_DIR_RESTORED=1
+    fi
+  else
+    say "run dir mode" "left as-is; pass ORIGINAL_RUN_MODE=<mode> to restore"
+  fi
+  if [ "$RUN_DIR_RESTORED" -eq 1 ]; then
+    run systemctl restart channel-gateway.service
+    say "gateway" "restarted so the socket is recreated"
   fi
 
   if id -u "$PLANNER_USER" >/dev/null 2>&1; then
@@ -186,8 +229,8 @@ getent group "$RECONCILE_GROUP" >/dev/null || die "group '$RECONCILE_GROUP' does
 ORIGINAL_RUN_GROUP="$(stat -c '%G' "$GATEWAY_RUN")"
 ORIGINAL_RUN_MODE="$(stat -c '%a' "$GATEWAY_RUN")"
 say "gateway run dir" "$GATEWAY_RUN ($ORIGINAL_RUN_GROUP, 0$ORIGINAL_RUN_MODE)"
-if [ "$ORIGINAL_RUN_MODE" != "2770" ]; then
-  say "WARNING" "run dir is 0$ORIGINAL_RUN_MODE, expected 2770 (setgid)"
+if [ "$(( 8#$ORIGINAL_RUN_MODE & 02000 ))" -eq 0 ]; then
+  say "WARNING" "run dir is 0$ORIGINAL_RUN_MODE — no setgid bit"
   say "" "without setgid the socket will not inherit the new group"
 fi
 
@@ -231,13 +274,44 @@ if [ "$ORIGINAL_RUN_GROUP" = "$PROACTIVE_GROUP" ]; then
 else
   run chgrp "$PROACTIVE_GROUP" "$GATEWAY_RUN"
   did "run dir group" "$ORIGINAL_RUN_GROUP -> $PROACTIVE_GROUP"
-  say "rollback" "chgrp $ORIGINAL_RUN_GROUP $GATEWAY_RUN && systemctl restart channel-gateway"
+  say "rollback" "chgrp $ORIGINAL_RUN_GROUP $GATEWAY_RUN && chmod 0$ORIGINAL_RUN_MODE $GATEWAY_RUN && systemctl restart channel-gateway"
   GATEWAY_RESTART_NEEDED=1
 fi
 # The directory permissions are the whole access mechanism (the gateway chmods
-# the socket to 0660 at gw_proactive.py:407). Keep 2770 so the socket inherits
-# the group; never widen it.
-ensure_mode "$GATEWAY_RUN" 2770
+# the socket to 0660 at gw_proactive.py:407). setgid stays so the socket
+# inherits the group — but the group-WRITE bit comes off.
+#
+# Group-write on a directory is permission to create, rename and unlink its
+# entries, `proactive.sock` included. Section 68 grants the planner
+# "WRITE: planning state/log only", and this is broader: a bug or a compromise
+# in a process that parses untrusted commitment text could unlink the socket
+# and bind its own listener at the same path, after which every owner
+# notification — LINE escalations included — goes to that listener until the
+# gateway next restarts. It is also a new principal on this directory; before
+# I.2 the group was the operator's own login group, which already holds sudo.
+#
+# 2750 is sufficient. The gateway owns the directory and creates the socket as
+# the owner, so it needs no group-write here; `hermesplanner` needs only group
+# `x` to traverse plus group `w` on the 0660 socket *inode* to connect().
+# Verify after the gateway restart with:
+#   sudo -u hermesplanner python3 -c "import socket; \
+#     socket.socket(socket.AF_UNIX).connect('$GATEWAY_RUN/proactive.sock')"
+#
+# Asserted, not preserved: `ensure_mode` refuses to widen, so a directory that
+# is already narrower than this is left alone and one at 2770 is narrowed.
+GATEWAY_RUN_MODE="${GATEWAY_RUN_MODE:-2750}"
+ensure_mode "$GATEWAY_RUN" "$GATEWAY_RUN_MODE"
+if [ "$DRY_RUN" -eq 0 ]; then
+  NOW_MODE="$(stat -c '%a' "$GATEWAY_RUN")"
+  NOW_BITS="$((8#$NOW_MODE))"
+  say "run dir mode" "0$NOW_MODE"
+  [ "$(( NOW_BITS & 02000 ))" -ne 0 ] || \
+    say "WARNING" "0$NOW_MODE has no setgid: the socket will not inherit $PROACTIVE_GROUP"
+  [ "$(( NOW_BITS & 00020 ))" -eq 0 ] || \
+    say "WARNING" "0$NOW_MODE grants group-write: a group member can unlink proactive.sock (section 68)"
+  [ "$(( NOW_BITS & 00010 ))" -ne 0 ] || \
+    say "WARNING" "0$NOW_MODE has no group-x: $PLANNER_USER cannot traverse to the socket"
+fi
 
 # --- 2. the planner identity (sections 67, 69) ----------------------------
 echo
@@ -530,9 +604,15 @@ cat <<NEXT
     sudo bash ${APP_ROOT}/bin/morning-brief-status.sh
 
   ROLLBACK (exact):
-    sudo ORIGINAL_RUN_GROUP=${ORIGINAL_RUN_GROUP} bash $0 --uninstall
+    sudo ORIGINAL_RUN_GROUP=${ORIGINAL_RUN_GROUP} \
+         ORIGINAL_RUN_MODE=${ORIGINAL_RUN_MODE} bash $0 --uninstall
   which removes both units, deletes ${PLANNER_USER}, and restores
-  ${GATEWAY_RUN} to group ${ORIGINAL_RUN_GROUP} with a gateway restart.
+  ${GATEWAY_RUN} to group ${ORIGINAL_RUN_GROUP} and mode 0${ORIGINAL_RUN_MODE}
+  with a gateway restart.
   Saved for you at: ${BACKUP}/rollback.env
+
+  VERIFY the narrowed run directory still lets the planner connect:
+    sudo -u ${PLANNER_USER} python3 -c "import socket; \\
+      socket.socket(socket.AF_UNIX).connect('${GATEWAY_RUN}/proactive.sock')"
 
 NEXT

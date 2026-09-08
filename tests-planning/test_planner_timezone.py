@@ -211,6 +211,31 @@ class DateOnlyValueTest(unittest.TestCase):
         self.assertTrue(item["all_day"])
         self.assertIsNone(item["local_time"])
 
+    def test_a_coarse_due_precision_publishes_no_clock_time(self):
+        """AMENDMENT 1 B4 applied at the source, not only in the renderer.
+
+        `week` / `daypart` / `approximate` rows carry a *synthetic* 23:59:00.
+        The renderer always refused to display it; `daily_plan_get` published
+        it as `local_time` to an MCP consumer that has no renderer in front of
+        it, which is a deadline the database does not contain.
+        """
+        for precision in ("week", "daypart", "approximate", "day", "month",
+                          "unknown", None):
+            with self.subTest(due_precision=precision):
+                conn = fx.open_db()
+                self.addCleanup(conn.close)
+                fx.reset_ids()
+                fx.add_commitment(
+                    conn, title="今週中に学務へ書類を出す",
+                    due_at="2026-09-08T23:59:00+09:00", due_precision=precision,
+                    evidence="discord",
+                )
+                item = fx.build_plan(conn)["must_do"][0]
+                self.assertIsNone(item["local_time"])
+                # Canonical values are untouched: only the derived field goes.
+                self.assertEqual(item["due_at"], "2026-09-08T23:59:00+09:00")
+                self.assertEqual(item["due_precision"], precision)
+
     def test_a_date_only_deadline_is_the_end_of_that_local_day(self):
         cid = fx.add_commitment(
             self.conn, title="日付だけの締切", due_at="2026-09-08",

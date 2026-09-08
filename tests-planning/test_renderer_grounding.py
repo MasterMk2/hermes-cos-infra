@@ -146,6 +146,89 @@ class InventedContentTests(unittest.TestCase):
         self.assertIn("time_not_in_plan:23:59", result["grounding"]["violations"])
 
 
+class AppendedToARealLineTests(unittest.TestCase):
+    """Section 40, on the shape that actually defeats a title-match gate.
+
+    Every other hostile case in this file injects on a NEW line, where
+    `unknown_item_line` catches it. The real attack is an append: a line that
+    already contains a real title is *classified as legitimate* the moment the
+    title's 12-character key is found in it, and everything else on it used to
+    be unexamined. All four of section 40's prohibitions went through that way,
+    with `ok=True` and `violations=[]`.
+    """
+
+    def one_line_plan(self):
+        return make_plan(
+            date="2026-09-12",
+            scheduled=[make_item(
+                title="研究室のゼミ", work_state="SCHEDULED",
+                scheduled_at="2026-09-12T01:00:00+00:00",
+                scheduled_end_at="2026-09-12T02:00:00+00:00", local_time="10:00",
+                priority_class="P1", reason_for_inclusion="scheduled_today",
+                source_types=["calendar"])],
+            must_do=[make_item(
+                title="講座Aの申込書を提出", due_at="2026-09-12T17:00:00+09:00",
+                due_precision="minute", local_time="17:00", priority_class="P1")],
+        )
+
+    def assert_rejected(self, mutate, expected_prefix):
+        plan = self.one_line_plan()
+        result = run_hostile(plan, mutate)
+        violations = result["grounding"]["violations"]
+        self.assertEqual(result["renderer"], "template", violations)
+        self.assertEqual(result["fallback_reason"], "grounding_failed")
+        self.assertTrue(any(v.startswith(expected_prefix) for v in violations),
+                        f"expected {expected_prefix!r} in {violations!r}")
+        return violations
+
+    def test_an_invented_task_appended_to_a_real_line_falls_back(self):
+        self.assert_rejected(
+            lambda t: t.replace("・10:00 研究室のゼミ",
+                                "・10:00 研究室のゼミ、および学費を今日中に振り込むこと"),
+            "unknown_line_residue")
+
+    def test_an_invented_kanji_clock_time_appended_falls_back(self):
+        """「19時」 is a clock time. The scanner only knowing `HH:MM` is half of
+        why this case passed; the line already matching a title is the rest."""
+        violations = self.assert_rejected(
+            lambda t: t.replace("・10:00 研究室のゼミ", "・10:00 研究室のゼミ 19時開始"),
+            "time_not_in_plan")
+        self.assertIn("time_not_in_plan:19時", violations)
+
+    def test_an_invented_relative_deadline_appended_falls_back(self):
+        """No digit, no `M月D日`, no `M/D` — and still a deadline claim."""
+        self.assert_rejected(
+            lambda t: t.replace("1. 17:00 講座Aの申込書を提出",
+                                "1. 17:00 講座Aの申込書を提出（あさってまでに必着）"),
+            "date_not_in_plan")
+
+    def test_a_completion_claim_appended_falls_back(self):
+        violations = self.assert_rejected(
+            lambda t: t.replace("1. 17:00 講座Aの申込書を提出",
+                                "1. 17:00 講座Aの申込書を提出（完了済み）"),
+            "completion_claimed")
+        self.assertIn("completion_claimed:完了", violations)
+
+    def test_an_appended_comment_on_an_overdue_line_falls_back(self):
+        """The overdue line already carries a decoration, so the residue check
+        has to subtract the right one and still see what was added."""
+        plan = busy_day_plan()
+        result = run_hostile(
+            plan,
+            lambda t: t.replace("（12日超過・鈴木一郎）", "（12日超過・鈴木一郎・要至急対応）"))
+        self.assertEqual(result["renderer"], "template", result["grounding"])
+        self.assertTrue(any(v.startswith("unknown_line_residue")
+                            for v in result["grounding"]["violations"]),
+                        result["grounding"]["violations"])
+
+    def test_a_faithful_line_is_still_accepted(self):
+        """The gate has to admit the renderer's own line, or it proves nothing."""
+        plan = self.one_line_plan()
+        result = render_brief(plan, mode="llm", client=stub(template_text(plan)),
+                              now=NOW)
+        self.assertEqual(result["renderer"], "llm", result["grounding"])
+
+
 class EvidenceInTitlesIsNotAClaim(unittest.TestCase):
     """A verbatim title carrying a date is quoted evidence, not a renderer claim."""
 
@@ -366,6 +449,16 @@ class NeverRaisesTests(unittest.TestCase):
             "too long": lambda t: "あ" * 5000,
             "empty": lambda t: "",
             "reordered": lambda t: "\n".join(reversed(t.split("\n"))),
+            # Appended to an EXISTING item's line rather than added as a new
+            # one — the family that used to pass the gate entirely.
+            "appended task": lambda t: t.replace(
+                "・定例会の開催", "・定例会の開催、あわせて学費の振込も済ませること"),
+            "appended completion": lambda t: t.replace(
+                "・定例会の開催", "・定例会の開催（対応済）"),
+            "appended kanji time": lambda t: t.replace(
+                "・定例会の開催", "・定例会の開催 19時開始"),
+            "appended relative deadline": lambda t: t.replace(
+                "・定例会の開催", "・定例会の開催（来週までに）"),
         }
         for name, mutate in cases.items():
             with self.subTest(case=name):

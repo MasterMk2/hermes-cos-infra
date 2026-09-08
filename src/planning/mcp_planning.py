@@ -223,6 +223,23 @@ def _resolve_db_path(db_path=None):
     return db_path or os.environ.get("EVENTS_DB") or DEFAULT_EVENTS_DB
 
 
+def _now_for(tz_value):
+    """The wall clock in the requested timezone, or ``None`` if unavailable.
+
+    Passed explicitly to the planner rather than left to its internal
+    ``datetime.now()``. The planner anchors every selection window to the plan
+    *date*, so this only fixes ``generated_at`` and the imminence reference —
+    but an MCP call that supplies a ``date`` and no clock at all is exactly the
+    shape that used to produce a plan built from two different origins.
+    """
+    if ZoneInfo is None:  # pragma: no cover - stdlib zoneinfo is present on the Pi
+        return None
+    try:
+        return datetime.now(ZoneInfo(tz_value or DEFAULT_TIMEZONE))
+    except Exception:  # pragma: no cover - tz already validated upstream
+        return None
+
+
 def _build_plan(date_value, tz_value, *, db_path=None, build_plan=None, load_config=None):
     """Return ``(plan, error)``. Read-only; the connection is always closed."""
     fn = build_plan or _resolve(_PLANNER_MODULES, "build_daily_plan")
@@ -242,7 +259,8 @@ def _build_plan(date_value, tz_value, *, db_path=None, build_plan=None, load_con
     except sqlite3.Error as exc:
         return None, {"error": "events_db_unavailable", "detail": type(exc).__name__}
     try:
-        plan = fn(con, date=date_value, timezone=tz_value, config=config)
+        plan = fn(con, date=date_value, timezone=tz_value, now=_now_for(tz_value),
+                  config=config)
     except Exception as exc:
         return None, {"error": "planner_error", "detail": type(exc).__name__}
     finally:
@@ -259,6 +277,35 @@ def _build_plan(date_value, tz_value, *, db_path=None, build_plan=None, load_con
 # Compaction and size bounding
 # --------------------------------------------------------------------------
 
+#: ``due_precision`` values that carry a real clock time. Everything else has a
+#: synthetic ``23:59`` (AMENDMENT 1 B4) that must never be published as a
+#: deadline. Kept here as well as in the planner so the boundary is sound on
+#: its own: `compact_plan` is a public function and a caller may hand it a plan
+#: this process did not build.
+PRECISE_DUE_PRECISIONS = ("minute", "exact_datetime")
+
+
+def _honest_local_time(item):
+    """``local_time`` unless it would be fake precision, in which case ``None``.
+
+    The renderer has always refused to *display* the synthetic ``23:59`` a
+    `week` / `daypart` / `approximate` row carries. `daily_plan_get` has no
+    renderer in front of it, so the same rule is applied to the field itself:
+    an MCP consumer asked 「今日何すればいい？」 must not be able to answer
+    「23:59までに…」 about a deadline the database does not contain.
+    """
+    local_time = item.get("local_time")
+    if not local_time:
+        return None
+    if item.get("all_day"):
+        return None
+    if item.get("scheduled_at"):
+        return local_time
+    if item.get("due_precision") in PRECISE_DUE_PRECISIONS:
+        return local_time
+    return None
+
+
 def _project_item(item):
     """Whitelist an Item dict, guaranteeing the phase section 34 traceable keys."""
     out = {}
@@ -267,6 +314,8 @@ def _project_item(item):
             out[key] = item[key]
         elif key in REQUIRED_ITEM_FIELDS:
             out[key] = None
+    if "local_time" in out:
+        out["local_time"] = _honest_local_time(item)
     return out
 
 

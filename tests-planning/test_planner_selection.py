@@ -315,6 +315,113 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(all_ids(plan), [])
         self.assertEqual(plan["counts"]["filtered_noise"]["total"], 1)
 
+    # -- RULING 1: the evidence test is responsibility-agnostic -----------
+
+    def test_a_self_gmail_only_row_never_reaches_the_overdue_list(self):
+        """I2-PROFILE.md C.2's newsletter row, which used to be line 1 of 期限超過.
+
+        `SELF` + `ACTIONABLE` + a real `due_at` + Gmail-only evidence. The
+        AMENDMENT F1 `due_at DESC` ordering puts the newest overdue item first,
+        and this is the newest one in production.
+        """
+        noise = fx.add_self_gmail_noise_row(self.conn)
+        real = fx.add_commitment(
+            self.conn, title="定例会の出欠をメンバーに確認",
+            due_at="2026-09-07T15:30:00+09:00", due_precision="minute",
+            counterparty="担当D", evidence="discord",
+        )
+        plan = self.plan()
+        self.assertEqual(ids(plan, "overdue"), [real])
+        self.assertNotIn(noise, all_ids(plan))
+        self.assertEqual(plan["counts"]["overdue"], {"shown": 1, "total": 1})
+        self.assertEqual(plan["counts"]["filtered_noise"], {"shown": 0, "total": 1})
+
+    def test_the_deadline_categories_all_refuse_gmail_only_evidence(self):
+        cases = {
+            "must_do": {"due_at": "2026-09-08T18:00:00+09:00", "due_precision": "minute"},
+            "overdue": {"due_at": "2026-09-01T18:00:00+09:00", "due_precision": "minute"},
+            "next_up": {"due_at": "2026-09-10T18:00:00+09:00", "due_precision": "minute"},
+            "backlog": {},
+        }
+        for category, fields in cases.items():
+            with self.subTest(category=category):
+                conn = fx.open_db()
+                self.addCleanup(conn.close)
+                fx.reset_ids()
+                cid = fx.add_commitment(
+                    conn, title="メール由来の作業らしきもの", responsibility="SELF",
+                    work_state="ACTIONABLE", confidence=0.7, evidence="gmail",
+                    **fields,
+                )
+                plan = fx.build_plan(conn)
+                self.assertEqual(all_ids(plan), [], f"{cid} reached {category}")
+                self.assertEqual(plan["counts"][category]["total"], 0)
+                self.assertEqual(plan["counts"]["filtered_noise"]["total"], 1)
+
+    def test_the_same_row_with_one_non_gmail_evidence_row_is_kept(self):
+        """The filter keys off evidence, not off the title or the sender."""
+        cid = fx.add_commitment(
+            self.conn, title="メールと会話の両方に出た締切", responsibility="SELF",
+            work_state="ACTIONABLE", due_at="2026-09-08T18:00:00+09:00",
+            due_precision="minute", evidence=["gmail", "discord"],
+        )
+        plan = self.plan()
+        self.assertEqual(ids(plan, "must_do"), [cid])
+        self.assertEqual(plan["counts"]["filtered_noise"]["total"], 0)
+
+    def test_a_gmail_only_calendar_slot_still_reaches_scheduled(self):
+        """RULING 1 changes the deadline categories only; `scheduled` keeps its
+        rule, because a slot on the owner's own calendar is on the owner's day
+        (phase section 20) and no calendar row is Gmail-only in practice."""
+        cid = fx.add_commitment(
+            self.conn, title="メール由来だが時間の入った予定", responsibility="SELF",
+            work_state="SCHEDULED", scheduled_at="2026-09-08T00:00:00+00:00",
+            scheduled_end_at="2026-09-08T01:00:00+00:00", evidence="gmail",
+        )
+        plan = self.plan()
+        self.assertEqual(ids(plan, "scheduled"), [cid])
+        self.assertEqual(plan["counts"]["filtered_noise"]["total"], 0)
+
+    def test_a_counterparty_row_is_not_counted_as_gmail_noise(self):
+        """`filtered_noise` must stay a statement about the evidence filter.
+
+        A COUNTERPARTY row is excluded for its responsibility, not for its
+        evidence; folding it in would make the counter unreadable.
+        """
+        fx.add_commitment(
+            self.conn, title="相手側の作業", responsibility="COUNTERPARTY",
+            work_state="ACTIONABLE", due_at="2026-09-08T18:00:00+09:00",
+            due_precision="minute", evidence="gmail",
+        )
+        plan = self.plan()
+        self.assertEqual(all_ids(plan), [])
+        self.assertEqual(plan["counts"]["filtered_noise"]["total"], 0)
+
+    def test_the_gmail_due_soon_row_is_dropped_and_that_is_the_accepted_cost(self):
+        """The coordinator's ruling accepts losing a genuine Gmail-only deadline.
+
+        I2-PROFILE.md C.3's `formrun` row is a real invitation with a real
+        `due_at` whose only evidence is Gmail; nothing phase section 24 permits
+        tells it apart from the newsletter above. It is dropped from the brief,
+        counted, and still reachable through `commitment_list` /
+        `commitment_search` on the on-demand path.
+        """
+        cid = fx.add_commitment(
+            self.conn, title="【明日11時開催】新機能の体験会のご案内",
+            responsibility="SELF", work_state="ACTIONABLE",
+            due_at="2026-09-08T17:00:00+09:00", due_precision="day",
+            counterparty='"運営事務局" <mail@example.invalid>',
+            confidence=0.7, evidence="gmail",
+        )
+        plan = self.plan()
+        self.assertNotIn(cid, all_ids(plan))
+        self.assertEqual(plan["counts"]["filtered_noise"]["total"], 1)
+        # Still in the canonical store, untouched — the row was never deleted.
+        row = self.conn.execute(
+            "SELECT work_state FROM commitments WHERE commitment_id = ?", (cid,)
+        ).fetchone()
+        self.assertEqual(row[0], "ACTIONABLE")
+
     # -- schema invariants ------------------------------------------------
 
     def test_every_item_appears_in_exactly_one_category(self):
@@ -438,6 +545,85 @@ class SelectionTest(unittest.TestCase):
     def test_fixtures_refuse_a_production_path(self):
         with self.assertRaises(fx.ProductionAccessError):
             fx.open_db("/srv/hermes/hermes-data/events/events.db")
+
+
+class PlanDateIndependentOfWallClockTest(unittest.TestCase):
+    """Phase sections 32, 92, 93: `date` is an input, not a description of today.
+
+    `next_up` used to be tested as ``day_end_exclusive <= due <= now + 72h``,
+    mixing the plan date with the wall clock. For any future plan date that
+    window is empty, and an affected item fell out of *every* category with no
+    count and no warning — which is why the section 92 three-date audit would
+    have been run against plans the planner could not produce correctly.
+    """
+
+    CATEGORIES = ("scheduled", "must_do", "overdue", "next_up",
+                  "waiting_for", "backlog")
+
+    def setUp(self):
+        self.conn = fx.open_db()
+        self.addCleanup(self.conn.close)
+
+    def categories(self, plan):
+        """The full category assignment: ids per category, plus the counts."""
+        return (
+            {name: ids(plan, name) for name in self.CATEGORIES},
+            {name: plan["counts"][name] for name in self.CATEGORIES},
+        )
+
+    def test_a_future_date_categorises_exactly_as_the_same_day_call_would(self):
+        # The reviewer's reproduction, verbatim: one SELF/ACTIONABLE row due
+        # the day after the audit day, asked for on the audit day from Tuesday.
+        cid = fx.add_commitment(
+            self.conn, title="監査日の翌日が期限の作業", responsibility="SELF",
+            work_state="ACTIONABLE", due_at="2026-09-13T18:00:00+09:00",
+            due_precision="minute", evidence="discord",
+        )
+        ahead = fx.build_plan(self.conn, date="2026-09-12",
+                              now=fx.DEFAULT_NOW)                    # 09-08 08:30
+        same_day = fx.build_plan(self.conn, date="2026-09-12",
+                                 now=fx.AUDIT_NOW)                   # 09-12 08:30
+        self.assertEqual(ids(ahead, "next_up"), [cid])
+        self.assertEqual(self.categories(ahead), self.categories(same_day))
+
+    def test_the_audit_day_is_the_same_plan_from_four_days_out(self):
+        fx.seed_audit_day(self.conn)
+        ahead = fx.build_plan(self.conn, date=fx.AUDIT_DATE, now=fx.DEFAULT_NOW)
+        same_day = fx.build_plan(self.conn, date=fx.AUDIT_DATE, now=fx.AUDIT_NOW)
+        self.assertEqual(self.categories(ahead), self.categories(same_day))
+        self.assertEqual(ahead["counts"]["scheduled"], {"shown": 2, "total": 2})
+
+    def test_a_historical_replay_uses_that_days_horizon_not_todays(self):
+        """Section 93: a plan for 09-01 may not label 09-09 as 'due within 72h'."""
+        near = fx.add_commitment(
+            self.conn, title="当時の3日以内", due_at="2026-09-03T09:00:00+09:00",
+            due_precision="minute", evidence="discord",
+        )
+        fx.add_commitment(
+            self.conn, title="当時は8日先", due_at="2026-09-09T09:00:00+09:00",
+            due_precision="minute", evidence="discord",
+        )
+        replay = fx.build_plan(self.conn, date="2026-09-01", now=fx.DEFAULT_NOW)
+        self.assertEqual(ids(replay, "next_up"), [near])
+
+    def test_no_item_can_fall_out_of_every_category_on_a_future_date(self):
+        """The silent-loss property itself, stated as an invariant."""
+        for offset in range(0, 8):
+            with self.subTest(days_ahead=offset):
+                conn = fx.open_db()
+                self.addCleanup(conn.close)
+                fx.reset_ids()
+                due = (fx.DEFAULT_NOW + timedelta(days=offset + 1)).date()
+                fx.add_commitment(
+                    conn, title="期限つきの作業", due_at=f"{due.isoformat()}T18:00:00+09:00",
+                    due_precision="minute", evidence="discord",
+                )
+                plan_date = (fx.DEFAULT_NOW + timedelta(days=offset)).date().isoformat()
+                plan = fx.build_plan(conn, date=plan_date, now=fx.DEFAULT_NOW)
+                self.assertEqual(
+                    len(all_ids(plan)), 1,
+                    f"the row vanished from every category for date={plan_date}",
+                )
 
 
 class AuditDayTest(unittest.TestCase):

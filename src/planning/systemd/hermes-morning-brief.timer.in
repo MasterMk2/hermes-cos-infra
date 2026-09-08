@@ -43,6 +43,13 @@ OnCalendar=*-*-* @MORNING_TIME@:00 Asia/Tokyo
 # the service, not the timer, then decides whether that is still wanted:
 # `late_boot_grace_hours` (default 3) sends, anything later records
 # `skipped_late_boot` and sends nothing (phase section 56).
+#
+# The same applies on the other side, and it matters more than it looks: a
+# boot at 02:00 after a missed elapse fires this unit at 02:00, and nothing on
+# the proactive path enforces quiet hours. A run more than
+# `early_tolerance_seconds` (default 300) BEFORE the slot records
+# `skipped_early`, writes no state, and leaves the still-pending scheduled
+# elapse to deliver at the configured hour.
 Persistent=true
 
 # The timer is the only trigger, so a spread would only make the delivery time

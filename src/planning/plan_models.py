@@ -122,6 +122,26 @@ CONFLICT_DETAILS: Dict[str, str] = {
     ConflictKind.DENSE_WINDOW.value: "予定が連続しています",
 }
 
+#: The same three kinds, phrased for a window whose end time was **assumed**.
+#: AMENDMENT 1 B3 sanctions filling a NULL `scheduled_end_at` with
+#: `conflict_default_duration_minutes` (0 production rows have one), but a
+#: conflict derived from a guessed duration is not the same fact as one derived
+#: from two recorded end times: a 09:00 event assumed to run 60 minutes
+#: "overlaps" a 09:30 meeting that a real 15-minute slot would not touch.
+#: Phase section 30 forbids asserting more than the data supports, so the
+#: assumption is disclosed in the phrase rather than hidden behind an
+#: unqualified 「予定が重なっています」. The `kind` vocabulary stays closed at
+#: three: this is the same kind of conflict, stated with the confidence the
+#: data actually carries.
+CONFLICT_DETAILS_ASSUMED_END: Dict[str, str] = {
+    ConflictKind.OVERLAPPING_SCHEDULED.value:
+        "終了時刻が記録されていないため、予定が重なる可能性があります",
+    ConflictKind.DEADLINE_DURING_SCHEDULED.value:
+        "終了時刻が記録されていないため、予定の時間帯に締切がある可能性があります",
+    ConflictKind.DENSE_WINDOW.value:
+        "終了時刻が記録されていないため、予定が連続する可能性があります",
+}
+
 
 # --------------------------------------------------------------------------
 # Items
@@ -198,9 +218,15 @@ class Conflict:
     commitment_ids: List[str]
     window_start: Optional[str] = None
     window_end: Optional[str] = None
+    #: True when at least one of the windows involved had its end time filled
+    #: in from `conflict_default_duration_minutes` rather than read from the
+    #: database. It only changes the phrase — see CONFLICT_DETAILS_ASSUMED_END.
+    assumed_end: bool = False
 
     @property
     def detail(self) -> str:
+        if self.assumed_end:
+            return CONFLICT_DETAILS_ASSUMED_END[self.kind]
         return CONFLICT_DETAILS[self.kind]
 
     def to_dict(self) -> Dict[str, Any]:

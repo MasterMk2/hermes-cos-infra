@@ -777,7 +777,10 @@ async def _list_tools(ctx=None, params=None):
                     "source freshness. Use it for 今日何すればいい？ / 今日の予定まとめて / 何からやればいい？ / "
                     "今日の優先順位は？ / what should I do today / today's plan / what should I start with / "
                     "today's priorities. Prefer this over agenda_get whenever the question is about a single day. "
-                    "Read-only projection over canonical commitments and calendar authority."
+                    "Read-only projection over canonical commitments and calendar authority. "
+                    "`local_time` is null whenever the stored deadline carries no real clock time "
+                    "(any `due_precision` other than minute/exact_datetime, and every all-day row): "
+                    "state the date alone in that case and never quote a time the plan did not give you."
                 ),
                 inputSchema=DAILY_PLAN_GET_SCHEMA,
             ),

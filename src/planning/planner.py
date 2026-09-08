@@ -57,8 +57,7 @@ Then the filter that decides whether this layer is useful at all. `SHARED` +
 `ACTIONABLE` is 196 production rows, **194 of them Gmail newsletters and
 campaigns**. Those are mail subjects, not tasks. So::
 
-    An item is eligible for an ACTION category
-    (scheduled / must_do / overdue / next_up / backlog) only if
+    scheduled — responsibility eligibility only:
 
         responsibility == SELF
       OR
@@ -69,16 +68,48 @@ campaigns**. Those are mail subjects, not tasks. So::
            OR (work_state == ACTIONABLE AND due_at IS NOT NULL)
         )
 
+    must_do / overdue / next_up / backlog — the same, PLUS, for every
+    responsibility including SELF:
+
+        its evidence source_types intersect {discord, line, calendar}
+
     A SHARED row with non-Gmail evidence that is not action-eligible goes to
     `waiting_for` with reason_for_inclusion = "shared_needs_review".
 
-    A SHARED row whose evidence is Gmail-only is excluded from every display
-    category, counted in counts.filtered_noise, and never rendered.
+    Any row the evidence test alone excluded is counted in
+    `counts.filtered_noise` and never rendered.
 
 This is a *filter*, not a judgement: it keys off `commitment_evidence
 .source_type`, which is canonical. The split between the `scheduled` branch and
 the deadline branch is the subject of the coordinator ruling recorded below
 under SHARED ELIGIBILITY; read that before changing either line.
+
+--------------------------------------------------------------------------
+EVIDENCE, NOT RESPONSIBILITY, for the deadline categories (RULING 1)
+--------------------------------------------------------------------------
+AMENDMENT 1 section C keyed the Gmail exclusion on `responsibility == SHARED`.
+Production carries `SELF` + `ACTIONABLE` rows whose only evidence is Gmail — a
+weekly horoscope newsletter is one of them, carrying a real `due_at` — and the
+AMENDMENT F1 ordering (`due_at DESC`) puts the newest of them at the *top* of
+期限超過. A horoscope as line 1 of the owner's overdue list is the single most
+likely reason to distrust the first brief, and it is also the shape AMENDMENT J
+promises the renderer will never see.
+
+So the evidence test is responsibility-agnostic for `must_do`, `overdue`,
+`next_up` and `backlog`. `scheduled` keeps the rule above: a slot on the
+owner's own calendar is on the owner's day (phase section 20), and no calendar
+row is Gmail-only anyway.
+
+What this costs, stated rather than hidden: a genuine Gmail-only deadline —
+the profile's `formrun` due-soon row — is dropped from the brief too. A
+Gmail-only deadline row cannot be told apart from a newsletter by any signal
+phase section 24 permits, and every excluded row is still fully reachable on
+the on-demand path through `commitment_list` / `commitment_search`. Nothing
+leaves the system; it leaves the daily brief, which is what phase section 102
+asks for. The exclusions are counted in `counts.filtered_noise`, so the
+decision is auditable rather than silent — but `filtered_noise` lives in the
+plan JSON only and is deliberately never rendered: a daily
+「194件を除外しました」 line would itself be noise.
 
 --------------------------------------------------------------------------
 DEDUPLICATION (AMENDMENT 1 section E) — three rules, in order, and no others
@@ -135,6 +166,36 @@ about the future. Day start is 00:00:00 local; the day ends at the exclusive
   from overlap detection — an all-day marker is not an occupied window.
 
 --------------------------------------------------------------------------
+PLAN DATE vs WALL CLOCK (phase sections 32, 92, 93)
+--------------------------------------------------------------------------
+`date` is a first-class input — `daily_plan_get` advertises it and the section
+92 audit runs on three separate dates — so every window this module opens is
+anchored to the **plan day**, never to `now`:
+
+* ``next_up_limit = day_end_exclusive + next_up_hours``. `classify` tests
+  ``day_end_exclusive <= due <= next_up_limit``; taking one end from the plan
+  date and the other from the wall clock made the window empty for any future
+  plan date, and an affected item then fell out of *every* category with no
+  count and no warning — the silent data loss this module exists to prevent.
+* ``waiting_followup`` idleness is measured to ``day_end_exclusive``. A brief
+  is a document about a whole day, and measuring to `now` made the same date
+  produce two different plans — and two different ``plan_hash`` values —
+  depending on the hour the run happened.
+* ``as_of`` is `now` clamped into the plan day
+  (``min(max(now, day_start), day_end_exclusive)``). It is exactly `now` for a
+  same-day plan, the start of the day for a future one and the end of the day
+  for a historical replay, and it is what the `P0` imminence test is measured
+  against — the one thing that genuinely means "right now". Judging a plan for
+  2026-09-12 by Tuesday's clock is not a smaller error than judging it by no
+  clock at all.
+
+`now` itself is kept for `generated_at` only. The consequence is the property
+two tests pin: for a fixed database, both the categories **and** the
+``plan_hash`` of ``build_daily_plan(date=D)`` do not depend on when the call is
+made. ``priority_class`` is the one clock-dependent field left, and
+`compute_plan_hash` excludes it — see that function.
+
+--------------------------------------------------------------------------
 SHARED eligibility — settled by coordinator ruling, not a deviation
 --------------------------------------------------------------------------
 AMENDMENT 1 C, as first written, required ``work_state == ACTIONABLE AND
@@ -171,6 +232,12 @@ DEVIATIONS from I2-CONTRACT.md, all deliberate and reported
   `overlapping_scheduled` with 「予定が連続しています」. Overlap and adjacency are
   different facts, so the closed set in `plan_models.CONFLICT_DETAILS` gives
   each kind its own phrase; none claims anything about travel (phase section 30).
+  A conflict whose window end was **assumed** — the AMENDMENT 1 B3 fallback for
+  a NULL `scheduled_end_at`, 0 production rows — carries the same `kind` but
+  the `CONFLICT_DETAILS_ASSUMED_END` phrase, which says the end time is
+  unknown. An unqualified 「予定が重なっています」 built on a guessed 60 minutes
+  is a claim the data does not support: a 09:00 row assumed to run an hour
+  "overlaps" a 09:30 meeting that a real 15-minute slot would not touch.
 * **`due_within_72h`** stays the literal reason string even when
   `windows.next_up_hours` is configured to something other than 72 — the
   vocabulary is closed (phase section 35).
@@ -365,6 +432,10 @@ class _Candidate:
     due_date_only: bool = False
     sched_start: Optional[datetime] = None
     sched_end: Optional[datetime] = None
+    #: True when `sched_end` was filled from `conflict_default_duration_minutes`
+    #: because the row carries no `scheduled_end_at` (AMENDMENT 1 B3: 0 of 81
+    #: production rows). A conflict derived from a guessed duration says so.
+    assumed_end: bool = False
     all_day: bool = False
     created_dt: Optional[datetime] = None
     updated_dt: Optional[datetime] = None
@@ -427,7 +498,10 @@ def _derive(row: Dict[str, Any], tzinfo, default_duration: timedelta) -> _Candid
     _, sched_end = parse_stored(cand.scheduled_end_at, tzinfo)
     if sched_start is not None and sched_end is None:
         # 0 of the 81 production scheduled rows lack an end; this is the
-        # defensive path only (I2-PROFILE.md E.2).
+        # defensive path only (I2-PROFILE.md E.2). An all-day row's implied
+        # one-day span is Google Calendar semantics, not a guess, so only the
+        # timed case is flagged as assumed.
+        cand.assumed_end = not cand.all_day
         sched_end = sched_start + (timedelta(days=1) if cand.all_day else default_duration)
     cand.sched_end = sched_end
 
@@ -464,30 +538,65 @@ def _load_candidates(conn, tzinfo, default_duration: timedelta) -> List[_Candida
 # --------------------------------------------------------------------------
 
 
+def _has_non_gmail_evidence(cand: _Candidate) -> bool:
+    return bool(set(cand.source_types) & NON_GMAIL_SOURCES)
+
+
 def _action_eligible(cand: _Candidate) -> bool:
+    """Responsibility eligibility. The `scheduled` gate, unchanged."""
     if cand.responsibility == "SELF":
         return True
     if cand.responsibility != "SHARED":
         return False
-    if not (set(cand.source_types) & NON_GMAIL_SOURCES):
+    if not _has_non_gmail_evidence(cand):
         return False
     if SHARED_SCHEDULED_ELIGIBLE and cand.scheduled_at:
         return True
     return cand.work_state == "ACTIONABLE" and cand.due_at is not None
 
 
+def _deadline_eligible(cand: _Candidate) -> bool:
+    """The `must_do` / `overdue` / `next_up` / `backlog` gate.
+
+    Responsibility-agnostic evidence test (coordinator RULING 1 on the
+    AMENDMENT 1 section C filter): a deadline row reaches a deadline-driven
+    category only when something other than Gmail says it is a task. See the
+    EVIDENCE, NOT RESPONSIBILITY block in the module docstring.
+    """
+    return _action_eligible(cand) and _has_non_gmail_evidence(cand)
+
+
 def _shared_needs_review(cand: _Candidate) -> bool:
     """SHARED, non-Gmail evidence, but no unambiguous self next action."""
     return (
         cand.responsibility == "SHARED"
-        and bool(set(cand.source_types) & NON_GMAIL_SOURCES)
+        and _has_non_gmail_evidence(cand)
         and not _action_eligible(cand)
     )
 
 
 def _is_filtered_noise(cand: _Candidate) -> bool:
-    """SHARED with Gmail-only evidence: excluded everywhere, only counted."""
+    """SHARED with Gmail-only evidence: excluded everywhere, only counted.
+
+    This is the pre-classification half of the section C filter, and it is the
+    only half that removes a row before deduplication. The RULING 1 half —
+    Gmail-only evidence on a `SELF` row — is applied inside `classify`, because
+    such a row is still allowed into `scheduled` and `waiting_for`; it is
+    counted in `counts.filtered_noise` by `build_daily_plan` when it lands in
+    no category at all.
+    """
     return cand.responsibility == "SHARED" and cand.gmail_only
+
+
+def _excluded_by_evidence(cand: _Candidate) -> bool:
+    """True when only the Gmail-evidence rule kept this row out of every category.
+
+    Distinguishes 「a newsletter the filter caught」 from 「a COUNTERPARTY row
+    that was never the owner's task」, so `counts.filtered_noise` stays a
+    statement about the noise filter rather than a bucket for everything the
+    planner declined.
+    """
+    return cand.gmail_only and _action_eligible(cand)
 
 
 # --------------------------------------------------------------------------
@@ -620,6 +729,9 @@ class _Context:
     day_start: datetime
     day_end_exclusive: datetime
     now: datetime
+    #: `now` clamped into the plan day — see the PLAN DATE vs WALL CLOCK
+    #: section of the module docstring. Equal to `now` for a same-day plan.
+    as_of: datetime
     next_up_limit: datetime
     imminent_limit: datetime
     followup_delta: timedelta
@@ -645,13 +757,16 @@ def classify(cand: _Candidate, ctx: _Context) -> Tuple[Optional[Category], Optio
         return (None, None)
 
     eligible = _action_eligible(cand)
+    # RULING 1: the deadline-driven categories additionally require non-Gmail
+    # evidence, whatever the responsibility.
+    deadline_eligible = _deadline_eligible(cand)
     actionable = cand.work_state == "ACTIONABLE"
     due = _effective_due(cand)
 
     if eligible and cand.covers(ctx.plan_date):
         return (Category.SCHEDULED, REASON_SCHEDULED_TODAY)
 
-    if eligible and actionable and due is not None:
+    if deadline_eligible and actionable and due is not None:
         if ctx.day_start <= due < ctx.day_end_exclusive:
             return (Category.MUST_DO, REASON_DUE_TODAY)
         if due < ctx.day_start:
@@ -661,14 +776,18 @@ def classify(cand: _Candidate, ctx: _Context) -> Tuple[Optional[Category], Optio
 
     if cand.work_state in WAITING_WORK_STATES:
         idle_from = cand.updated_dt or cand.created_dt
-        if idle_from is not None and (ctx.now - idle_from) > ctx.followup_delta:
+        # Measured to the end of the plan day, not to the wall clock: a brief
+        # is a document about a whole day, and anchoring it to `now` made the
+        # same date produce two different plans (and two different
+        # `plan_hash`es) depending on the hour the run happened.
+        if idle_from is not None and (ctx.day_end_exclusive - idle_from) > ctx.followup_delta:
             return (Category.WAITING_FOR, REASON_WAITING_FOLLOWUP)
         return (Category.WAITING_FOR, REASON_WAITING)
 
     if _shared_needs_review(cand):
         return (Category.WAITING_FOR, REASON_SHARED_NEEDS_REVIEW)
 
-    if eligible and actionable and cand.due_at is None and cand.scheduled_at is None:
+    if deadline_eligible and actionable and cand.due_at is None and cand.scheduled_at is None:
         return (Category.BACKLOG, REASON_NO_DATE_BACKLOG)
 
     return (None, None)
@@ -686,7 +805,7 @@ def priority_class(cand: _Candidate, category: Category, reason: str, ctx: _Cont
     """
     if category is Category.SCHEDULED:
         if not cand.all_day and cand.sched_start is not None:
-            ends_after_now = cand.sched_end is None or cand.sched_end > ctx.now
+            ends_after_now = cand.sched_end is None or cand.sched_end > ctx.as_of
             if cand.sched_start <= ctx.imminent_limit and ends_after_now:
                 return PriorityClass.P0.value
         return PriorityClass.P1.value
@@ -728,6 +847,18 @@ def generic_sort_key(cand: _Candidate, priority: str) -> tuple:
     )
 
 
+def _counterparty_bucket(cand: _Candidate) -> str:
+    """The diversity bucket a row belongs to for the overdue cap.
+
+    A named counterparty is its own bucket, shared with every other row naming
+    the same person. A NULL or blank one is bucketed by `commitment_id`, so the
+    cap only ever suppresses genuine repeats from one named thread. The ``\\x00``
+    prefix cannot collide with a real name.
+    """
+    name = (cand.counterparty or "").strip()
+    return name if name else "\x00" + cand.commitment_id
+
+
 def _order_overdue(
     entries: List[Tuple[_Candidate, str]], limit: int, per_counterparty_cap: int
 ) -> List[Tuple[_Candidate, str]]:
@@ -737,6 +868,11 @@ def _order_overdue(
     Back-filling would reinstate exactly the "same stale thread every morning"
     behaviour the cap exists to prevent, and `counts.overdue.total` already
     tells the reader how much was held back.
+
+    A **missing** counterparty is not a thread to diversify away from, so each
+    NULL/empty row is its own bucket (coordinator ruling). Sharing one bucket
+    made the shown list end at 2 however many distinct overdue items existed —
+    a shape production does carry, and one that defeats section 12's 棚卸し.
     """
     ordered = sorted(
         entries,
@@ -750,7 +886,7 @@ def _order_overdue(
     for cand, priority in ordered:
         if len(shown) >= limit:
             break
-        key = cand.counterparty or ""
+        key = _counterparty_bucket(cand)
         if per_counterparty.get(key, 0) >= per_counterparty_cap:
             continue
         per_counterparty[key] = per_counterparty.get(key, 0) + 1
@@ -803,6 +939,7 @@ def detect_conflicts(
                         commitment_ids=[left.commitment_id, right.commitment_id],
                         window_start=min(left.sched_start, right.sched_start).isoformat(),
                         window_end=max(left.sched_end, right.sched_end).isoformat(),
+                        assumed_end=left.assumed_end or right.assumed_end,
                     )
                 )
 
@@ -818,6 +955,7 @@ def detect_conflicts(
                     commitment_ids=[left.commitment_id, right.commitment_id],
                     window_start=left.sched_start.isoformat(),
                     window_end=right.sched_end.isoformat(),
+                    assumed_end=left.assumed_end or right.assumed_end,
                 )
             )
 
@@ -840,6 +978,7 @@ def detect_conflicts(
                         commitment_ids=[slot.commitment_id, task.commitment_id],
                         window_start=slot.sched_start.isoformat(),
                         window_end=slot.sched_end.isoformat(),
+                        assumed_end=slot.assumed_end,
                     )
                 )
 
@@ -861,12 +1000,24 @@ def _local_time(cand: _Candidate) -> Optional[str]:
     `scheduled_at` and a `due_at`, the scheduled time is displayed. An all-day
     row and a date-only deadline both yield None — they render as 終日 or as a
     date, never as an invented clock time.
+
+    A **coarse `due_precision` yields None too.** AMENDMENT 1 B4 records that
+    `week` / `daypart` / `approximate` rows carry a *synthetic* ``23:59:00``,
+    and calls rendering it "a fake-precision defect". That rule used to live in
+    the renderer only, so `daily_plan_get` still handed an MCP consumer a
+    ``local_time`` of ``"23:59"`` for a 「今週中」 task — a deadline the database
+    does not contain, on the one path with no renderer in front of it. It is
+    applied here instead, at the source, for every consumer. The raw `due_at`
+    stays verbatim (it is canonical) and `due_precision` stays beside it, so a
+    consumer that wants to decide for itself still can.
     """
     if cand.scheduled_at:
         if cand.all_day or cand.sched_start is None:
             return None
         return cand.sched_start.strftime("%H:%M")
     if cand.due_dt is None or cand.due_date_only:
+        return None
+    if (cand.due_precision or "") not in PRECISE_DUE_PRECISIONS:
         return None
     return cand.due_dt.strftime("%H:%M")
 
@@ -891,23 +1042,51 @@ def _to_item(cand: _Candidate, category: Category, reason: str, priority: str, c
     )
 
 
+#: Removed from the hashed body in addition to the three top-level exclusions.
+#: `priority_class` is derived from the wall clock through `imminent_limit` —
+#: a 14:00 calendar item is `P1` at 08:30 and `P0` at 11:30 — so leaving it in
+#: meant the *stated purpose* of this hash, "the same facts produce the same
+#: hash on a retry", was not achieved for any day carrying a timed event. The
+#: contract documents `priority_class` as informational metadata rather than
+#: display order (the order is the section 27 tie-breaker), so removing it
+#: takes nothing the reader sees out of the hash.
+_HASH_EXCLUDED_ITEM_FIELDS = ("priority_class",)
+
+
+def _hash_body(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """The plan with everything that changes per run removed."""
+    body = {}
+    for key, value in plan.items():
+        if key in ("generated_at", "plan_hash", "source_freshness"):
+            continue
+        if isinstance(value, list) and all(isinstance(v, dict) for v in value):
+            body[key] = [
+                {k: v for k, v in item.items() if k not in _HASH_EXCLUDED_ITEM_FIELDS}
+                for item in value
+            ]
+        else:
+            body[key] = value
+    return body
+
+
 def compute_plan_hash(plan: Dict[str, Any]) -> str:
     """sha256 over the plan body, excluding the fields that change per run.
 
-    `generated_at`, `plan_hash` and `source_freshness` are removed so that the
-    same facts produce the same hash on a retry — which is what phase sections
-    58 and 66 need in order to suppress a duplicate morning brief.
+    `generated_at`, `plan_hash` and `source_freshness` are removed at the top
+    level, and `priority_class` is removed from every item, so that the same
+    facts produce the same hash on a retry — which is what phase sections 58
+    and 66 need in order to suppress a duplicate morning brief.
 
     `warnings` is deliberately **kept** in the body: the contract names exactly
-    three exclusions, and a warning is content the reader sees in the brief. It
-    follows that a retry which happens to cross a staleness threshold produces
-    a different hash. That is correct rather than unfortunate — the brief text
-    really did change — and the delivery layer's own
+    three top-level exclusions, and a warning is content the reader sees in the
+    brief. It follows that a retry which happens to cross a staleness threshold
+    produces a different hash. That is correct rather than unfortunate — the
+    brief text really did change — and the delivery layer's own
     ``(notification_id, channel)`` uniqueness, not this hash, is what makes
     one-brief-per-day authoritative.
     """
-    body = {k: v for k, v in plan.items() if k not in ("generated_at", "plan_hash", "source_freshness")}
-    encoded = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    encoded = json.dumps(_hash_body(plan), sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -950,13 +1129,22 @@ def build_daily_plan(
 
     windows = cfg["windows"]
     limits = cfg["limits"]
+    # `now` clamped into the plan day. For the 08:30 scheduled run this *is*
+    # `now`; for any other plan date it is the nearest instant on that day, so
+    # "how things stand" is judged as of the day being planned rather than as
+    # of the wall clock. See the module docstring.
+    as_of = min(max(now_local, day_start), day_end_exclusive)
     ctx = _Context(
         plan_date=plan_date,
         day_start=day_start,
         day_end_exclusive=day_end_exclusive,
         now=now_local,
-        next_up_limit=now_local + timedelta(hours=float(windows["next_up_hours"])),
-        imminent_limit=now_local + timedelta(hours=float(windows["imminent_hours"])),
+        as_of=as_of,
+        # Anchored to the plan day, never to the wall clock: `classify` tests
+        # `day_end_exclusive <= due <= next_up_limit`, and the two must come
+        # from the same origin or the window is empty for a future plan date.
+        next_up_limit=day_end_exclusive + timedelta(hours=float(windows["next_up_hours"])),
+        imminent_limit=as_of + timedelta(hours=float(windows["imminent_hours"])),
         followup_delta=timedelta(days=float(windows["followup_days"])),
     )
 
@@ -993,6 +1181,11 @@ def build_daily_plan(
     for cand in survivors:
         category, reason = classify(cand, ctx)
         if category is None or reason is None:
+            # RULING 1's other half: a row the evidence rule — and only the
+            # evidence rule — kept out of every category is noise, and is
+            # counted rather than dropped in silence.
+            if _excluded_by_evidence(cand):
+                filtered_noise += 1
             continue
         buckets[category].append((cand, reason))
 

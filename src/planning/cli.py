@@ -12,8 +12,8 @@ property that makes it safe to inspect the morning's output by hand.
 
 Exit codes, chosen so systemd can tell the three apart:
 
-    0   delivered, suppressed_duplicate, skipped_late_boot, skipped_disabled,
-        dry_run — the run did the right thing
+    0   delivered, suppressed_duplicate, skipped_late_boot, skipped_early,
+        skipped_disabled, dry_run — the run did the right thing
     1   failed — a real failure, visible in `systemctl status`
     78  EX_CONFIG — the configuration or an owned module is missing or
         malformed. A restart cannot fix either, which is why the unit carries
@@ -45,7 +45,7 @@ CONFIG_ENV = "HERMES_PLANNING_CONFIG"
 DEFAULT_CONFIG_PATH = "/srv/hermes/planning/config.yaml"
 
 _OK_STATUSES = {"delivered", "suppressed_duplicate", "skipped_late_boot",
-                "skipped_disabled", "dry_run"}
+                "skipped_early", "skipped_disabled", "dry_run"}
 
 
 class ConfigError(Exception):

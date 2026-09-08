@@ -406,7 +406,40 @@ def seed_realistic_day(conn: sqlite3.Connection) -> Dict[str, str]:
         confidence=0.7,
         evidence="gmail",
     )
+    ids["self_noise"] = add_self_gmail_noise_row(conn)
     return ids
+
+
+def add_self_gmail_noise_row(
+    conn: sqlite3.Connection,
+    *,
+    title: str = "【週刊ダイジェスト】週明けから新しい流れ（9/7更新）",
+    due_at: str = "2026-09-07T17:00:00+09:00",
+    due_precision: str = "day",
+) -> str:
+    """The production row shape RULING 1 exists for. Invented title, real shape.
+
+    I2-PROFILE.md section C.2 records a newsletter the reconciler classified
+    `SELF` / `ACTIONABLE` with a real `due_at`, whose only evidence is Gmail.
+    Under the first reading of AMENDMENT 1 section C — which keyed the noise
+    filter on `responsibility == SHARED` — it was fully eligible, and the
+    AMENDMENT F1 `due_at DESC` ordering put it at position 1 of 期限超過.
+
+    Only the title is invented. Responsibility, work state, precision,
+    confidence, counterparty shape and the single Gmail evidence row are the
+    production values, because those are what the filter keys off.
+    """
+    return add_commitment(
+        conn,
+        title=title,
+        responsibility="SELF",
+        work_state="ACTIONABLE",
+        due_at=due_at,
+        due_precision=due_precision,
+        counterparty='"週刊ダイジェスト編集部" <news@example.invalid>',
+        confidence=0.7,
+        evidence="gmail",
+    )
 
 
 #: The date I2-PROFILE.md section N recommends for the section 92 read-only
@@ -659,4 +692,5 @@ __all__ = [
     "open_db",
     "reset_ids",
     "seed_realistic_day",
+    "add_self_gmail_noise_row",
 ]

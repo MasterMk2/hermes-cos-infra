@@ -102,6 +102,9 @@ REASON_OVERDUE = re.compile(r"^overdue_\d+d$")
 
 CONTRACT_CONFLICT_KINDS = {"overlapping_scheduled", "deadline_during_scheduled", "dense_window"}
 
+#: The six display categories, in the section 21 precedence order.
+CATEGORY_NAMES = ("scheduled", "must_do", "overdue", "next_up", "waiting_for", "backlog")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -300,6 +303,39 @@ class EndToEndPipelineTests(PipelineTestCase):
         self.assertTrue(shown, "fixture should populate scheduled/must_do")
         for title in shown:
             self.assertIn(title, text)
+
+    def test_no_gmail_only_row_reaches_the_delivered_brief(self):
+        """RULING 1, end to end: the reviewer's reproduction, inverted.
+
+        `seed_realistic_day` carries both shapes the section C filter has to
+        catch — a `SHARED` campaign mail and the `SELF` / `ACTIONABLE`
+        newsletter with a real `due_at` from I2-PROFILE.md C.2 — and the
+        AMENDMENT F1 ordering would put the second one at position 1 of
+        【期限超過】. Neither may appear in the text that reaches the socket.
+        """
+        plan = self.build()
+        _outcome, transport = self.run_pipeline(planner=self.pinned_planner())
+        text = transport.calls[0]["text"]
+
+        conn = self.readonly_conn()
+        noise_titles = [
+            row["title"] for row in conn.execute(
+                "SELECT c.title FROM commitments c "
+                "WHERE NOT EXISTS (SELECT 1 FROM commitment_evidence e "
+                "                  WHERE e.commitment_id = c.commitment_id "
+                "                    AND e.source_type IN ('discord','line','calendar'))"
+            )
+        ]
+        self.assertGreaterEqual(len(noise_titles), 2, "fixture lost its noise rows")
+        for title in noise_titles:
+            self.assertNotIn(title, text)
+            self.assertNotIn(title, [i["title"] for c in CATEGORY_NAMES for i in plan[c]])
+        # Auditable rather than silent (AMENDMENT 1 section I) — and counted
+        # only in the plan JSON, never rendered.
+        self.assertEqual(
+            plan["counts"]["filtered_noise"], {"shown": 0, "total": len(noise_titles)}
+        )
+        self.assertNotIn("除外", text)
 
     def test_a_second_run_the_same_day_delivers_nothing_more(self):
         """Idempotency holds across the *real* modules, not only the stubs."""
@@ -986,23 +1022,107 @@ class FrozenModulesAreUntouchedTests(unittest.TestCase):
         "src/calendar", "src/gmail", "src/line-knowledge",
     )
 
-    def test_phase_i2_changed_no_frozen_module(self):
+    #: The last pre-I.2 commit, found by SUBJECT rather than by hash. Two
+    #: history rewrites have already moved it (`10ead9d` -> `a9e849d` ->
+    #: whatever the next owner-authorised privacy pass produces), and a test
+    #: that fails because a hash moved teaches the reader to ignore it.
+    baseline_subject = "^fix\\(line-extract\\): Phase I.1-S2-FR-F"
+
+    #: Commits allowed to touch a frozen module. The owner authorised privacy
+    #: passes over the whole tree, and one of them necessarily reaches files
+    #: under `src/line-knowledge/` and `src/channel-gateway/` — replacing a
+    #: real account name in a shipped comment is required by the standing
+    #: privacy rule, not a Phase I.2 feature change. Phase section 3 freezes
+    #: I.1 *behaviour*; this keeps that assertion exact instead of deleting it.
+    sanctioned_subject_prefixes = ("chore(privacy)",)
+
+    def _git(self, *args):
         import subprocess
 
         try:
-            changed = subprocess.run(
-                ["git", "diff", "--name-only", "a9e849d..HEAD"],
-                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60,
+            # Explicit UTF-8: commit subjects here are Japanese and the
+            # default console encoding on the workstation is cp932, which
+            # turns a passing assertion into a UnicodeDecodeError.
+            proc = subprocess.run(
+                ["git", *args], cwd=str(REPO_ROOT), capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=60,
             )
         except (OSError, subprocess.SubprocessError):  # pragma: no cover
             self.skipTest("git is unavailable")
-        if changed.returncode != 0:  # pragma: no cover - shallow clone, worktree
+        if proc.returncode != 0:  # pragma: no cover - shallow clone, worktree
+            self.skipTest(f"git {' '.join(args)} is not answerable here")
+        return proc.stdout
+
+    def test_phase_i2_changed_no_frozen_module(self):
+        base = self._git("rev-list", "-1", f"--grep={self.baseline_subject}",
+                         "--extended-regexp", "HEAD").strip()
+        if not base:  # pragma: no cover - shallow clone
             self.skipTest("the pre-I.2 commit is not reachable here")
-        offenders = [
-            name for name in changed.stdout.split()
-            if any(name.startswith(prefix + "/") for prefix in self.frozen)
-        ]
+
+        # Per commit, not per range: a sanctioned privacy pass and a Phase I.2
+        # feature commit must not be able to hide behind each other.
+        log = self._git("log", "--no-merges", "--format=%H%x1f%s", f"{base}..HEAD")
+        offenders = []
+        for line in log.splitlines():
+            if "\x1f" not in line:
+                continue
+            sha, subject = line.split("\x1f", 1)
+            if subject.startswith(self.sanctioned_subject_prefixes):
+                continue
+            names = self._git("show", "--pretty=format:", "--name-only", sha)
+            offenders.extend(
+                f"{subject[:40]}: {name}"
+                for name in names.split()
+                if any(name.startswith(prefix + "/") for prefix in self.frozen)
+            )
         self.assertEqual(offenders, [])
+
+    #: Total lines a privacy pass may change across ALL frozen files. Masking
+    #: identifiers is a line-for-line edit plus the odd migration comment; a
+    #: number this small cannot hide a refactor, and a legitimate pass that
+    #: exceeds it should be reviewed rather than waved through.
+    max_sanctioned_frozen_churn = 40
+
+    def test_the_sanctioned_exception_is_privacy_only_and_narrow(self):
+        """The escape hatch above must not become a way to edit frozen code.
+
+        Two properties, both measured from the diff rather than trusted to the
+        commit message: a privacy pass touches **no frozen Python module at
+        all** — the I.1 behaviour phase section 3 freezes lives there — and its
+        total churn across frozen files stays small.
+        """
+        base = self._git("rev-list", "-1", f"--grep={self.baseline_subject}",
+                         "--extended-regexp", "HEAD").strip()
+        if not base:  # pragma: no cover
+            self.skipTest("the pre-I.2 commit is not reachable here")
+        log = self._git("log", "--no-merges", "--format=%H%x1f%s", f"{base}..HEAD")
+        churn = 0
+        touched_python = []
+        checked = 0
+        for line in log.splitlines():
+            if "\x1f" not in line:
+                continue
+            sha, subject = line.split("\x1f", 1)
+            if not subject.startswith(self.sanctioned_subject_prefixes):
+                continue
+            stat = self._git("show", "--pretty=format:", "--numstat", sha)
+            for row in stat.splitlines():
+                parts = row.split("\t")
+                if len(parts) != 3:
+                    continue
+                added, removed, name = parts
+                if not any(name.startswith(p + "/") for p in self.frozen):
+                    continue
+                checked += 1
+                if name.endswith(".py"):
+                    touched_python.append(f"{sha[:8]}: {name}")
+                if added != "-" and removed != "-":
+                    churn += int(added) + int(removed)
+        self.assertGreater(checked, 0, "no sanctioned frozen-file change to verify")
+        self.assertEqual(touched_python, [],
+                         "a privacy pass must not edit a frozen Python module")
+        self.assertLessEqual(churn, self.max_sanctioned_frozen_churn,
+                             f"{churn} lines changed under the privacy exception")
 
     def test_the_classifier_broker_still_imports(self):
         broker = REPO_ROOT / "src" / "line-knowledge" / "event_broker.py"

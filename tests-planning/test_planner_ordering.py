@@ -178,16 +178,65 @@ class OverdueOrderingTest(unittest.TestCase):
         self.assertEqual(plan["counts"]["overdue"], {"shown": 3, "total": 5})
         self.assertNotIn(dominant[2], shown)
 
-    def test_null_counterparty_is_its_own_capped_bucket(self):
-        for day in (7, 6, 5):
+    def test_each_null_counterparty_row_is_its_own_bucket(self):
+        """Coordinator ruling: a missing counterparty is not a thread.
+
+        Bucketing every NULL row together capped the whole overdue list at
+        `overdue_per_counterparty_cap` (2), whatever `limits.overdue` was and
+        however many *distinct* items existed — the reviewer's six-row case,
+        reproduced here. Production carries such rows (I2-PROFILE.md C.2 has
+        one), and showing 2 of 5 available slots defeats phase section 12's
+        棚卸し可能.
+        """
+        created = [
             fx.add_commitment(
                 self.conn, title=f"相手なし {day}", counterparty=None,
                 due_at=f"2026-09-0{day}T09:00:00+09:00", due_precision="minute",
                 evidence="discord",
             )
+            for day in (7, 6, 5, 4, 3, 2)
+        ]
         plan = fx.build_plan(self.conn)
-        self.assertEqual(len(plan["overdue"]), 2)
-        self.assertEqual(plan["counts"]["overdue"]["total"], 3)
+        self.assertEqual(plan["counts"]["overdue"], {"shown": 5, "total": 6})
+        self.assertEqual(ids(plan, "overdue"), created[:5])
+
+    def test_a_blank_counterparty_is_treated_like_a_missing_one(self):
+        """An empty string reaches the planner from the reconciler as easily
+        as a NULL; both mean "nobody named", not "the same nobody"."""
+        created = [
+            fx.add_commitment(
+                self.conn, title=f"空欄 {day}", counterparty="   ",
+                due_at=f"2026-09-0{day}T09:00:00+09:00", due_precision="minute",
+                evidence="discord",
+            )
+            for day in (7, 6, 5)
+        ]
+        plan = fx.build_plan(self.conn)
+        self.assertEqual(ids(plan, "overdue"), created)
+
+    def test_the_cap_still_binds_a_named_counterparty_among_null_rows(self):
+        """The fix must not disarm the cap it was protecting."""
+        named = [
+            fx.add_commitment(
+                self.conn, title=f"同じ相手 {day}", counterparty="担当A",
+                due_at=f"2026-09-0{day}T09:00:00+09:00", due_precision="minute",
+                evidence="discord",
+            )
+            for day in (7, 6, 5)
+        ]
+        anonymous = [
+            fx.add_commitment(
+                self.conn, title=f"相手なし {day}", counterparty=None,
+                due_at=f"2026-09-0{day}T08:00:00+09:00", due_precision="minute",
+                evidence="discord",
+            )
+            for day in (4, 3)
+        ]
+        plan = fx.build_plan(self.conn)
+        shown = ids(plan, "overdue")
+        self.assertNotIn(named[2], shown)
+        self.assertEqual(shown, [named[0], named[1]] + anonymous)
+        self.assertEqual(plan["counts"]["overdue"], {"shown": 4, "total": 5})
 
     def test_identical_deadlines_break_on_commitment_id(self):
         later_id = fx.add_commitment(

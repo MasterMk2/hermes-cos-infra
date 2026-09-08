@@ -77,12 +77,16 @@ log = logging.getLogger("planning.brief_service")
 ST_DELIVERED = "delivered"
 ST_SUPPRESSED = "suppressed_duplicate"
 ST_LATE_BOOT = "skipped_late_boot"
+#: Additive to contract section 6. A run that fires *before* the configured
+#: slot is a different fact from one that fires long after it, and it must not
+#: consume `morning-brief:YYYY-MM-DD` — see `boot_window_decision`.
+ST_EARLY_BOOT = "skipped_early"
 ST_DISABLED = "skipped_disabled"
 ST_FAILED = "failed"
 ST_DRY_RUN = "dry_run"
 
 ALL_STATUSES = frozenset({ST_DELIVERED, ST_SUPPRESSED, ST_LATE_BOOT,
-                          ST_DISABLED, ST_FAILED, ST_DRY_RUN})
+                          ST_EARLY_BOOT, ST_DISABLED, ST_FAILED, ST_DRY_RUN})
 
 # -- failure reasons (phase section 106) -----------------------------------
 
@@ -108,6 +112,14 @@ DEFAULT_TIMEZONE = "Asia/Tokyo"
 #: I2-AMENDMENT A1: the owner's existing morning slot is 08:30 JST.
 DEFAULT_TIME = "08:30"
 DEFAULT_GRACE_HOURS = 3
+#: How far *before* the slot a run may still be treated as on time. Five
+#: minutes is generous for the clock skew a `Persistent=true` timer can show
+#: and far too small to admit a 02:00 boot. See `boot_window_decision`.
+DEFAULT_EARLY_TOLERANCE_SECONDS = 300
+
+#: `boot_window_decision` reasons.
+BOOT_LATE = "late"
+BOOT_EARLY = "early"
 
 
 # --- small config helpers -------------------------------------------------
@@ -148,18 +160,57 @@ def scheduled_datetime(now: datetime, config: dict) -> datetime:
                          microsecond=0)
 
 
-def late_boot_decision(now: datetime, config: dict) -> tuple:
-    """`(should_skip, delta_seconds)` for section 56.
+def boot_window_decision(now: datetime, config: dict) -> tuple:
+    """`(reason, delta_seconds)` — the two-sided window of section 56.
 
-    Split out from `run_scheduled_brief` so the boundary can be tested on both
-    sides without a database, a renderer or a socket.
+    ``reason`` is ``None`` (send), :data:`BOOT_LATE` or :data:`BOOT_EARLY`.
+
+    The late half is section 56 as written: a boot more than
+    ``late_boot_grace_hours`` past the slot has missed the morning, and sending
+    then is worse than not sending. The boundary is inclusive on the sending
+    side ("grace window <= 3h: send").
+
+    **The early half is what protects AMENDMENT A3.** The systemd timer is
+    ``Persistent=true``, so a boot after a missed elapse fires the unit
+    immediately at whatever hour that is. With only an upper bound, a Pi that
+    came back at 02:00 delivered *today's* brief to Discord at 02:00 —
+    unmetered, with no quiet-hours logic anywhere on the proactive path — and
+    it consumed ``morning-brief:YYYY-MM-DD``, so the real 08:30 elapse then
+    answered ``suppressed_duplicate`` and the owner never got a brief at the
+    configured hour. AMENDMENT A3 separates the brief from the attention engine
+    by *time*; an unbounded early side dissolves that premise.
+
+    So a run more than ``early_tolerance_seconds`` before the slot is skipped
+    with its own status, and the still-pending scheduled elapse delivers
+    normally. The tolerance stays large enough for real clock skew on a
+    `Persistent=true` timer and small enough that no plausible boot hour fits
+    inside it.
     """
     scheduled = scheduled_datetime(now, config)
     tz = scheduled.tzinfo
     grace_hours = float(_get(config, "morning_brief.late_boot_grace_hours",
                              DEFAULT_GRACE_HOURS))
+    early_tolerance = abs(float(_get(config,
+                                     "morning_brief.early_tolerance_seconds",
+                                     DEFAULT_EARLY_TOLERANCE_SECONDS)))
     delta = (now.astimezone(tz) - scheduled).total_seconds()
-    return delta > grace_hours * 3600.0, delta
+    if delta > grace_hours * 3600.0:
+        return BOOT_LATE, delta
+    if delta < -early_tolerance:
+        return BOOT_EARLY, delta
+    return None, delta
+
+
+def late_boot_decision(now: datetime, config: dict) -> tuple:
+    """`(should_skip, delta_seconds)` for section 56.
+
+    Split out from `run_scheduled_brief` so the boundary can be tested on both
+    sides without a database, a renderer or a socket. ``should_skip`` is true
+    for either half of :func:`boot_window_decision`; callers that need to tell
+    them apart use that function directly.
+    """
+    reason, delta = boot_window_decision(now, config)
+    return reason is not None, delta
 
 
 def local_date_for(now: datetime, config: dict) -> str:
@@ -268,10 +319,10 @@ def run_scheduled_brief(config: dict, *, now=None, trigger: str = "timer",
         _health(planning_dir, status="disabled", failure_reason=None)
         return outcome
 
-    # 2/3. late boot ---------------------------------------------------
+    # 2/3. boot window (both sides) -------------------------------------
     if trigger != "manual":
         try:
-            should_skip, delta = late_boot_decision(now, config)
+            skip_reason, delta = boot_window_decision(now, config)
         except ValueError as exc:
             # A malformed `morning_brief.time` maps to `planner_error`: phase
             # section 106's vocabulary is closed to five values and this is the
@@ -284,7 +335,7 @@ def run_scheduled_brief(config: dict, *, now=None, trigger: str = "timer",
                     last_error=f"config_error: {exc}"[:500])
             _health(planning_dir, status="fail", failure_reason=FR_PLANNER)
             return outcome
-        if should_skip:
+        if skip_reason == BOOT_LATE:
             grace = _get(config, "morning_brief.late_boot_grace_hours",
                          DEFAULT_GRACE_HOURS)
             log.info("late boot: %.0fs past the %s slot (grace %sh) — skipping",
@@ -294,6 +345,21 @@ def run_scheduled_brief(config: dict, *, now=None, trigger: str = "timer",
             outcome["detail"] = f"late_by_seconds={int(delta)} grace_hours={grace}"
             _record(state, planning_dir, local_date, brief_state.SKIPPED,
                     last_error=f"late_boot:{int(delta)}s")
+            _health(planning_dir, status="skipped", failure_reason=None)
+            return outcome
+        if skip_reason == BOOT_EARLY:
+            tolerance = _get(config, "morning_brief.early_tolerance_seconds",
+                             DEFAULT_EARLY_TOLERANCE_SECONDS)
+            log.info("early boot: %.0fs before the %s slot (tolerance %ss) — "
+                     "skipping; the scheduled elapse still delivers",
+                     -delta, _get(config, "morning_brief.time", DEFAULT_TIME),
+                     tolerance)
+            outcome["status"] = ST_EARLY_BOOT
+            outcome["detail"] = (f"early_by_seconds={int(-delta)} "
+                                 f"tolerance_seconds={tolerance}")
+            # Deliberately NOT recorded against `local_date`: the day's brief
+            # has not been decided, and the 08:30 elapse must still be able to
+            # produce and deliver it.
             _health(planning_dir, status="skipped", failure_reason=None)
             return outcome
 

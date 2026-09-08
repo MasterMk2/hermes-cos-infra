@@ -19,7 +19,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import planning_fixtures as fx  # noqa: E402
 
-from planning.plan_models import CONFLICT_DETAILS, ConflictKind  # noqa: E402
+from planning.plan_models import (  # noqa: E402
+    CONFLICT_DETAILS,
+    CONFLICT_DETAILS_ASSUMED_END,
+    ConflictKind,
+)
 
 
 def kinds(plan):
@@ -103,6 +107,48 @@ class OverlapTest(unittest.TestCase):
                                            "dense_window_minutes": 5}},
         )
         self.assertEqual(narrowed["conflicts"], [])
+
+    def test_an_assumed_end_time_discloses_the_assumption_in_the_phrase(self):
+        """Phase section 30: do not assert more than the data supports.
+
+        The reviewer's case: A at 09:00 with no `scheduled_end_at`, B at
+        09:30-10:30. The assumed 09:00-10:00 window overlaps B, and the brief
+        used to read an unqualified 「予定が重なっています」 — a factual claim
+        built on a guessed duration. If A is really a 15-minute slot the
+        conflict does not exist at all.
+        """
+        self._slot("cmt_a", "2026-09-08T00:00:00+00:00", None)
+        self._slot("cmt_b", "2026-09-08T00:30:00+00:00", "2026-09-08T01:30:00+00:00")
+        plan = fx.build_plan(self.conn)
+        self.assertEqual(kinds(plan), [ConflictKind.OVERLAPPING_SCHEDULED.value])
+        detail = plan["conflicts"][0]["detail"]
+        self.assertEqual(
+            detail,
+            CONFLICT_DETAILS_ASSUMED_END[ConflictKind.OVERLAPPING_SCHEDULED.value],
+        )
+        self.assertNotEqual(
+            detail, CONFLICT_DETAILS[ConflictKind.OVERLAPPING_SCHEDULED.value]
+        )
+        self.assertIn("終了時刻", detail)
+        self.assertIn("可能性", detail)
+
+    def test_two_real_end_times_keep_the_unqualified_phrase(self):
+        """The disclosure must not leak onto conflicts that are certain."""
+        self._slot("cmt_a", "2026-09-08T00:00:00+00:00", "2026-09-08T01:00:00+00:00")
+        self._slot("cmt_b", "2026-09-08T00:30:00+00:00", "2026-09-08T01:30:00+00:00")
+        plan = fx.build_plan(self.conn)
+        self.assertEqual(
+            plan["conflicts"][0]["detail"],
+            CONFLICT_DETAILS[ConflictKind.OVERLAPPING_SCHEDULED.value],
+        )
+
+    def test_an_all_day_span_is_not_an_assumed_end(self):
+        """Google Calendar's end-exclusive one-day span is semantics, not a
+        guess — and an all-day row is excluded from overlap detection anyway."""
+        self._slot("cmt_all", "2026-09-08", None)
+        self._slot("cmt_b", "2026-09-08T00:30:00+00:00", "2026-09-08T01:30:00+00:00")
+        plan = fx.build_plan(self.conn)
+        self.assertEqual(plan["conflicts"], [])
 
     def test_conflicts_are_found_even_when_the_plan_caps_the_list(self):
         self._slot("cmt_a", "2026-09-08T00:00:00+00:00", "2026-09-08T01:30:00+00:00")
@@ -194,9 +240,20 @@ class ConflictVocabularyTest(unittest.TestCase):
     def test_no_detail_claims_anything_about_travel(self):
         """Phase section 30: with no travel-time data, say only that the
         schedule is tight — never that getting there is hard."""
-        for detail in CONFLICT_DETAILS.values():
-            for forbidden in ("移動", "間に合", "厳しい", "難しい", "急い"):
-                self.assertNotIn(forbidden, detail)
+        for table in (CONFLICT_DETAILS, CONFLICT_DETAILS_ASSUMED_END):
+            for detail in table.values():
+                for forbidden in ("移動", "間に合", "厳しい", "難しい", "急い"):
+                    self.assertNotIn(forbidden, detail)
+
+    def test_the_assumed_end_table_covers_every_kind_and_says_so(self):
+        self.assertEqual(
+            set(CONFLICT_DETAILS_ASSUMED_END), {k.value for k in ConflictKind}
+        )
+        for kind, detail in CONFLICT_DETAILS_ASSUMED_END.items():
+            self.assertIn("終了時刻", detail, kind)
+            self.assertNotEqual(detail, CONFLICT_DETAILS[kind])
+            # The renderer truncates a note at 80 characters.
+            self.assertLessEqual(len(detail), 80, kind)
 
     def test_every_emitted_conflict_uses_the_table(self):
         conn = fx.open_db()
@@ -206,7 +263,11 @@ class ConflictVocabularyTest(unittest.TestCase):
         plan = fx.build_plan(conn)
         self.assertTrue(plan["conflicts"])
         for conflict in plan["conflicts"]:
-            self.assertEqual(conflict["detail"], CONFLICT_DETAILS[conflict["kind"]])
+            self.assertIn(
+                conflict["detail"],
+                (CONFLICT_DETAILS[conflict["kind"]],
+                 CONFLICT_DETAILS_ASSUMED_END[conflict["kind"]]),
+            )
             self.assertEqual(conflict["commitment_ids"], sorted(conflict["commitment_ids"]))
             self.assertEqual(
                 sorted(conflict), ["commitment_ids", "detail", "kind", "window_end", "window_start"]

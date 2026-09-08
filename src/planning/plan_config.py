@@ -54,6 +54,13 @@ DEFAULTS: Dict[str, Any] = {
         # after the attention engine's post-quiet-hours catch-up digest.
         "time": "08:30",
         "late_boot_grace_hours": 3,
+        # The other side of the section 56 window. `Persistent=true` fires a
+        # missed elapse at boot, whatever hour that is; without a lower bound a
+        # 02:00 boot pushed the day's brief to Discord at 02:00 and consumed
+        # `morning-brief:YYYY-MM-DD`, so the real 08:30 run then answered
+        # `suppressed_duplicate`. Large enough for clock skew, far too small
+        # for any plausible boot hour. `brief_service` reads this.
+        "early_tolerance_seconds": 300,
         # Phase section 61 / G.2 policy: LINE is scarce escalation only.
         "channel": "discord",
         "enabled": True,

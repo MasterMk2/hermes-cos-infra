@@ -294,7 +294,8 @@ def planner_stub(plan=None, calls=None):
     def _build(conn, *, date=None, timezone=None, now=None, config=None, freshness=None):
         if calls is not None:
             calls.append(
-                {"conn": conn, "date": date, "timezone": timezone, "config": config}
+                {"conn": conn, "date": date, "timezone": timezone, "now": now,
+                 "config": config}
             )
         return sample_plan() if plan is None else plan
 
@@ -516,6 +517,27 @@ class TestInputValidation(TempDbTestCase):
         )
         self.assertEqual(calls[0]["timezone"], "UTC")
 
+    def test_a_coherent_now_is_passed_to_the_planner(self):
+        """The boundary never leaves the planner to invent its own clock.
+
+        `date` is caller-supplied and `now` used to be absent, so the planner
+        combined a caller's date with the real wall clock. The planner now
+        anchors its windows to the plan date, but the boundary still states the
+        clock it means, in the timezone the caller asked for.
+        """
+        for tz_name in ("Asia/Tokyo", "UTC"):
+            with self.subTest(timezone=tz_name):
+                calls = []
+                mcp_planning.daily_plan_get(
+                    {"date": "2026-09-12", "timezone": tz_name},
+                    db_path=self.db_path,
+                    build_plan=planner_stub(calls=calls),
+                )
+                now = calls[0]["now"]
+                self.assertIsNotNone(now, "build_daily_plan was called with now=None")
+                self.assertIsNotNone(now.tzinfo, "now must be timezone-aware")
+                self.assertEqual(str(now.tzinfo), tz_name)
+
     def test_invalid_mode_rejected_cleanly(self):
         out = mcp_planning.morning_brief_get(
             {"mode": "llm"},
@@ -589,6 +611,62 @@ class TestCompaction(TempDbTestCase):
         for field in ("due_precision", "all_day", "local_time", "priority_class",
                       "source_types", "counterparty", "scheduled_end_at"):
             self.assertIn(field, item)
+
+    def test_a_synthetic_clock_time_is_never_published(self):
+        """AMENDMENT B4 at the boundary, not only in the renderer.
+
+        `week` / `daypart` / `approximate` rows carry a synthetic `23:59:00`.
+        `daily_plan_get` has no renderer in front of it, so a consumer asked
+        「今日何すればいい？」 used to be handed `local_time: "23:59"` for a
+        「今週中」 task and had every reason to answer 「23:59までに…」.
+        """
+        for precision in ("week", "daypart", "approximate", "day", "date",
+                          "month", "unknown", None):
+            with self.subTest(due_precision=precision):
+                plan = sample_plan(must_do=[sample_item(
+                    title="今週中に学務へ書類を出す",
+                    due_at="2026-09-08T23:59:00+09:00",
+                    due_precision=precision,
+                    local_time="23:59",
+                    scheduled_at=None,
+                )])
+                out = mcp_planning.daily_plan_get(
+                    {}, db_path=self.db_path, build_plan=planner_stub(plan=plan)
+                )
+                item = out["must_do"][0]
+                self.assertIsNone(item["local_time"])
+                # The canonical fields stay verbatim so a consumer can decide.
+                self.assertEqual(item["due_at"], "2026-09-08T23:59:00+09:00")
+                self.assertEqual(item["due_precision"], precision)
+
+    def test_a_real_clock_time_still_reaches_the_consumer(self):
+        for precision in ("minute", "exact_datetime"):
+            with self.subTest(due_precision=precision):
+                plan = sample_plan(must_do=[sample_item(
+                    due_at="2026-09-08T18:00:00+09:00", due_precision=precision,
+                    local_time="18:00", scheduled_at=None,
+                )])
+                out = mcp_planning.daily_plan_get(
+                    {}, db_path=self.db_path, build_plan=planner_stub(plan=plan)
+                )
+                self.assertEqual(out["must_do"][0]["local_time"], "18:00")
+
+    def test_a_calendar_slot_keeps_its_time_and_an_all_day_row_does_not(self):
+        plan = sample_plan(
+            scheduled=[
+                sample_item(commitment_id="cmt_slot", scheduled_at="2026-09-08T00:00:00+00:00",
+                            due_precision=None, local_time="09:00", all_day=False),
+                sample_item(commitment_id="cmt_allday", scheduled_at="2026-09-08",
+                            due_precision=None, local_time="00:00", all_day=True),
+            ],
+            must_do=[],
+        )
+        out = mcp_planning.daily_plan_get(
+            {}, db_path=self.db_path, build_plan=planner_stub(plan=plan)
+        )
+        by_id = {i["commitment_id"]: i for i in out["scheduled"]}
+        self.assertEqual(by_id["cmt_slot"]["local_time"], "09:00")
+        self.assertIsNone(by_id["cmt_allday"]["local_time"])
 
     def test_unknown_item_fields_are_dropped(self):
         """Data minimisation (phase section 73): a raw body must never reach the model."""

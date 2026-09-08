@@ -34,6 +34,16 @@ morning_brief:
   # `--trigger manual` bypasses this window but never the idempotency check.
   late_boot_grace_hours: 3
 
+  # The other side of the same window. `Persistent=true` on the timer fires a
+  # missed elapse the moment the Pi comes back, at whatever hour that is — so
+  # a boot at 02:00 used to push today's brief to Discord at 02:00 and consume
+  # `morning-brief:YYYY-MM-DD`, after which the real 08:30 run answered
+  # `suppressed_duplicate` and the owner got no brief at the configured hour.
+  # A run more than this many seconds BEFORE the slot returns `skipped_early`
+  # and records nothing, so the scheduled elapse still delivers. Wide enough
+  # for clock skew, far too narrow for a boot hour.
+  early_tolerance_seconds: 300
+
   # Phase sections 61 and 99. "discord" is the only accepted value; anything
   # else refuses to deliver rather than being honoured, and there is no code
   # path from this service to LINE.

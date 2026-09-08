@@ -27,7 +27,12 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import textwrap
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -283,3 +288,78 @@ def test_the_installer_refuses_the_forbidden_groups():
     assert "refusing to widen" in script
     # It must not hard-code the operator's account name (privacy rule).
     assert "ATTENTION_USER" in script
+
+
+# --- section 68: the planner writes planning state, and nothing else -----
+
+def test_the_installer_narrows_the_gateway_run_directory():
+    """Group-write on that directory is permission to unlink `proactive.sock`.
+
+    The gateway owns the directory and creates the socket as its owner, so it
+    needs no group-write there; the planner needs group `x` to traverse plus
+    group `w` on the 0660 socket inode. Keeping 2770 while adding a new
+    principal to the group would let a compromised planner replace the socket
+    every proactive caller — the attention engine included — writes to.
+    """
+    script = (SRC / "planning" / "install-root.sh").read_text(encoding="utf-8")
+    assert 'GATEWAY_RUN_MODE="${GATEWAY_RUN_MODE:-2750}"' in script
+    assert 'ensure_mode "$GATEWAY_RUN" "$GATEWAY_RUN_MODE"' in script
+    assert 'ensure_mode "$GATEWAY_RUN" 2770' not in script
+    # --uninstall puts the operator's own directory back the way it was.
+    assert 'ORIG_MODE="${ORIGINAL_RUN_MODE:-}"' in script
+    assert 'run chmod "0$ORIG_MODE" "$GATEWAY_RUN"' in script
+
+
+def test_ensure_mode_compares_permission_bits_not_decimal_magnitude():
+    """`0700 -> 0640` is a widening; a decimal compare calls it a narrowing.
+
+    Reproduced through the real function rather than by reading it: the guard
+    runs as root, and "it adds group-read while reporting that it removed
+    permissions" is not a failure mode worth trusting to a code reading.
+    """
+    if shutil.which("bash") is None:  # pragma: no cover - bash-less host
+        pytest.skip("bash is not available")
+    script = SRC / "planning" / "install-root.sh"
+    # `stat` is stubbed rather than the filesystem being set up: this suite has
+    # to give the same verdict on a host whose filesystem does not carry POSIX
+    # modes at all, and the function under test is a pure comparison of two
+    # mode strings.
+    harness = textwrap.dedent(
+        """
+        set -euo pipefail
+        # Take ensure_mode out of the script without executing the installer.
+        eval "$(awk '/^ensure_mode\\(\\) \\{/,/^\\}/' "$1")"
+        DRY_RUN=1
+        CHANGES=0
+        HAVE_MODE="$3"
+        say()  { :; }
+        did()  { printf 'NARROWED %s\\n' "$*"; }
+        run()  { :; }
+        die()  { printf 'REFUSED %s\\n' "$*"; exit 0; }
+        stat() { printf '%s\\n' "$HAVE_MODE"; }
+        ensure_mode "$2" "$4"
+        """
+    ).strip()
+    with tempfile.TemporaryDirectory() as tmp:
+        harness_path = os.path.join(tmp, "harness.sh")
+        with open(harness_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(harness + "\n")
+        probe = os.path.join(tmp, "probe")
+        os.mkdir(probe)
+
+        def decide(have, want):
+            proc = subprocess.run(
+                ["bash", harness_path, str(script), probe, have, want],
+                capture_output=True, text=True, timeout=60,
+            )
+            assert proc.returncode == 0, proc.stderr
+            return proc.stdout.strip()
+
+        # The case the decimal compare got wrong: 700 > 640, so it chmodded
+        # and added group-read.
+        assert decide("700", "640").startswith("REFUSED"), \
+            "0700 -> 0640 adds group-read and must be refused"
+        # The cases it got right, still right.
+        assert decide("700", "750").startswith("REFUSED")
+        assert decide("2770", "2750").startswith("NARROWED")
+        assert decide("750", "750") == ""

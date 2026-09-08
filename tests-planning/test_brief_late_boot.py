@@ -74,6 +74,102 @@ def test_late_boot_boundary(when, expect_skip, tmp_path):
     assert delta == pytest.approx((when - SLOT).total_seconds())
 
 
+# --- the EARLY side, both sides of its own bound -------------------------
+#
+# The window used to have no lower bound at all, so ANY `now` before the slot
+# sent. With `Persistent=true` on the timer, a boot after a missed elapse fires
+# the unit at whatever hour that is — and there is no quiet-hours logic on the
+# proactive path (it lives in the attention engine). A 02:00 boot therefore
+# pushed the day's brief to Discord at 02:00 AND consumed
+# `morning-brief:YYYY-MM-DD`, after which the real 08:30 run answered
+# `suppressed_duplicate`. That destroys AMENDMENT A3's whole premise, which is
+# that the brief and the attention digest are separated by *time*.
+
+@pytest.mark.parametrize("when,expect_reason", [
+    (SLOT - timedelta(hours=6, minutes=30), brief_service.BOOT_EARLY),  # 02:00 boot
+    (SLOT - timedelta(hours=1), brief_service.BOOT_EARLY),
+    (SLOT - timedelta(seconds=301), brief_service.BOOT_EARLY),  # one second past
+    (SLOT - timedelta(seconds=300), None),          # exactly the tolerance: SEND
+    (SLOT - timedelta(seconds=299), None),
+    (SLOT - timedelta(minutes=1), None),            # ordinary clock skew
+    (SLOT, None),
+    (SLOT + timedelta(hours=3), None),
+    (SLOT + timedelta(hours=3, seconds=1), brief_service.BOOT_LATE),
+])
+def test_boot_window_is_two_sided(when, expect_reason, tmp_path):
+    config = base_config(tmp_path)
+    reason, delta = brief_service.boot_window_decision(when, config)
+    assert reason == expect_reason
+    assert delta == pytest.approx((when - SLOT).total_seconds())
+
+
+@pytest.mark.parametrize("tolerance,offset_seconds,expect_reason", [
+    (0, -1, brief_service.BOOT_EARLY),
+    (0, 0, None),
+    (60, -59, None),
+    (60, -61, brief_service.BOOT_EARLY),
+    (7200, -3600, None),
+    (7200, -7201, brief_service.BOOT_EARLY),
+])
+def test_early_tolerance_is_configurable(tolerance, offset_seconds,
+                                         expect_reason, tmp_path):
+    config = base_config(tmp_path)
+    config["morning_brief"]["early_tolerance_seconds"] = tolerance
+    reason, _ = brief_service.boot_window_decision(
+        SLOT + timedelta(seconds=offset_seconds), config)
+    assert reason == expect_reason
+
+
+def test_the_two_am_boot_sends_nothing_and_leaves_the_day_undecided(tmp_path,
+                                                                    state):
+    """The reviewer's scenario, end to end.
+
+    Pi down 09-07 08:00 → 09-08 02:00; systemd fires the missed elapse at boot.
+    Nothing may go to Discord at 02:00, and the 08:30 elapse must still
+    deliver — which means the early skip records nothing against the date.
+    """
+    config = base_config(tmp_path)
+    client = FakeClient()
+    early = run_at(config, state, client, datetime(2026, 9, 8, 2, 0, tzinfo=JST))
+
+    assert early["status"] == brief_service.ST_EARLY_BOOT
+    assert client.calls == []
+    assert "early_by_seconds=23400" in early["detail"]
+    assert "tolerance_seconds=300" in early["detail"]
+    # Nothing consumed: no state row, so `morning-brief:2026-09-08` is free.
+    assert state.get("2026-09-08") is None
+    assert not state.is_settled("2026-09-08")
+
+    on_time = run_at(config, state, client, SLOT)
+    assert on_time["status"] == brief_service.ST_DELIVERED
+    assert len(client.calls) == 1
+    assert client.calls[0]["notification_id"] == "morning-brief:2026-09-08"
+
+
+def test_a_manual_run_before_the_slot_is_still_honoured(tmp_path, state):
+    """`--trigger manual` bypasses the window, both halves of it."""
+    config = base_config(tmp_path)
+    client = FakeClient()
+    outcome = run_at(config, state, client,
+                     datetime(2026, 9, 8, 2, 0, tzinfo=JST), trigger="manual")
+    assert outcome["status"] == brief_service.ST_DELIVERED
+    assert len(client.calls) == 1
+
+
+def test_the_early_skip_is_a_distinct_status_in_the_closed_set(tmp_path, state):
+    """`skipped_early` and `skipped_late_boot` are different facts; a health
+    reader that cannot tell them apart cannot tell a night boot from a missed
+    morning."""
+    assert brief_service.ST_EARLY_BOOT in brief_service.ALL_STATUSES
+    assert brief_service.ST_EARLY_BOOT != brief_service.ST_LATE_BOOT
+    config = base_config(tmp_path)
+    early = run_at(config, state, FakeClient(),
+                   datetime(2026, 9, 8, 2, 0, tzinfo=JST))
+    late = run_at(config, state, FakeClient(), SLOT + timedelta(hours=5))
+    assert early["status"] != late["status"]
+    assert early["failure_reason"] is None and late["failure_reason"] is None
+
+
 def test_the_documented_twelve_o_clock_boot_skips(tmp_path, state):
     """Phase section 56's own example: the Pi boots at 12:00, the 08:30 run
     was missed, the grace is 3h — 12:00 is 3h30m late, so nothing is sent."""
