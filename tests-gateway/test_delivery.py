@@ -145,7 +145,7 @@ class TestRedaction(unittest.TestCase):
     SECRETS = [
         "Bot MTIzNDU2Nzg5MDEyMzQ1Njc4.GaBcDe.FgHiJkLmNoPqRsTuVwXyZ0123456789ab",
         "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",  # privacy-ok
     ]
 
     def test_known_secret_shapes_are_removed(self):
