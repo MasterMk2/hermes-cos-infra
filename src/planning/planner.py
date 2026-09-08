@@ -1175,9 +1175,10 @@ def build_daily_plan(
     # Dedup runs before classification and therefore before conflict
     # detection: the only window overlaps in the whole dataset are the
     # duplicate pairs, so the other order reports a phantom conflict.
-    survivors, _collapsed = deduplicate([c for c in kept if not _is_filtered_noise(c)])
+    survivors, collapsed = deduplicate([c for c in kept if not _is_filtered_noise(c)])
 
     buckets: Dict[Category, List[Tuple[_Candidate, str]]] = {c: [] for c in Category}
+    not_categorised = 0
     for cand in survivors:
         category, reason = classify(cand, ctx)
         if category is None or reason is None:
@@ -1186,6 +1187,8 @@ def build_daily_plan(
             # counted rather than dropped in silence.
             if _excluded_by_evidence(cand):
                 filtered_noise += 1
+            else:
+                not_categorised += 1
             continue
         buckets[category].append((cand, reason))
 
@@ -1233,6 +1236,14 @@ def build_daily_plan(
     plan["counts"]["conflicts"] = {"shown": len(conflicts), "total": len(conflicts)}
     plan["counts"]["filtered_noise"] = {"shown": 0, "total": filtered_noise}
     plan["counts"]["unknown_work_state"] = {"shown": 0, "total": sum(unknown_states.values())}
+    # Every eligible row is now accounted for somewhere. Before these two, a
+    # collapsed duplicate was only logged at INFO and a row that fell out for a
+    # reason other than the evidence filter — a COUNTERPARTY task, a row with
+    # no evidence at all — vanished with no counter, which is the same class of
+    # silent loss the AMENDMENT 1 D counter exists to prevent. A test asserts
+    # the arithmetic closes.
+    plan["counts"]["deduplicated"] = {"shown": 0, "total": collapsed}
+    plan["counts"]["not_categorised"] = {"shown": 0, "total": not_categorised}
 
     if freshness is None:
         freshness = freshness_module.collect(cfg, now=now_local)

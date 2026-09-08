@@ -89,7 +89,22 @@ OVERDUE_REASON_RE = re.compile(r"^overdue_(0|[1-9][0-9]*)d$")
 
 
 def overdue_reason(days: int) -> str:
-    """`overdue_<N>d` for a whole number of days late (`overdue_0d` allowed)."""
+    """`overdue_<N>d` for a whole number of days late.
+
+    ``overdue_0d`` is accepted by the grammar but **the planner cannot produce
+    it**, and that is deliberate rather than an oversight. `classify` routes to
+    `OVERDUE` only when the deadline falls before the plan day's 00:00, so
+    `_overdue_days` is 1 or more by construction. A deadline earlier *today*
+    stays in `must_do`: phase section 11 makes "due today" the owner's task for
+    today, and a 09:00 deadline read at 18:00 is still today's work — moving it
+    to 期限超過 would make the brief worse, not more accurate.
+
+    So `overdue_0d` and the renderer's 「本日期限超過」 branch are a defensive
+    tail, not a state to expect. They are kept because they cost nothing and
+    would be correct if that routing ever changed; the documentation says
+    "unreachable today" instead of describing a state the planner cannot
+    produce, and `test_planner_ordering` pins ``overdue_days >= 1``.
+    """
     if days < 0:
         raise ValueError(f"overdue days must be >= 0, got {days}")
     return f"overdue_{int(days)}d"
@@ -271,7 +286,19 @@ COUNTS_KEYS: tuple = (
     "conflicts",
     "filtered_noise",
     "unknown_work_state",
+    # Additive. Every eligible row lands in exactly one of the buckets above or
+    # in one of these two, so `sum(totals)` is the eligible row count and no
+    # row can leave the planner uncounted.
+    "deduplicated",
+    "not_categorised",
 )
 
 WARNING_DATA_FRESHNESS = "data_freshness_warning"
 WARNING_UNKNOWN_WORK_STATE = "unknown_work_state"
+
+#: The closed set of warning identifiers the planner can put in `warnings`.
+#: `renderer.WARNING_PHRASE` must carry a Japanese phrase for every one of
+#: them; a test asserts it, because the renderer's fallback branch prints the
+#: identifier itself and an English token in the 08:30 brief is not the section
+#: 41 shape.
+WARNINGS: frozenset = frozenset({WARNING_DATA_FRESHNESS, WARNING_UNKNOWN_WORK_STATE})

@@ -112,7 +112,24 @@ tool the server does not advertise.
    scheduled-brief app under `/srv/hermes/planning/` and deliberately never writes into
    the Antigravity tree. The two halves of Phase I.2 have separate deployment steps.
 
-2. **Verify the server advertises 16 tools** before touching the allowlist:
+2. **Verify the server advertises 16 tools** before touching the allowlist —
+   **in BOTH trees**, because step 1 deploys to both and the failure this step
+   exists to catch is a half-landing.
+
+   The authoritative one first: this is the tree the constrained agent actually
+   launches (AMENDMENT 2 L1), so it is the only run whose result decides
+   whether the allowlist may be applied.
+   ```bash
+   sudo -u hermesantigravity env \
+     PYTHONPATH=/srv/hermes/antigravity/mcp/event \
+     EVENTS_DB=/srv/hermes/hermes-data/events/events.db \
+     /srv/hermes/antigravity/venv/bin/python3 - <<'PY'
+   import asyncio, event_mcp
+   tools = asyncio.run(event_mcp._list_tools()).tools
+   print(len(tools)); print([t.name for t in tools])
+   PY
+   ```
+   Then the Hermes container's copy, which `event_layer` launches (section 5.2):
    ```bash
    sudo -u <PI_USER> env \
      PYTHONPATH=/srv/hermes/hermes-data/tools/events \
@@ -123,7 +140,10 @@ tool the server does not advertise.
    print(len(tools)); print([t.name for t in tools])
    PY
    ```
-   Expect `16` and both new names present.
+   Expect `16` and both new names present **from each**. Running only the
+   second one — which is what this document used to say — passes while the
+   constrained agent still advertises 14, and 「今日何すればいい？」 then falls
+   back to `agenda_get` and quietly fails the section 124 gate.
 
 3. **Back up, then apply the allowlist delta as root.**
    ```bash
@@ -135,11 +155,18 @@ tool the server does not advertise.
    cfg = json.loads(p.read_text(encoding="utf-8"))
    allow = cfg["permissions"]["allow"]
    before = len(allow)
-   for entry in ("mcp(event/daily_plan_get)", "mcp(event/morning_brief_get)"):
+   wanted = ("mcp(event/daily_plan_get)", "mcp(event/morning_brief_get)")
+   added = 0
+   for entry in wanted:
        if entry not in allow:
            allow.append(entry)
+           added += 1
    assert not any("*" in e for e in allow), "wildcard allow entry present - abort"
-   assert len(allow) == before + 2, (before, len(allow))
+   # Idempotent: a re-run adds 0 and must still succeed. `before + 2` made the
+   # second run raise AssertionError, which is safe (the write never happens)
+   # but contradicts the "this block is re-runnable" claim above it.
+   assert len(allow) == before + added, (before, added, len(allow))
+   assert all(entry in allow for entry in wanted), "an entry is missing after apply"
    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
    print("allow:", before, "->", len(allow), "deny:", len(cfg["permissions"]["deny"]))
    PY
@@ -150,13 +177,18 @@ tool the server does not advertise.
 4. **Restart and verify.**
    ```bash
    sudo systemctl restart hermes-antigravity.service
+   # Sanity count of mcp() entries. `grep -c` prints a NUMBER, never nothing —
+   # expect 32 after this change (30 before + the two new ones).
    sudo -u hermesantigravity grep -c 'mcp(' \
        /home/hermesantigravity/.gemini/antigravity-cli/settings.json
-   # must print nothing: no allow entry may contain a wildcard
+   # The wildcard check is THIS one, and it must print an empty list `[]`.
    sudo -u hermesantigravity python3 -c "import json,sys;\
 d=json.load(open('/home/hermesantigravity/.gemini/antigravity-cli/settings.json'));\
 print([e for e in d['permissions']['allow'] if '*' in e])"
    ```
+   The comment used to sit on the `grep -c` line, whose stated success
+   criterion — printing nothing — a counting command cannot ever meet. In a
+   root procedure that invites either a false alarm or a skipped check.
 
 **Rollback:** restore `settings.json.pre-i2.bak` and restart the service. The two tools
 then remain in the server but are not allowed, which is the pre-I.2 security posture.

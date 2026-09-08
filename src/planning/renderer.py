@@ -213,8 +213,19 @@ DEFAULT_BRIDGE_URL = "http://172.18.0.1:8765/v1/chat/completions"
 #: model text, and never escalated however many sources are stale (section 44).
 FRESHNESS_WARNING = "情報源の更新が止まっています"
 
+#: Every warning the planner can emit needs a Japanese phrase here. The raw
+#: `str(warning)` branch below is a last resort for a warning added upstream
+#: without one — it is honest, but it puts an English identifier
+#: (`unknown_work_state`) in the middle of the owner's 08:30 brief, which is
+#: not what section 41 asks for. Keep this table in step with
+#: `plan_models.WARNING_*`; a test asserts it covers all of them.
 WARNING_PHRASE = {
     "data_freshness_warning": FRESHNESS_WARNING,
+    # AMENDMENT 1 D: a work_state this planner predates was counted, not
+    # dropped. The reader is told a row exists that the plan could not place,
+    # without being told it is broken — the row may be perfectly fine and
+    # merely newer than this code.
+    "unknown_work_state": "分類できない状態の項目があります",
 }
 
 UNTRUSTED_BEGIN = "<<<PLAN_DATA_BEGIN>>>"

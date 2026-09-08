@@ -238,6 +238,32 @@ class OverdueOrderingTest(unittest.TestCase):
         self.assertEqual(shown, [named[0], named[1]] + anonymous)
         self.assertEqual(plan["counts"]["overdue"], {"shown": 4, "total": 5})
 
+    def test_overdue_days_is_never_zero_and_today_stays_in_must_do(self):
+        """`overdue_0d` is documented as unreachable; this is what makes it so.
+
+        The category test is `due < day_start`, so an overdue row is at least
+        one whole day late. A deadline earlier TODAY stays in `must_do` — phase
+        section 11 makes "due today" the owner's task for today, and a 09:00
+        deadline read at 18:00 is still today's work. Moving it to 期限超過
+        would be a behaviour change, not a bug fix.
+        """
+        earlier_today = fx.add_commitment(
+            self.conn, title="午前の締切", due_at="2026-09-08T09:00:00+09:00",
+            due_precision="minute", evidence="discord",
+        )
+        yesterday = fx.add_commitment(
+            self.conn, title="昨日の締切", due_at="2026-09-07T09:00:00+09:00",
+            due_precision="minute", evidence="discord",
+        )
+        # 18:00 on the plan date: the 09:00 deadline has already passed.
+        plan = fx.build_plan(
+            self.conn, now=fx.DEFAULT_NOW.replace(hour=18, minute=0))
+        self.assertEqual(ids(plan, "must_do"), [earlier_today])
+        self.assertEqual(ids(plan, "overdue"), [yesterday])
+        for item in plan["overdue"]:
+            self.assertGreaterEqual(item["overdue_days"], 1)
+            self.assertNotEqual(item["reason_for_inclusion"], "overdue_0d")
+
     def test_identical_deadlines_break_on_commitment_id(self):
         later_id = fx.add_commitment(
             self.conn, commitment_id="cmt_zzz", title="同着B", counterparty="担当A",

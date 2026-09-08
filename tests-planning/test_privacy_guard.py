@@ -81,8 +81,8 @@ DECLARED_PLACEHOLDERS = (
     "山田太郎", "鈴木一郎", "高橋", "ベンダA", "ベンダB", "制作チーム",
     "user@example.com", "archive@example.invalid",
     # Role nouns that legitimately occupy a person-shaped field. 「担当」 also
-    # clears the 担当A-D fixtures; a real value such as 「担当の田中さん」 still
-    # trips the honorific rule on the remainder.
+    # clears the 担当A-D fixtures, while a value that pairs it with a name
+    # still trips the honorific rule on the remainder — pinned below.
     "担当", "事務局", "受付", "運営", "委員会", "先生",
 )
 
@@ -162,12 +162,15 @@ CHECKS = (
         "漢字氏名+ふりがな",
     ),
     (
-        # No trailing lookahead. A real title routinely continues into kana
-        # straight after the honorific (「<name>さんに…」), so a `(?![ぁ-ん])`
-        # guard would swallow exactly the shape that leaked.
+        # No trailing lookahead after the honorific itself. A real title
+        # routinely continues into kana straight after it (「<name>さんに…」),
+        # so a `(?![ぁ-ん])` guard would swallow exactly the shape that leaked.
+        # `氏(?!名)` is the one exception: 「氏名」 is the word "full name", a
+        # field label, and excluding it costs nothing — 「<name>氏名」 is not a
+        # way anyone writes a person.
         "honorific-name",
-        re.compile(rf"[{KANJI}]{{2,4}}(?:さん|氏|様|くん|ちゃん)"),
-        "敬称付きの氏名",
+        re.compile(rf"[{KANJI}]{{2,4}}(?:さん|氏(?!名)|様|くん|ちゃん)"),
+        "敬称付きの人名表記",
     ),
     (
         # Not a fixed length: the leaked value was `u` + 27 hex. A leading
@@ -287,35 +290,62 @@ class PatternClassScanTests(unittest.TestCase):
         that stops matching — an escaping change, a Python version — is caught
         here rather than by the scan silently passing forever.
         """
+        # Every value below is invented ON PURPOSE to match, so every line
+        # carries the explicit marker. Without it this file fails its own scan
+        # the moment it becomes tracked — which is what happened on the first
+        # commit, and is a fair demonstration that the scan works.
         samples = {
-            "japanese-name-with-reading": "counterparty=\"田中一郎(たなかいちろう)\"",
-            "honorific-name": "田中さんに連絡する",
-            "external-user-id": "u1a2b3c4d5e6f7a8b9c0d1e2f3a4b5",
-            "personal-email": "someone@gmail.com",
-            "local-path": "C:\\Users\\someone\\project",
-            "secret": "ghp_" + "a1b2c3d4e5" * 4,
+            "japanese-name-with-reading": "counterparty=\"田中一郎(たなかいちろう)\"",  # privacy-ok
+            "honorific-name": "田中さんに連絡する",  # privacy-ok
+            "external-user-id": "u1a2b3c4d5e6f7a8b9c0d1e2f3a4b5",  # privacy-ok
+            "personal-email": "someone@gmail.com",  # privacy-ok
+            "local-path": "C:\\Users\\someone\\project",  # privacy-ok
+            "secret": "ghp_" + "a1b2c3d4e5" * 4,  # privacy-ok
         }
         for label, pattern, _why in CHECKS:
             with self.subTest(check=label):
                 self.assertRegex(samples[label], pattern)
 
+    def test_the_checks_do_not_fire_on_ordinary_prose(self):
+        """A guard nobody can keep green gets disabled.
+
+        These are the shapes that look person-ish and are not: a field label, a
+        role noun, an ASCII path, a git SHA. Each one is a false positive this
+        file has actually had to absorb, so each is pinned.
+        """
+        benign = (
+            "氏名の送付要否を確認する",          # 「氏名」 is a field label
+            "担当者に確認する",
+            "src/planning/renderer.py",
+            "a9e849d..HEAD",
+            "u0000000000000000000000000000",  # low-entropy fixture id
+        )
+        for value in benign:
+            with self.subTest(value=value):
+                for label, pattern, _why in CHECKS:
+                    match = pattern.search(value)
+                    if match and label == "external-user-id":
+                        self.assertTrue(_is_low_entropy_id(match.group(0)))
+                        continue
+                    self.assertIsNone(match, label)
+
     def test_a_padded_fixture_token_is_exempt_but_a_real_shape_is_not(self):
         """The entropy exemption must be narrow enough to still catch a token."""
         self.assertTrue(_is_obvious_fixture_secret("ghp_" + "A" * 36))
         self.assertTrue(_is_obvious_fixture_secret("sk-" + "0" * 32))
-        self.assertFalse(_is_obvious_fixture_secret("ghp_1234567890abcdef1234567890abcdef1234"))
+        self.assertFalse(_is_obvious_fixture_secret("ghp_1234567890abcdef1234567890abcdef1234"))  # privacy-ok
         self.assertFalse(_is_obvious_fixture_secret("ghp_" + "A" * 8))
 
     def test_the_placeholder_allowlist_does_not_swallow_a_real_name(self):
-        """Stripping 「高橋」 must not make 「高橋田中さん」 look clean."""
-        line = 'counterparty="高橋"  # fine'
+        """Stripping a placeholder must not make an adjacent name look clean."""
+        line = 'counterparty="高橋"  # privacy-ok'
         stripped = line
         for placeholder in DECLARED_PLACEHOLDERS:
             stripped = stripped.replace(placeholder, "")
         for _label, pattern, _why in CHECKS:
             self.assertIsNone(pattern.search(stripped))
 
-        hostile = 'counterparty="高橋田中さん"'
+        hostile = 'counterparty="高橋田中さん"'  # privacy-ok
         stripped = hostile
         for placeholder in DECLARED_PLACEHOLDERS:
             stripped = stripped.replace(placeholder, "")

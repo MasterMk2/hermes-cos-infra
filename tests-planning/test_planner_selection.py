@@ -474,6 +474,57 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(plan["date"], fx.DEFAULT_PLAN_DATE)
         self.assertEqual(plan["timezone"], "Asia/Tokyo")
 
+    def test_every_eligible_row_is_counted_somewhere(self):
+        """No row may leave the planner without appearing in some total.
+
+        A collapsed duplicate used to be logged at INFO and thrown away, and a
+        row excluded for a reason other than the Gmail filter — a COUNTERPARTY
+        task, a row with no evidence at all — vanished with no counter. That is
+        the same silent loss the AMENDMENT 1 D counter exists to prevent,
+        applied inconsistently. The arithmetic now closes, and this asserts it.
+        """
+        fx.reset_ids()
+        shown_categories = ("scheduled", "must_do", "overdue", "next_up",
+                            "waiting_for", "backlog")
+        # One row of every disposition the planner has.
+        fx.add_commitment(self.conn, title="今日の締切", due_at="2026-09-08T18:00:00+09:00",
+                          due_precision="minute", evidence="discord")
+        fx.add_commitment(self.conn, title="相手側の作業", responsibility="COUNTERPARTY",
+                          due_at="2026-09-08T18:00:00+09:00", due_precision="minute",
+                          evidence="discord")
+        fx.add_commitment(self.conn, title="証跡のない作業", evidence=None)
+        fx.add_self_gmail_noise_row(self.conn)
+        fx.add_commitment(self.conn, title="共有の証跡A", commitment_id="cmt_dup_a",
+                          evidence=[("discord", "discord:shared-1")])
+        fx.add_commitment(self.conn, title="共有の証跡B（長いほう）", commitment_id="cmt_dup_b",
+                          evidence=[("discord", "discord:shared-1")])
+
+        plan = self.plan()
+        eligible = self.conn.execute(
+            "SELECT COUNT(*) FROM commitments "
+            "WHERE work_state NOT IN ('DONE','CANCELLED','DISMISSED') "
+            "  AND (currentness IS NULL OR currentness <> 'superseded') "
+            "  AND responsibility <> 'INFORMATIONAL'"
+        ).fetchone()[0]
+        counted = sum(plan["counts"][name]["total"] for name in shown_categories)
+        counted += plan["counts"]["filtered_noise"]["total"]
+        counted += plan["counts"]["deduplicated"]["total"]
+        counted += plan["counts"]["not_categorised"]["total"]
+        counted += plan["counts"]["unknown_work_state"]["total"]
+        self.assertEqual(counted, eligible, plan["counts"])
+        # And each new counter is actually exercised by this fixture.
+        self.assertEqual(plan["counts"]["deduplicated"]["total"], 1)
+        self.assertGreaterEqual(plan["counts"]["not_categorised"]["total"], 2)
+        self.assertEqual(plan["counts"]["filtered_noise"]["total"], 1)
+
+    def test_the_new_counters_are_never_shown(self):
+        """They are plan-JSON bookkeeping, not something the brief reports."""
+        fx.seed_realistic_day(self.conn)
+        plan = self.plan()
+        for name in ("deduplicated", "not_categorised", "filtered_noise",
+                     "unknown_work_state"):
+            self.assertEqual(plan["counts"][name]["shown"], 0, name)
+
     def test_counts_total_is_before_the_cap(self):
         for hour in range(9, 9 + 8):
             fx.add_commitment(

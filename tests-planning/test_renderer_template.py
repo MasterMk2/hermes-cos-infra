@@ -88,6 +88,11 @@ def make_plan(*, date="2026-09-12", timezone_name="Asia/Tokyo", conflicts=None,
     plan["counts"]["unknown_work_state"] = {
         "shown": 0, "total": int(totals.get("unknown_work_state", 0))
     }
+    # Same reason, for the two counters that close the arithmetic: with these,
+    # the sum of every `total` is the eligible row count, so no row can leave
+    # the planner uncounted.
+    for name in ("deduplicated", "not_categorised"):
+        plan["counts"][name] = {"shown": 0, "total": int(totals.get(name, 0))}
     # `source_freshness` stays optional on purpose: the renderer must tolerate a
     # plan without it (it reads the block with `or {}`), and `busy_day_plan()`
     # covers the present case.
@@ -419,6 +424,40 @@ class NotesTests(unittest.TestCase):
     def test_notes_section_is_omitted_when_there_is_nothing_to_note(self):
         plan = make_plan(must_do=[make_item(title="定例会の開催")])
         self.assertNotIn("【注意点】", render_brief(plan, mode="template", now=NOW)["text"])
+
+    def test_every_planner_warning_has_a_japanese_phrase(self):
+        """A warning with no phrase falls to the raw-token branch.
+
+        `unknown_work_state` is a real planner warning (AMENDMENT 1 D) and the
+        renderer had no phrase for it, so the owner's 08:30 brief could end
+        with 「・unknown_work_state」 — honest, but not Japanese and not the
+        section 41 shape. The raw branch stays as the last resort it is meant
+        to be; this keeps the table in step with the planner's closed set.
+        """
+        from planning.plan_models import WARNINGS
+        from planning.renderer import WARNING_PHRASE
+
+        self.assertEqual(sorted(WARNINGS - set(WARNING_PHRASE)), [])
+        for warning, phrase in WARNING_PHRASE.items():
+            with self.subTest(warning=warning):
+                self.assertTrue(phrase.strip())
+                self.assertFalse(phrase.isascii(), f"{warning} phrase is not Japanese")
+
+    def test_an_unknown_work_state_warning_renders_in_japanese(self):
+        plan = make_plan(must_do=[make_item(title="定例会の開催")],
+                         warnings=["unknown_work_state"])
+        text = render_brief(plan, mode="template", now=NOW)["text"]
+        self.assertIn("【注意点】", text)
+        self.assertNotIn("unknown_work_state", text)
+        self.assertIn("・分類できない状態の項目があります", text)
+
+    def test_a_warning_with_no_phrase_still_appears_rather_than_vanishing(self):
+        """The raw branch is a last resort, not dead code: a warning the
+        renderer does not recognise must still reach the reader."""
+        plan = make_plan(must_do=[make_item(title="定例会の開催")],
+                         warnings=["some_future_warning"])
+        text = render_brief(plan, mode="template", now=NOW)["text"]
+        self.assertIn("・some_future_warning", text)
 
 
 class LengthTests(unittest.TestCase):

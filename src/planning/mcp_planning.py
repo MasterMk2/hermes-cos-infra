@@ -180,11 +180,18 @@ def _validate_mode(value):
 # --------------------------------------------------------------------------
 
 def _connect_readonly(db_path):
-    """Open ``events.db`` read-only. Never requests write mode, never migrates."""
-    try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
-    except sqlite3.OperationalError:
-        con = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True, timeout=10)
+    """Open ``events.db`` read-only. Never requests write mode, never migrates.
+
+    There is deliberately **no ``immutable=1`` fallback.** `immutable=1` tells
+    SQLite the file cannot change, and `events.db` has a live writer — the
+    reconcilers. Opening it that way while a reconcile transaction is in flight
+    lets the reader see a torn page, which surfaces either as a `DatabaseError`
+    reported as `planner_error` or, worse, as a plausible but wrong plan. A
+    `mode=ro` open that fails is a real condition worth reporting, not one
+    worth working around: the caller turns it into
+    ``{"error": "events_db_unavailable"}``.
+    """
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=10000")
     try:
