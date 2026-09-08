@@ -59,7 +59,7 @@ Key finding: **The current Event Layer suffers from extreme Gmail automated nois
 ### 2.3 Calendar Database (`/srv/hermes/calendar/index/index.db`)
 
 - **Total Calendar Events**: 81
-  - Events in 2026: 39 (e.g. `サークル合宿`, `地域の交流会`, `模擬試験`, `【締切】アルバム 個人ページ入稿`, `実習`, `【締切】アルバム 実習班ページ入稿`, `第2回 学年ガイダンス`, `Hermes H1 E2E [cancelled]`)
+  - Events in 2026: 39 (e.g. `サークル合宿`, `学科交流会`, `模擬試験`, `【締切】アルバム 個人ページ入稿`, `実習`, `【締切】アルバム 実習班ページ入稿`, `第2回 学年ガイダンス`, `Hermes H1 E2E [cancelled]`)
   - Events in 2027: 42 (birthdays, recurring tests)
 - **Active Links in `event_links`**: 0
 - **Active Links in `event_calendar_links`**: 0
@@ -75,7 +75,7 @@ Key finding: **The current Event Layer suffers from extreme Gmail automated nois
   1. Inbound messages and emails are automatically assigned `actor = 'counterparty'`.
   2. A request received from someone else asking the user to do something (e.g. `送付時にBCCへarchive@example.invalid追加の依頼`) has `actor = counterparty`, but the **responsible party** is `SELF`.
   3. A statement by someone else saying they will do something (e.g. `鈴木が薬学部教授会への送信を対応すると約束`) has `actor = counterparty`, and the **responsible party** is `COUNTERPARTY` (user has nothing to do, or is waiting for them).
-  4. An outbound request sent by the user (e.g. LINE: `告知バナー流用可否と協賛ロゴ掲載の確認依頼`) has `actor = user`, but this is a `WAITING_FOR` state (waiting for 制作部 to respond).
+  4. An outbound request sent by the user (e.g. LINE: `告知バナー流用可否と協賛ロゴ掲載の確認依頼`) has `actor = user`, but this is a `WAITING_FOR` state (waiting for 制作チーム to respond).
   5. Newsletters and transactional emails (e.g. `Google アカウントの一部のデータを Claude と共有しました`, `動画配信サービス`, `飲食チェーン`) have `actor = counterparty`, but require zero action (pure notification / informational noise).
 - **Conclusion**: We cannot rely on a simple `actor` column. We must define orthogonal dimensions:
   - `responsibility`: `SELF`, `COUNTERPARTY`, `SHARED`, `INFORMATIONAL`
@@ -92,7 +92,7 @@ Key finding: **The current Event Layer suffers from extreme Gmail automated nois
     - `家計簿アプリ ウィークリーメール`
     - `飲食チェーン 200円引きクーポン`
     - `PCメーカー学生ストア 決算売り尽くし` (given a bogus due date `2027-05-30`)
-    - `Google カレンダー 本日、予定されている予定はありません。`
+    - `Google カレンダー 本日の予定は登録されていません。`
   - **Root Cause**: The Phase H.2 Gmail event extractor greedily treated promotional expiry dates ("8月9日まで", "本日23:59まで", "水曜はポイント3倍") as task deadlines and populated `classification_reason = 'received_explicit_request'`.
 
 ### 3.3 Overdue Noise Analysis
@@ -114,7 +114,7 @@ Key finding: **The current Event Layer suffers from extreme Gmail automated nois
 ### 3.4 Duplicate Profiling
 
 - Exact Summary Duplicates (same subject repeated across time):
-  - `本日、予定されている予定はありません。`: 15 instances
+  - `本日の予定は登録されていません。`: 15 instances
   - `【クリエイター支援サービスA】フォロー中トピック更新のお知らせ`: 11 instances
   - `Google アカウントの一部のデータを Claude と共有しました`: 11 instances
   - `山田太郎 さんの今日の予定リスト（午前 5 時現在）`: 9 instances
