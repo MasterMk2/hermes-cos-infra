@@ -325,7 +325,7 @@ class PriorityClassTest(unittest.TestCase):
             authority="calendar_authority", evidence="calendar",
         )
         distant = fx.add_commitment(
-            self.conn, title="夜の予定", work_state="SCHEDULED",
+            self.conn, title="夜の打ち合わせ", work_state="SCHEDULED",
             scheduled_at="2026-09-08T21:00:00+09:00",
             scheduled_end_at="2026-09-08T22:00:00+09:00",
             authority="calendar_authority", evidence="calendar",

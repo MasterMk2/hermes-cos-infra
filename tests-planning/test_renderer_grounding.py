@@ -137,7 +137,7 @@ class InventedContentTests(unittest.TestCase):
 
     def test_a_synthetic_2359_from_a_coarse_row_is_rejected(self):
         """Amendment B4: `local_time` exists but is fake precision."""
-        plan = make_plan(must_do=[make_item(title="高橋宛:予算修正は今週中(学務の要望)",
+        plan = make_plan(must_do=[make_item(title="高橋宛:予算修正は今週中(部内の要望)",
                                             due_at="2026-09-12T23:59:00+09:00",
                                             due_precision="week", local_time="23:59")])
         self.assertNotIn("23:59", template_text(plan))
@@ -161,13 +161,13 @@ class AppendedToARealLineTests(unittest.TestCase):
         return make_plan(
             date="2026-09-12",
             scheduled=[make_item(
-                title="研究室のゼミ", work_state="SCHEDULED",
+                title="定例の勉強会", work_state="SCHEDULED",
                 scheduled_at="2026-09-12T01:00:00+00:00",
                 scheduled_end_at="2026-09-12T02:00:00+00:00", local_time="10:00",
                 priority_class="P1", reason_for_inclusion="scheduled_today",
                 source_types=["calendar"])],
             must_do=[make_item(
-                title="講座Aの申込書を提出", due_at="2026-09-12T17:00:00+09:00",
+                title="受講申込書を提出", due_at="2026-09-12T17:00:00+09:00",
                 due_precision="minute", local_time="17:00", priority_class="P1")],
         )
 
@@ -183,29 +183,29 @@ class AppendedToARealLineTests(unittest.TestCase):
 
     def test_an_invented_task_appended_to_a_real_line_falls_back(self):
         self.assert_rejected(
-            lambda t: t.replace("・10:00 研究室のゼミ",
-                                "・10:00 研究室のゼミ、および学費を今日中に振り込むこと"),
+            lambda t: t.replace("・10:00 定例の勉強会",
+                                "・10:00 定例の勉強会、および学費を今日中に振り込むこと"),
             "unknown_line_residue")
 
     def test_an_invented_kanji_clock_time_appended_falls_back(self):
         """「19時」 is a clock time. The scanner only knowing `HH:MM` is half of
         why this case passed; the line already matching a title is the rest."""
         violations = self.assert_rejected(
-            lambda t: t.replace("・10:00 研究室のゼミ", "・10:00 研究室のゼミ 19時開始"),
+            lambda t: t.replace("・10:00 定例の勉強会", "・10:00 定例の勉強会 19時開始"),
             "time_not_in_plan")
         self.assertIn("time_not_in_plan:19時", violations)
 
     def test_an_invented_relative_deadline_appended_falls_back(self):
         """No digit, no `M月D日`, no `M/D` — and still a deadline claim."""
         self.assert_rejected(
-            lambda t: t.replace("1. 17:00 講座Aの申込書を提出",
-                                "1. 17:00 講座Aの申込書を提出（あさってまでに必着）"),
+            lambda t: t.replace("1. 17:00 受講申込書を提出",
+                                "1. 17:00 受講申込書を提出（あさってまでに必着）"),
             "date_not_in_plan")
 
     def test_a_completion_claim_appended_falls_back(self):
         violations = self.assert_rejected(
-            lambda t: t.replace("1. 17:00 講座Aの申込書を提出",
-                                "1. 17:00 講座Aの申込書を提出（完了済み）"),
+            lambda t: t.replace("1. 17:00 受講申込書を提出",
+                                "1. 17:00 受講申込書を提出（完了済み）"),
             "completion_claimed")
         self.assertIn("completion_claimed:完了", violations)
 
@@ -256,7 +256,7 @@ class OrderAndCoverageTests(unittest.TestCase):
         def reorder(text):
             lines = text.split("\n")
             block = [i for i, line in enumerate(lines) if line.startswith("・8/31まで")][0]
-            last = [i for i, line in enumerate(lines) if line.startswith("・平野さんに")][0]
+            last = [i for i, line in enumerate(lines) if line.startswith("・高橋さんに")][0]
             lines[block], lines[last] = lines[last], lines[block]
             return "\n".join(lines)
 

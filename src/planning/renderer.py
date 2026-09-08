@@ -43,7 +43,7 @@ Every check below is a hard gate; failing any one of them returns the template.
    decoration this renderer could have written for that item
    (`_authorable_fragments`) are subtracted, and what remains must be
    punctuation. Without this the gate constrained which lines may exist, not
-   what they say: 「・10:00 研究室のゼミ、および学費を今日中に振り込むこと」
+   what they say: 「・10:00 定例の勉強会、および学費を今日中に振り込むこと」
    passed with `ok=True` and no violations, and so did an appended invented
    time, an appended invented deadline and an appended 「（完了済み）」 — all
    four of section 40's prohibitions, on an existing item's line.
@@ -54,9 +54,16 @@ Every check below is a hard gate; failing any one of them returns the template.
 7. ``order_changed``      the plan items appear in the planner's order.
 
 Checks 1 and 2 scan the text *after* removing every rendered title, because a
-real title legitimately contains a date or a clock time (「高橋さんに9/1(月)
-19時の来室を伝える約束」, 「先方の都合が合えば15:30開催を依頼」). Those tokens
-are quoted evidence, not a renderer claim, and must not be validated as one.
+real title legitimately contains a date or a clock time. The two shapes that
+matter — a title carrying a date, and a title carrying a clock time — are
+illustrated by the invented examples 「高橋さんに9/1(火)18時の来訪を伝える約束」
+and 「先方の都合が合えば15:30開催を依頼」. Those tokens are quoted evidence, not
+a renderer claim, and must not be validated as one.
+
+Every example in this file is invented. Production titles are third-party
+personal data (phase section 72) and this module is deployed source —
+`install-root.sh` copies it into `/srv/hermes/planning/app/planning/` and into
+both MCP trees — so quoting a real one here publishes it.
 
 Two deliberate strengthenings over contract section 5, both in the safe
 direction, both pinned by tests:

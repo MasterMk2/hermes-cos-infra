@@ -71,7 +71,7 @@ class UtcDateConfusionTest(unittest.TestCase):
 
     def test_a_calendar_row_lands_on_its_jst_day(self):
         cid = fx.add_commitment(
-            self.conn, title="UTC 深夜の予定", work_state="SCHEDULED",
+            self.conn, title="UTC 深夜の打ち合わせ", work_state="SCHEDULED",
             scheduled_at="2026-09-08T15:30:00+00:00",
             scheduled_end_at="2026-09-08T16:30:00+00:00",
             authority="calendar_authority", evidence="calendar",

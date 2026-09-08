@@ -476,7 +476,7 @@ def seed_audit_day(conn: sqlite3.Connection) -> Dict[str, str]:
         ),
         "timed_self": add_commitment(
             conn,
-            title="夜の予定",
+            title="夜の打ち合わせ",
             responsibility="SELF",
             work_state="SCHEDULED",
             scheduled_at="2026-09-12T13:00:00+00:00",      # 22:00 JST

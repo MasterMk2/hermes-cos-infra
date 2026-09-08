@@ -22,7 +22,10 @@ class TestBridgeFormattingAndRedaction(unittest.TestCase):
     """Test prompt formatting and secret redaction."""
 
     def test_credential_redaction(self):
-        text = "Bearer ya29.a0AfH6SMD123 ghp_1234567890abcdef1234567890abcdef1234 4/0ATsMZqDcS__PUcVnI0BiokVUR6ty5EtVzNugmiWBRjxI7VJKl7L04g2xce4dDmzjV3cWOw"
+        # privacy-ok: hand-written dummy credentials whose only purpose is to
+        # prove `redact_secrets` scrubs them. The two assertions below fail if
+        # anyone replaces them with something the redactor does not catch.
+        text = "Bearer ya29.a0AfH6SMD123 ghp_1234567890abcdef1234567890abcdef1234 4/0ATsMZqDcS__PUcVnI0BiokVUR6ty5EtVzNugmiWBRjxI7VJKl7L04g2xce4dDmzjV3cWOw"  # privacy-ok
         redacted = redact_secrets(text)
         self.assertNotIn("ghp_", redacted)
         self.assertNotIn("ya29.", redacted)

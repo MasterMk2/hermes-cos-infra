@@ -307,11 +307,11 @@ class TimeAndDateFidelityTests(unittest.TestCase):
         self.assertIn("・22:00 夜間の見学", text)
 
     def test_coarse_due_precision_never_renders_a_clock_time(self):
-        plan = make_plan(must_do=[make_item(title="高橋宛:予算修正は今週中(学務の要望)",
+        plan = make_plan(must_do=[make_item(title="高橋宛:予算修正は今週中(部内の要望)",
                                             due_at="2026-09-12T23:59:00+09:00",
                                             due_precision="week", local_time="23:59")])
         text = render_brief(plan, mode="template", now=NOW)["text"]
-        self.assertIn("高橋宛:予算修正は今週中(学務の要望)", text)
+        self.assertIn("高橋宛:予算修正は今週中(部内の要望)", text)
         self.assertNotIn("23:59", text)
 
     def test_exact_datetime_due_precision_does_render_a_clock_time(self):
@@ -346,7 +346,7 @@ class TimeAndDateFidelityTests(unittest.TestCase):
         self.assertIn("（19日超過・山田太郎(やまだたろう)）", text)
 
     def test_same_day_overdue_reads_as_today(self):
-        plan = make_plan(overdue=[make_item(title="投票の依頼（本日締切）", overdue_days=0,
+        plan = make_plan(overdue=[make_item(title="アンケートの依頼（本日締切）", overdue_days=0,
                                             due_at="2026-09-12T00:10:00+09:00",
                                             due_precision="date", local_time="00:10")])
         self.assertIn("（本日期限超過）", render_brief(plan, mode="template", now=NOW)["text"])
@@ -357,9 +357,9 @@ class CounterpartyTests(unittest.TestCase):
 
     def test_gmail_style_counterparty_is_not_rendered(self):
         plan = make_plan(waiting_for=[make_item(
-            title="ShipXplorer Sharing Station Offline",
+            title="SampleService Station Offline",
             work_state="WAITING",
-            counterparty='"ShipXplorer Support" <support@shipxplorer.example>')])
+            counterparty='"SampleService Support" <support@sample.example>')])
         text = render_brief(plan, mode="template", now=NOW)["text"]
         self.assertNotIn("@", text)
         self.assertNotIn("ShipXplorer Support", text)

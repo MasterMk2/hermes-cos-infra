@@ -183,7 +183,7 @@ class DataMinimizationTests(unittest.TestCase):
 
     def test_a_coarse_precision_time_is_not_even_shown_to_the_model(self):
         """Amendment B4: the model cannot print 23:59 if it never saw it."""
-        plan = make_plan(must_do=[make_item(title="高橋宛:予算修正は今週中(学務の要望)",
+        plan = make_plan(must_do=[make_item(title="高橋宛:予算修正は今週中(部内の要望)",
                                             due_at="2026-09-12T23:59:00+09:00",
                                             due_precision="week", local_time="23:59")])
         recorder = Recorder()
@@ -192,8 +192,8 @@ class DataMinimizationTests(unittest.TestCase):
 
     def test_a_gmail_style_counterparty_is_not_shown_to_the_model(self):
         plan = make_plan(waiting_for=[make_item(
-            title="ShipXplorer Sharing Station Offline", work_state="WAITING",
-            counterparty='"ShipXplorer Support" <support@shipxplorer.example>')])
+            title="SampleService Station Offline", work_state="WAITING",
+            counterparty='"SampleService Support" <support@sample.example>')])
         recorder = Recorder()
         render_brief(plan, mode="llm", client=recorder, now=NOW)
         self.assertNotIn("@shipxplorer", json.dumps(recorder.messages, ensure_ascii=False))
