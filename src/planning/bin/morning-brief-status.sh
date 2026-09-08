@@ -17,7 +17,10 @@ set -uo pipefail
 
 APP_ROOT=/srv/hermes/planning
 PY="$APP_ROOT/venv/bin/python"
-CONF="${HERMES_PLANNING_CONFIG:-$APP_ROOT/config/config.yaml}"
+# Same single location the service unit's ExecStart names. See the comment on
+# `CONFIG=` in install-root.sh: reading a different path here would report the
+# defaults while the service ran on the installed file, or the reverse.
+CONF="${HERMES_PLANNING_CONFIG:-$APP_ROOT/config.yaml}"
 STATE_DIR=/srv/hermes/hermes-data/planning
 SOCK=/srv/hermes/channel-gateway/run/proactive.sock
 PLANNER_USER=hermesplanner

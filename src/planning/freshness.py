@@ -187,17 +187,51 @@ def _probe_line(sources: Dict[str, Any]) -> Optional[str]:
     return _query_one(index_path, "SELECT value FROM meta WHERE key = ?", ("last_indexed",))
 
 
-def _probe_discord(sources: Dict[str, Any]) -> Optional[str]:
+def _probe_discord(sources: Dict[str, Any], events_db: str) -> Optional[str]:
+    """Collector heartbeat first; the classifier's own Discord run second.
+
+    The primary source is unreadable to `hermesplanner` in production, and by
+    design: `/srv/hermes/knowledge/discord` is mode 2770 owned by the operator's
+    login group, and I2-AMENDMENT G5 deliberately refuses to put a service
+    identity in that group. The directory is not even traversable, so
+    `os.path.exists` is False and the probe reported `source_missing` on every
+    single run — which made `data_freshness_warning` permanent and put a
+    「情報源の更新が止まっています: discord」 line in every brief forever. A
+    warning that is always on is a warning the owner stops reading, and it is
+    also wrong: the Discord pipeline is fresh.
+
+    So this probe now has the fallback every other probe here already had.
+    `events.db` `meta.discord_last_run` is written by the Discord classifier
+    pass at the end of each run, and it is read through the connection the
+    planner already holds — no new path, no new group, no new permission.
+    It is a slightly weaker signal than the collector heartbeat (it says the
+    Discord ingest ran, not that the gateway socket is currently connected),
+    which is the right trade for section 37: it answers "is Discord-derived
+    data fresh enough to plan from", which is the only question the brief asks.
+    """
     path = sources.get("discord_collector_db") or ""
-    if not path:
-        raise FileNotFoundError(path)
-    # `updated_at` is the collector's liveness heartbeat (I2-PROFILE.md G.4).
-    value = _query_one(path, "SELECT value FROM ingest_state WHERE key = ?", ("updated_at",))
-    if value:
-        return value
-    return _query_one(
-        path, "SELECT value FROM ingest_state WHERE key = ?", ("last_successful_ingest_at",)
-    )
+    primary_failure: Optional[BaseException] = None
+    if path:
+        try:
+            # `updated_at` is the collector's liveness heartbeat (I2-PROFILE.md G.4).
+            value = _query_one(
+                path, "SELECT value FROM ingest_state WHERE key = ?", ("updated_at",))
+            if value:
+                return value
+            value = _query_one(
+                path, "SELECT value FROM ingest_state WHERE key = ?",
+                ("last_successful_ingest_at",))
+            if value:
+                return value
+        except (OSError, sqlite3.Error) as exc:
+            primary_failure = exc
+    if not events_db:
+        # Nothing to fall back to, so report why the PRIMARY failed rather than
+        # a bare `source_missing` about a path that was configured and present.
+        # A swallowed `sqlite_error: DatabaseError` is the difference between
+        # "the collector store is corrupt" and "nobody configured Discord".
+        raise primary_failure or FileNotFoundError(path or events_db)
+    return _query_one(events_db, "SELECT value FROM meta WHERE key = ?", ("discord_last_run",))
 
 
 def _probe_commitments(sources: Dict[str, Any], events_db: str) -> Optional[str]:
@@ -225,6 +259,12 @@ _PROBES: Dict[str, Any] = {
     "calendar": _probe_calendar,
     "gmail": _probe_gmail,
     "line": _probe_line,
+}
+
+#: Probes whose fallback reads `events.db`, which the planner already has open
+#: read-only. They take `(sources, events_db)` instead of `(sources,)`.
+_EVENTS_DB_PROBES: Dict[str, Any] = {
+    "commitments": _probe_commitments,
     "discord": _probe_discord,
 }
 
@@ -251,8 +291,8 @@ def collect(config: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[s
     for name in SOURCE_ORDER:
         threshold = int(thresholds.get(name, 86400))
         try:
-            if name == "commitments":
-                value = _probe_commitments(sources, events_db)
+            if name in _EVENTS_DB_PROBES:
+                value = _EVENTS_DB_PROBES[name](sources, events_db)
             else:
                 value = _PROBES[name](sources)
         except Exception as exc:  # never raises: phase section 37

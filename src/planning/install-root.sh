@@ -239,7 +239,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP="/srv/hermes/backups/i2-morning-brief-install-$STAMP"
 if [ "$DRY_RUN" -eq 0 ]; then
   mkdir -p "$BACKUP"
-  for f in "$SERVICE_UNIT" "$TIMER_UNIT" "$APP_ROOT/config/config.yaml"; do
+  for f in "$SERVICE_UNIT" "$TIMER_UNIT" "$APP_ROOT/config.yaml"; do
     [ -f "$f" ] && cp -a "$f" "$BACKUP/" || true
   done
   printf 'ORIGINAL_RUN_GROUP=%s\nORIGINAL_RUN_MODE=%s\n' \
@@ -357,7 +357,7 @@ echo
 echo "-- 3. directories --"
 # Code and configuration stay root-owned: the service must not be able to
 # rewrite its own code or loosen its own configuration.
-for d in "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/bin" "$APP_ROOT/config"; do
+for d in "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/bin"; do
   if [ -d "$d" ]; then
     say "dir $d" "exists"
   else
@@ -405,7 +405,17 @@ fi
 # --- 5. configuration -----------------------------------------------------
 echo
 echo "-- 5. configuration --"
-CONFIG="$APP_ROOT/config/config.yaml"
+# The service unit's ExecStart, `cli.DEFAULT_CONFIG_PATH`,
+# `plan_config.DEFAULT_CONFIG_PATH` and the sample file's own instructions all
+# name `$APP_ROOT/config.yaml`. This script used to install it one directory
+# deeper, at `$APP_ROOT/config/config.yaml`, which nothing reads: the unit
+# would pass `--config /srv/hermes/planning/config.yaml`, `load_config` would
+# find no file, and `plan_config` treats a missing file as "use the defaults"
+# rather than as an error. The brief would still run — on the built-in
+# defaults — so an operator editing the installed file would see the timer
+# re-rendered from it while the service ignored it, which is exactly the
+# split source phase section 53 forbids. One location, and it is this one.
+CONFIG="$APP_ROOT/config.yaml"
 if [ -f "$CONFIG" ]; then
   say "config.yaml" "exists (left untouched — it holds the brief time)"
 else

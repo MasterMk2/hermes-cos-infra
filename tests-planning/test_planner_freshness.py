@@ -97,6 +97,10 @@ class SourceDirectory:
             self.events_db,
             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
             ("INSERT INTO meta VALUES ('last_run', ?)", (stamp,)),
+            # The Discord classifier pass writes this at the end of every run.
+            # It is `_probe_discord`'s fallback, and in production it is the
+            # only Discord signal `hermesplanner` can read at all.
+            ("INSERT INTO meta VALUES ('discord_last_run', ?)", (stamp,)),
         )
         return self
 
@@ -170,10 +174,53 @@ class CollectTest(unittest.TestCase):
         self.assertFalse(result["discord"]["stale"])
 
     def test_an_unconfigured_source_is_disabled_not_invented(self):
+        """With no events.db either, an unconfigured source stays disabled."""
         config = self.sources().config(discord_collector_db="")
+        config["paths"]["events_db"] = ""
         result = freshness.collect(config, now=self.now)
         self.assertTrue(result["discord"]["stale"])
         self.assertEqual(result["discord"]["error"], "source_missing")
+
+    def test_an_unreadable_collector_db_falls_back_to_events_db(self):
+        """The production case, and the reason the fallback exists.
+
+        `/srv/hermes/knowledge/discord` is mode 2770 owned by the operator's
+        login group and `hermesplanner` is deliberately not in it
+        (I2-AMENDMENT G5), so the directory is not even traversable:
+        `os.path.exists` is False and the primary probe cannot run. Before the
+        fallback this made `data_freshness_warning` permanent and printed
+        「情報源の更新が止まっています: discord」 in every single brief, while
+        the Discord pipeline was in fact minutes fresh.
+        """
+        config = self.sources().config(
+            discord_collector_db=os.path.join(self.tmp.name, "no-such-dir", "messages.db")
+        )
+        result = freshness.collect(config, now=self.now)
+        self.assertFalse(result["discord"]["stale"])
+        self.assertEqual(result["discord"]["age_seconds"], 600)
+        self.assertNotIn("error", result["discord"])
+        self.assertFalse(freshness.any_stale(result))
+
+    def test_discord_is_stale_when_both_the_collector_and_events_db_are_gone(self):
+        config = self.sources().config(
+            discord_collector_db=os.path.join(self.tmp.name, "no-such-dir", "messages.db")
+        )
+        config["paths"]["events_db"] = ""
+        result = freshness.collect(config, now=self.now)
+        self.assertTrue(result["discord"]["stale"])
+        self.assertEqual(result["discord"]["error"], "source_missing")
+
+    def test_the_collector_heartbeat_still_wins_when_it_is_readable(self):
+        """The fallback must not shadow the better signal where it exists."""
+        fixture = self.sources()
+        run_sql(
+            fixture.discord_db,
+            ("UPDATE ingest_state SET value = ? WHERE key = 'updated_at'",
+             (iso(self.now - timedelta(hours=40)),)),
+        )
+        result = freshness.collect(fixture.config(), now=self.now)
+        self.assertEqual(result["discord"]["age_seconds"], 40 * 3600)
+        self.assertFalse(result["discord"]["stale"])  # inside the 48h Discord bar
 
     def test_a_malformed_json_source_never_raises(self):
         config = self.sources().config()
@@ -184,6 +231,24 @@ class CollectTest(unittest.TestCase):
         self.assertIn("error", result["gmail"])
 
     def test_a_database_without_the_expected_table_never_raises(self):
+        """A collector db missing `ingest_state` falls through, it does not raise.
+
+        With no events.db behind it there is nothing left to fall back to, so
+        the sqlite failure is what surfaces — which is what makes the reason
+        diagnosable rather than a bare `source_missing`.
+        """
+        config = self.sources().config()
+        os.remove(config["freshness_sources"]["discord_collector_db"])
+        run_sql(
+            config["freshness_sources"]["discord_collector_db"],
+            "CREATE TABLE unrelated (x TEXT)",
+        )
+        config["paths"]["events_db"] = ""
+        result = freshness.collect(config, now=self.now)
+        self.assertTrue(result["discord"]["stale"])
+        self.assertTrue(result["discord"]["error"].startswith("sqlite_error"))
+
+    def test_a_database_without_the_expected_table_falls_back_when_it_can(self):
         config = self.sources().config()
         os.remove(config["freshness_sources"]["discord_collector_db"])
         run_sql(
@@ -191,8 +256,8 @@ class CollectTest(unittest.TestCase):
             "CREATE TABLE unrelated (x TEXT)",
         )
         result = freshness.collect(config, now=self.now)
-        self.assertTrue(result["discord"]["stale"])
-        self.assertTrue(result["discord"]["error"].startswith("sqlite_error"))
+        self.assertFalse(result["discord"]["stale"])
+        self.assertEqual(result["discord"]["age_seconds"], 600)
 
     def test_an_unparsable_timestamp_is_stale_rather_than_fatal(self):
         config = self.sources().config()
