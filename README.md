@@ -55,7 +55,20 @@ COMPLETED
   旧前提「--ignore-rules gives personal-context isolation」は訂正)
 - repository allowlist / test command allowlist / secret scan / no push / no merge
 
-## Deployment Source of Truth
+## Current Status and Evidence
+
+2026-10-04 に GitHub main `640d9db1044a68612e2b9fdf0204a68ebef9ea0f` を照合した。
+H.3.2 / I.1 に加え、I.2 の planner・renderer・MCP・朝ブリーフ配信と
+9月8日の本番投入時修正がこのリポジトリに存在する。
+
+[hermes-pi-setup の9月10日進捗記録](https://github.com/MasterMk2/hermes-pi-setup/blob/f3b378eb6a39e721ef6e1d585ec7e76e35b313b6/PROGRESS.md)
+は I.2 完了、担当者判定・広告除外、プレミアムCLI経路まで報告するが、
+その後続コード・最終レポートは今回の GitHub main には含まれない。
+現在の Pi に接続して稼働状態を確認したわけではない。
+履歴上の PASS と今回の隔離テストを区別した
+[照合結果・残件](docs/STATUS-RECONCILIATION.md) を再開時の入口とする。
+
+## Deployment Source of Truth（当時の配備記録）
 
 ```text
 実機 Pi に deploy されているのは src/docker-compose.hermes.yaml
@@ -80,11 +93,15 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 | 9 | [docs/09-phase-d1-discord-knowledge.md](docs/09-phase-d1-discord-knowledge.md) | Discord read-only Knowledge (collector / 増分index / discord_* MCP / Event統合) |
 | - | [docs/D1-STATUS-REPORT.md](docs/D1-STATUS-REPORT.md) | D.1 実測レポート (実Discord E2E / 敵対的監査 / 除外判断の根拠) |
 | 10 | [docs/12-phase-h1-calendar-authority.md](docs/12-phase-h1-calendar-authority.md) | Google Calendar Authority Layer (COMPLETED: read-only OAuth / authority sync / production regression) |
+| 11 | [docs/13-phase-h2-gmail-intelligence.md](docs/13-phase-h2-gmail-intelligence.md) | Gmail Intelligence（当時の完了記録） |
+| 12 | [docs/16-phase-h32-constrained-antigravity-backend.md](docs/16-phase-h32-constrained-antigravity-backend.md) / [security closeout](docs/17-phase-h32s-antigravity-security-closeout.md) | H.3.2 / H.3.2-S（当時の完了記録） |
+| 13 | [docs/18-phase-i1-production-event-profiling.md](docs/18-phase-i1-production-event-profiling.md) / [production closeout](docs/19-phase-i1s-unified-commitments-production-closeout.md) | I.1 / I.1-S（当時の完了記録） |
+| - | [docs/STATUS-RECONCILIATION.md](docs/STATUS-RECONCILIATION.md) | I.2実装・後続作業記録・現在未確認の運用状態を分離した照合 |
 | - | [docs/lessons-learned.md](docs/lessons-learned.md) | 実測で見つかった落とし穴と修正 |
 
 ## Code Snapshot (`src/`)
 
-実機で稼働しているコードの匿名化スナップショット。
+実機への配備を記録したコードの匿名化スナップショット。現在の実機との差分は未照合。
 パス中の `<PI_USER>` `<LAN_IP>` `<PI_HOSTNAME>` は環境ごとのプレースホルダ。
 
 ```text
@@ -127,7 +144,9 @@ tests-discord/                  D.1 テスト (host 94 + Hermes container 32 = 1
 docs/                           フェーズ文書 + 実測レポート
 ```
 
-## Status
+## Historical Status
+
+以下の実測値・稼働状態は各フェーズの記録時点の結果。現在の監視値ではない。
 
 - Supervisor / Bridge / 分離Worker / 全isolation test: 稼働・検証済み
 - F.1.1-Pi.2 Supervisor Hardening Gate: 完了 (H1-H5 / M1-M8、回帰テスト全PASS)
