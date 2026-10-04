@@ -1,5 +1,10 @@
 # 通知の結果不明を再起動後も保持する
 
+> 後続の[通常返信・未確認状態の修正](REPLY-RESTART-SAFETY.md)は、下記の
+> HTTP 4xxによるNOT_SENT判定をより保守的に更新する。SDK/transport内retry後の
+> 最終HTTP応答では非受理を証明できないため、現在は送信前の失敗だけが再試行可能。
+
+
 基準: `640d9db1044a68612e2b9fdf0204a68ebef9ea0f`。2026-10-04の最初の実装修正。
 対象は **proactive通知のGateway → Attention / Morning Brief**。
 本番Pi、認証値、送信先、Bot権限、配備設定を変更するものではない。

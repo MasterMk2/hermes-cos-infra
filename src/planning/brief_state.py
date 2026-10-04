@@ -51,7 +51,9 @@ UNKNOWN = "unknown"
 
 #: The states after which the owner has today's brief and nothing more may be
 #: sent for that local date.
-SETTLED = frozenset({DELIVERED, SUPPRESSED})
+SETTLED = frozenset({DELIVERED})
+# Legacy SUPPRESSED represented reservation/conflict, not confirmed delivery.
+HELD = frozenset({UNKNOWN, SUPPRESSED})
 
 STATE_DB_NAME = "planning.db"
 HEALTH_FILE_NAME = "morning-brief-health.json"
@@ -120,8 +122,7 @@ class BriefState:
         return cur.fetchone()
 
     def is_settled(self, local_date: str) -> bool:
-        """True when today's brief is already delivered or deliberately
-        suppressed. This is the cheap pre-check, not the authority."""
+        """True only after confirmed delivery. Reservations are not receipts."""
         row = self.get(local_date)
         return bool(row) and row["delivery_status"] in SETTLED
 
@@ -132,7 +133,7 @@ class BriefState:
     def has_unknown_outcome(self, local_date: str) -> bool:
         """An unresolved gateway receipt is a hold, never a successful send."""
         row = self.get(local_date)
-        return bool(row) and row["delivery_status"] == UNKNOWN
+        return bool(row) and row["delivery_status"] in HELD
 
     # -- writes --------------------------------------------------------
 
@@ -197,7 +198,7 @@ class BriefState:
         """Record a non-delivered outcome, creating the row when the run never
         got as far as building a plan (a late-boot skip, a disabled brief)."""
         row = self.get(local_date)
-        if row is not None and row["delivery_status"] == UNKNOWN and status != UNKNOWN:
+        if row is not None and row["delivery_status"] in HELD and status != UNKNOWN:
             return  # a skip/configuration change is not delivery evidence
         if row is None:
             self.con.execute(

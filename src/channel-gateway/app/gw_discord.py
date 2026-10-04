@@ -193,6 +193,8 @@ class InterfaceBot(discord.Client):
                 await self.fetch_channel(int(channel_id))
         except discord.HTTPException as exc:
             return 0, f"channel_unavailable:{exc.code}"
+        except Exception as exc:  # lookup failed before any channel.send
+            return 0, f"channel_unavailable:{type(exc).__name__}"
         return await self._send_to(channel, chunks)
 
     async def owner_dm_channel(self):
@@ -242,9 +244,9 @@ class InterfaceBot(discord.Client):
     async def _send_to(self, channel, chunks: list) -> tuple:
         """Send chunks in order. Returns (sent_count, error_or_None).
 
-        Stops at the first failure rather than pressing on: a partial answer
-        in order beats a scrambled complete one, and the unsent chunks stay
-        PENDING for the retry.
+        Stops at the first failure. The caller owns the durable receipt and
+        must distinguish a negative response from an ambiguous/partial send.
+        Ordinary replies call this with one write-ahead claimed chunk.
         """
         sent = 0
         for chunk in chunks:

@@ -35,13 +35,13 @@ cannot reach `_send_line` and cannot spend a LINE push.
 | socket absent / refused               |    - | `unreachable`      | yes    |
 | answer never came back                |    - | `unknown`          | yes    |
 
-The two 409s are the ones that matter. `content_revision` is
+Reservation/conflict 409s are not delivery receipts. `content_revision` is
 `sha256(text)[:32]` (`gw_store.py:529-532`), so a restart that recomputes a
 brief differing by a single character re-posts under the same
 `morning-brief:YYYY-MM-DD` id and gets 409, not 200. Treating that as
-retryable is an infinite loop; treating it as "someone already handled this
-date" is correct, because a row under that id exists only if a brief for that
-date was already accepted.
+retryable can repeatedly regenerate the same conflict. A reserved row proves
+neither provider acceptance nor delivery: both in_flight and content_mismatch
+stop automatic retries and keep planning health unknown until reconciliation.
 
 `outcome_unknown` is a durable gateway hold and requires reconciliation. It
 is not a duplicate-success receipt. `unknown` below is only transport loss.
@@ -299,7 +299,7 @@ def classify_response(status: int, parsed) -> Result:
 
     if status == 200 and reported == "delivered":
         return Result(DELIVERED, **common)
-    if status == 200 and reported == "duplicate":
+    if status == 200 and reported == "duplicate" and detail == "already_delivered":
         # `detail == "already_delivered"`. Success, and explicitly not a
         # retry: the gateway logged `proactive duplicate suppressed`.
         return Result(ALREADY_DELIVERED, **common)

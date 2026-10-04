@@ -371,6 +371,11 @@ def run_scheduled_brief(config: dict, *, now=None, trigger: str = "timer",
     st, con = _resolve_state(state, planning_dir)
     try:
         if st is not None and st.has_unknown_outcome(local_date):
+            held = st.get(local_date)
+            # Upgrade the meaning of a legacy SUPPRESSED row without
+            # guessing whether the gateway ever completed that reservation.
+            st.mark_status(local_date, brief_state.UNKNOWN,
+                           last_error=held["last_error"] or "legacy_unconfirmed_reservation")
             outcome.update(status=ST_OUTCOME_UNKNOWN,
                            failure_reason=FR_DELIVERY_UNKNOWN,
                            channel=PERMITTED_CHANNEL,
@@ -518,26 +523,17 @@ def run_scheduled_brief(config: dict, *, now=None, trigger: str = "timer",
                     failure_reason=FR_STALE if stale else None)
             log.info("morning brief delivered %s (%s, %d attempt(s), %d chars)",
                      notification_id, result.outcome, attempts, len(text))
-        elif result.outcome == delivery.OUTCOME_UNKNOWN:
+        elif result.outcome in (delivery.OUTCOME_UNKNOWN, delivery.IN_FLIGHT,
+                                delivery.CONTENT_MISMATCH):
             if st is not None:
                 st.mark_status(local_date, brief_state.UNKNOWN,
-                               last_error=result.detail, channel=PERMITTED_CHANNEL)
+                               last_error=result.detail or result.outcome,
+                               channel=PERMITTED_CHANNEL)
             outcome.update(status=ST_OUTCOME_UNKNOWN,
                            failure_reason=FR_DELIVERY_UNKNOWN)
             _health(planning_dir, status="unknown", failure_reason=FR_DELIVERY_UNKNOWN)
             log.warning("morning brief %s outcome unknown — automatic retry held",
                         notification_id)
-        elif result.outcome in (delivery.IN_FLIGHT, delivery.CONTENT_MISMATCH):
-            # The gateway already holds a row for this date. Stop, and record
-            # it as suppressed rather than failed — nothing is wrong.
-            if st is not None:
-                st.mark_status(local_date, brief_state.SUPPRESSED,
-                               last_error=result.detail,
-                               channel=PERMITTED_CHANNEL)
-            outcome.update(status=ST_SUPPRESSED, failure_reason=FR_DUPLICATE)
-            _health(planning_dir, status="ok", failure_reason=FR_DUPLICATE)
-            log.info("morning brief %s already handled by the gateway (%s)",
-                     notification_id, result.detail)
         else:
             if st is not None:
                 st.mark_status(local_date, brief_state.FAILED,
