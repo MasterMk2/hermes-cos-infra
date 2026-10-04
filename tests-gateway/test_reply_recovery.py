@@ -235,8 +235,11 @@ def test_exception_after_send_cannot_be_settled_as_known_failure(tmp_path):
             run(gw.deliver_discord(row, msg, 'a|b'))
     gw._fail(row, 'internal')
     with gw.db() as con:
-        assert store.get_inbound(con, row['gateway_request_id'])['state'] == 'UNKNOWN'
+        assert store.get_inbound(con, row['gateway_request_id'])['state'] == 'PROCESSING'
     con.close()
+    assert rows(gw)[0]['state'] == 'SENDING'
+    _, recovered = recover(gw)
+    assert recovered['state'] == 'UNKNOWN'
     # A direct caller with a stale PROCESSING snapshot also cannot resend.
     gw.discord_bot = Bot()
     assert not run(gw.deliver_discord(row, msg, 'a|b'))[0]
@@ -359,3 +362,79 @@ def test_real_adapter_lookup_failure_never_reaches_channel_send():
         async def _send_to(self, channel, chunks):
             raise AssertionError('lookup failure must not attempt message delivery')
     assert run(InterfaceBot.send_chunks(LookupFails(), fx.DM_CHANNEL_ID, ['a'])) == (0, 'channel_unavailable:TimeoutError')
+
+
+def test_stale_selection_cannot_invalidate_a_new_chunk_claim(tmp_path):
+    """A competing claim starts exactly while maintenance selects stale rows."""
+    import threading
+    from gw_schema import connect
+    gw = make_gateway(tmp_path/'gw.db'); row, msg = seed(gw)
+    gw.discord_bot = Bot([(0, 'channel_unavailable:10003')])
+    run(gw.deliver_discord(row, msg, 'a|b'))
+    con = gw.db()
+    con.execute("UPDATE inbound_messages SET claimed_at='2000-01-01'")
+    con.commit()
+    started, done = threading.Event(), threading.Event()
+    result = []
+    def new_claim():
+        other = connect(tmp_path/'gw.db')
+        try:
+            started.set()
+            result.append(store.claim_discord_chunk(other, row['gateway_request_id'])[0])
+            other.commit()
+        finally:
+            other.close(); done.set()
+    thread = threading.Thread(target=new_claim)
+    class SelectedRows:
+        def __init__(self, cursor):
+            self.cursor = cursor
+        def fetchall(self):
+            selected = self.cursor.fetchall()
+            thread.start()
+            assert started.wait(3)
+            # Selection has completed; the old code does not yet own a write
+            # lock, so a newer claim can commit before its stale update.
+            done.wait(.1)
+            return selected
+    class PauseAfterSelection:
+        def __getattr__(self, name):
+            return getattr(con, name)
+        def execute(self, sql, *args):
+            cursor = con.execute(sql, *args)
+            if sql.startswith('SELECT gateway_request_id, attempts, conversation_id, platform'):
+                return SelectedRows(cursor)
+            return cursor
+    try:
+        store.recover_stale(PauseAfterSelection())
+        con.commit()
+    finally:
+        con.close()
+    thread.join(timeout=3)
+    assert done.is_set() and result == ['send']
+    assert rows(gw)[0]['state'] == 'SENDING'
+    with gw.db() as check:
+        assert store.get_inbound(check, row['gateway_request_id'])['state'] != 'UNKNOWN'
+    check.close()
+
+
+def test_old_negative_settlement_preserves_new_senders_claim(tmp_path):
+    gw = make_gateway(tmp_path/'gw.db'); row, msg = seed(gw)
+    gw.discord_bot = Bot([(0, 'channel_unavailable:10003')])
+    first = run(gw.deliver_discord(row, msg, 'a|b'))
+    with gw.db() as con:
+        status, chunk = store.claim_discord_chunk(con, row['gateway_request_id'])
+    con.close()
+    assert status == 'send'
+    gw._settle(row, *first[:2], None, first[2])
+    with gw.db() as con:
+        current = store.get_inbound(con, row['gateway_request_id'])
+        assert current['state'] == 'PROCESSING'
+        assert con.execute('SELECT active_request_id FROM conversation_state').fetchone()[0] == row['gateway_request_id']
+        assert store.record_discord_receipt(con, chunk['outbound_id'], state='SENT')
+    con.close()
+    gw.discord_bot = Bot()
+    run(gw.deliver(row, msg, None))
+    assert [c[1] for c in gw.discord_bot.calls] == [['b']]
+    with gw.db() as con:
+        assert store.get_inbound(con, row['gateway_request_id'])['state'] == 'RESPONDED'
+    con.close()

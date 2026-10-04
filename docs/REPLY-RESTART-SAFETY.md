@@ -29,8 +29,11 @@
 自動再開できるのは「先頭から連続したSENT＋残り全てNOT_SENT」だけ。
 UNKNOWNが途中にあれば、後続のNOT_SENTも送らない。順序・件数・本文・owner/conversationの
 不一致、本文のretention消去も保留する。取消されたリクエストをretryで復活させない。
-claimはBEGIN IMMEDIATEで別接続間を直列化する。稼働中のclaimへの重複呼出しはin_flightを返し、
-元の会話lockを解除しない。保留となった返信は新しい独立メッセージまで止めない。
+claimとstale回復の対象選択を同じ書込みtransactionで直列化する。古いleaseを読んだ後に
+新しいclaimが割り込んで、稼働中のSENDINGをUNKNOWNへ変える競合を防ぐ。
+settleも書込みlockを取得し、自分が確定した送信前失敗の後に別callerが作ったSENDINGを
+無効にしない。receipt保存が失敗した自身のSENDINGも即座にFAILEDへ変えず、stale回復で保留する。
+稼働中のclaimへの重複呼出しはin_flightを返し、元の会話lockを解除しない。保留となった返信は新しい独立メッセージまで止めない。
 
 Gatewayのinbound UNKNOWNは成功でも確定失敗でもなく、通常キューへ再投入しない。
 livenessのreply_unknownで件数を観測できる。手動でUNKNOWNを消して再送する入口は追加しない。
@@ -67,7 +70,8 @@ IN_FLIGHTが後にGateway側でSENTになっても、この変更には受領照
 
 - chunkごとの送信前claim・送信後receipt、各位置の中断、確認済みprefixのみの再開
 - 別Pythonプロセスがmock受理直後にos._exitし、新しいGatewayが同じ一時DBを開く試験
-- 別接続の並行claim、稼働中の重複呼出し、receipt保存失敗、古いcaller snapshot
+- 別接続の並行claim、stale選択とlease更新の競合、遅い旧settleと新claimの競合
+- 稼働中の重複呼出し、receipt保存失敗、古いcaller snapshot
 - legacy行、本文/件数/owner/conversation変更、UNKNOWNの後続tail、取消、retention消去
 - Morning BriefのIN_FLIGHT/content mismatch/旧suppressed保留と、確認済み成功との区別
 

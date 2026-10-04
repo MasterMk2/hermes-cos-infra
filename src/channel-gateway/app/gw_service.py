@@ -464,6 +464,7 @@ class Gateway:
         con = self.db()
         try:
             if row["platform"] == PLATFORM_DISCORD:
+                con.execute("BEGIN IMMEDIATE")
                 # A concurrent live sender keeps its claim; a held reply must
                 # not become FAILED through a generic exception/settle path.
                 if detail in {"in_flight", "reply_cancelled"}:
@@ -474,7 +475,13 @@ class Gateway:
                 reply = store.outbound_for_request(con, row["gateway_request_id"])
                 if reply and all(r["state"] == "SENT" for r in reply):
                     ok, detail = True, "already_delivered"
-                if any(r["state"] in {"SENDING", "UNKNOWN"} for r in reply):
+                if any(r["state"] == "SENDING" for r in reply):
+                    # This may be a NEW caller's claim after our known negative
+                    # receipt. Settlement owns no send token, so it must not
+                    # invalidate that claim. If our own receipt write failed,
+                    # lease recovery will hold it once truly stale instead.
+                    return
+                if any(r["state"] == "UNKNOWN" for r in reply):
                     store._hold_discord_reply(con, row["gateway_request_id"],
                                               "delivery_outcome_unknown")
                     con.commit()

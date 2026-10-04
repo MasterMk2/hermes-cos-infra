@@ -190,6 +190,14 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
     a separate work item. A request without uncertain delivery is bounded by
     max_attempts.
     """
+    # Select and recover under the same write lock as chunk claims. Otherwise
+    # a live caller can refresh the lease between selection and invalidation.
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    else:
+        # Store callers may already own a transaction. Acquire its write lock
+        # before reading stale rows (also safe for an existing write txn).
+        con.execute("UPDATE inbound_messages SET updated_at=updated_at WHERE 0")
     cutoff = _iso_minus(lease_seconds)
     rows = con.execute(
         "SELECT gateway_request_id, attempts, conversation_id, platform FROM inbound_messages"
