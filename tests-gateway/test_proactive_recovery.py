@@ -122,6 +122,7 @@ class TestDurableOutcome(unittest.IsolatedAsyncioTestCase):
 
     async def test_known_rejection_without_a_send_can_be_retried(self):
         self.discord.ok = False
+        self.discord.error = "owner_dm_unavailable:synthetic"
         status, answer = await self.post(self.payload())
         self.assertEqual((status, answer["status"]), (502, "failed"))
         self.assertEqual(self.row()["state"], "NOT_SENT")
@@ -164,7 +165,7 @@ class TestDurableOutcome(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.row()["state"], "SENDING")
 
     async def test_retry_cannot_change_the_recorded_recipient(self):
-        self.line.ok = False  # a definite 429 rejection, so retry is otherwise safe
+        self.line.ok = False  # final response after send cannot certify non-acceptance
         await self.post(self.payload("line"))
         original_target = self.row()["target_user_id"]
         self.gw.cfg.owner_line_user_id = "U" + "fedcba9876543210" * 2
@@ -211,6 +212,58 @@ class TestDurableOutcome(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((status, answer["status"]), (409, "outcome_unknown"))
                 self.assertEqual(self.row()["state"], "UNKNOWN")
                 self.assertEqual(self.discord.sends, [])
+
+    async def test_discord_final_4xx_after_mock_acceptance_is_held(self):
+        async def accepted_then_final_error(chunks):
+            self.discord.sends.append(list(chunks))
+            return 0, 'http:403:50007'
+        self.discord.send_owner_dm = accepted_then_final_error
+        status, answer = await self.post(self.payload())
+        self.assertEqual((status, answer['status']), (409, 'outcome_unknown'))
+        self.reopen()
+        await self.post(self.payload())
+        self.assertEqual(len(self.discord.sends), 1)
+
+    async def test_line_final_4xx_is_not_long_term_retry_authority(self):
+        self.line.ok = False
+        status, answer = await self.post(self.payload('line'))
+        self.assertEqual((status, answer['status']), (409, 'outcome_unknown'))
+        self.line.ok = True
+        self.reopen()
+        await self.post(self.payload('line'))
+        self.assertEqual(len(self.line.sends), 1)
+
+    async def test_line_pre_send_configuration_failure_may_retry_same_scope(self):
+        self.gw.line = None
+        status, answer = await self.post(self.payload('line'))
+        self.assertEqual((status, answer['status']), (502, 'failed'))
+        self.assertEqual(self.row()['state'], 'NOT_SENT')
+        self.assertEqual(self.line.sends, [])
+        self.reopen()
+        status, answer = await self.post(self.payload('line'))
+        self.assertEqual((status, answer['status']), (200, 'delivered'))
+        self.assertEqual(len(self.line.sends), 1)
+
+    async def test_prior_not_sent_based_only_on_http_is_held_on_both_channels(self):
+        for channel in ('discord', 'line'):
+            with self.subTest(channel=channel):
+                self.db_path = os.path.join(self.tmp.name, channel + '-old-not-sent.db')
+                self.reopen()
+                con = self.gw.db()
+                try:
+                    row, _ = store.reserve_proactive(
+                        con, notification_id='ntf_restart_fixture', channel=channel,
+                        severity='IMPORTANT', dedupe_key=None, reason=None,
+                        body='合成テストの通知', target_user_id=(self.gw.cfg.owner_discord_user_id if channel == 'discord' else self.gw.cfg.owner_line_user_id))
+                    store.mark_proactive(con, row['delivery_id'], 'NOT_SENT', error='http:429')
+                    con.commit()
+                finally:
+                    con.close()
+                status, answer = await self.post(self.payload(channel))
+                self.assertEqual((status, answer['status']), (409, 'outcome_unknown'))
+                self.assertEqual(self.row()['state'], 'UNKNOWN')
+                self.assertEqual(self.discord.sends, [])
+                self.assertEqual(self.line.sends, [])
 
 
 if __name__ == "__main__":

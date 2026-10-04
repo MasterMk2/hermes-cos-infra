@@ -201,7 +201,7 @@ class TestClaim(unittest.TestCase):
     def test_a_definitely_unsent_notification_may_be_retried(self):
         con = mem_db()
         row, _ = do_claim(con)
-        store.mark_proactive(con, row["delivery_id"], "NOT_SENT", error="http:429")
+        store.mark_proactive(con, row["delivery_id"], "NOT_SENT", error="owner_dm_unavailable:synthetic")
         row2, outcome = do_claim(con)
         self.assertEqual(outcome, CLAIMED)
         self.assertEqual(row2["attempts"], 2)
@@ -209,7 +209,7 @@ class TestClaim(unittest.TestCase):
     def test_same_id_with_different_words_is_refused(self):
         con = mem_db()
         row, _ = do_claim(con, body="A")
-        store.mark_proactive(con, row["delivery_id"], "NOT_SENT", error="http:403")
+        store.mark_proactive(con, row["delivery_id"], "NOT_SENT", error="owner_dm_unavailable:synthetic")
         _, outcome = do_claim(con, body="B")
         self.assertEqual(outcome, CONTENT_MISMATCH)
 

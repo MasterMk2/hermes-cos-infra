@@ -177,7 +177,7 @@ class TestRecovery(unittest.TestCase):
         store.enqueue(con, rid)
         store.claim_next(con, max_active=2)
         result = store.recover_stale(con, lease_seconds=300)
-        self.assertEqual(result, {"requeued": 0, "failed": 0})
+        self.assertEqual(result, {"requeued": 0, "failed": 0, "reply_unknown": 0, "reply_confirmed": 0})
 
 
 class TestOutboundReservation(unittest.TestCase):

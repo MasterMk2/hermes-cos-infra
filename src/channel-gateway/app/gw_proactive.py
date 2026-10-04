@@ -32,7 +32,7 @@ what this API *cannot* express (spec sections 48-51):
 Idempotency is the other half. `proactive_deliveries` is unique on
 (notification_id, channel). A crash between send and receipt persistence now
 holds that row as UNKNOWN rather than replaying an uncertain side effect.
-Known negative receipts use NOT_SENT. The LINE transport still uses its
+Only proven pre-send failures use NOT_SENT. The LINE transport still uses its
 stable retry key within a bounded attempt; a long-outage recovery does not
 assume that the provider retains that key forever.
 """
@@ -149,9 +149,19 @@ CONTENT_MISMATCH = "content_mismatch"
 OUTCOME_UNKNOWN = "outcome_unknown"
 TARGET_MISMATCH = "target_mismatch"
 
-# Explicit negative provider receipts. A timeout, a 5xx, an unrecognised
-# response or a partially sent multi-chunk message is not proof of no send.
-KNOWN_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 429})
+def proven_pre_send_failure(channel: str, detail) -> bool:
+    """These categories are emitted before the first message send only.
+
+    A final negative HTTP response can follow an SDK/transport retry whose
+    earlier outcome was lost. It is not proof for replay after a long outage.
+    This also checks NOT_SENT rows created by the previous classifier.
+    """
+    detail = str(detail or "")
+    if detail == "empty_after_preparation":
+        return True
+    if channel == CHANNEL_DISCORD:
+        return detail in {"discord_not_configured", "owner_not_configured"} or detail.startswith("owner_dm_unavailable:")
+    return channel == CHANNEL_LINE and detail == "line_not_configured"
 
 
 def claim(con, *, notification_id: str, channel: str, severity: str,
@@ -174,7 +184,8 @@ def claim(con, *, notification_id: str, channel: str, severity: str,
             # persisted body/id/recipient form one delivery intent.
             return row, TARGET_MISMATCH
         state = row["state"]
-        if state == "FAILED" or (state == "PENDING" and row["attempts"] > 0):
+        if (state == "FAILED" or (state == "PENDING" and row["attempts"] > 0)
+                or (state == "NOT_SENT" and not proven_pre_send_failure(channel, row["last_error"]))):
             # Older versions stored ambiguous/partial sends as FAILED or
             # requeued abandoned SENDING rows as PENDING. Neither record is
             # evidence that replay is safe. Do not inherit that old guess.
@@ -223,13 +234,7 @@ class ProactiveServer:
         sent, error = await bot.send_owner_dm(chunks)
         if error is None and sent == len(chunks):
             return True, "dm", "ok", False
-        known_rejection = str(error or "").startswith("owner_dm_unavailable:")
-        if str(error or "").startswith("http:"):
-            try:
-                known_rejection = int(error.split(":", 2)[1]) in KNOWN_REJECTION_STATUSES
-            except (TypeError, ValueError):
-                known_rejection = False
-        uncertain = bool(sent) or not known_rejection
+        uncertain = bool(sent) or not proven_pre_send_failure(CHANNEL_DISCORD, error)
         return False, "dm", error or "partial", uncertain
 
     async def _send_line(self, row) -> tuple:
@@ -257,7 +262,9 @@ class ProactiveServer:
             self.gw.session, row["target_user_id"],
             build_text_messages(chunks), outbound_id=row["delivery_id"],
         )
-        uncertain = not result.ok and result.status not in KNOWN_REJECTION_STATUSES
+        # _post can retry before yielding its final response. Do not infer
+        # non-acceptance from that last status or extend the retry-key lifetime.
+        uncertain = not result.ok
         return result.ok, "push", result.category, uncertain
 
     # -- routes --------------------------------------------------------
