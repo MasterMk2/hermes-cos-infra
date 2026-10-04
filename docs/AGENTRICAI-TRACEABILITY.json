@@ -1,0 +1,1041 @@
+{
+  "schema_version": 1,
+  "assessed_on": "2026-10-04",
+  "scope": "Repository-level traceability only; no deployed-runtime verification or feature-completion claim.",
+  "baselines": {
+    "AgentricAI": "64a6e1aa7449f8f571b9e60baa2a7eb714c86985",
+    "hermes-cos-infra": "640d9db1044a68612e2b9fdf0204a68ebef9ea0f",
+    "hermes-pi-setup": "f3b378eb6a39e721ef6e1d585ec7e76e35b313b6"
+  },
+  "statuses": {
+    "reuse_candidate": "現コードに狭い対応経路がある。稼働/全要件合格は未証明。",
+    "partial": "関連コードはあるが同一要件の達成には不足または評価が必要。",
+    "unverified_gap": "調査したGitHub実体に同等性の証拠なし。Hermes本体/ローカル実体の不存在を意味しない。",
+    "decision_required": "用途または安全境界/構成が異なるため判断前に実装しない。",
+    "deferred": "後続候補。今回の統合では着手しない。"
+  },
+  "evidence": {
+    "E1": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/collector.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/dk_normalize.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/dk_store.py"
+    ],
+    "E2": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/indexer.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/mcp/discord_mcp.py"
+    ],
+    "E3": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_discord.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_canonical.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_service.py"
+    ],
+    "E4": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_proactive.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_store.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_format.py"
+    ],
+    "E5": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_engine.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_policy.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_budget.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_store.py"
+    ],
+    "E6": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/models.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/reconcile.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/store.py"
+    ],
+    "E7": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/planner.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/renderer.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/brief_service.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/tests-planning/test_renderer_injection.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/tests-planning/test_privacy_guard.py"
+    ],
+    "E8": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/worker/README.md",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/docs/17-phase-h32s-antigravity-security-closeout.md"
+    ],
+    "E9": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_line.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_canonical.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_service.py"
+    ]
+  },
+  "requirements": [
+    {
+      "id": "FR-IN-01",
+      "original_requirement": "Discord Gateway に接続し、指定サーバー・指定チャンネルのメッセージ作成イベントを受信する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L248",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "reuse_candidate",
+      "track": "R0",
+      "evidence": [
+        "E1"
+      ],
+      "remaining": "既存の許可済み読み取り専用collectorを再利用する。新たな収集範囲・Bot権限は追加しない。現在の稼働は別途確認する。"
+    },
+    {
+      "id": "FR-IN-02",
+      "original_requirement": "受信イベントを、プラットフォーム非依存の正規化イベント（第 11.2 節）に変換する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L249",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E3",
+        "E6"
+      ],
+      "remaining": "既存の正規化モデルはあるが、AgentricAIのeventsスキーマと同一ではない。source IDからの対応契約を定義する。"
+    },
+    {
+      "id": "FR-IN-03",
+      "original_requirement": "メッセージの編集・削除イベントを受信し、記憶に反映する（削除された発言は記憶上も削除フラグを立てる）",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L250",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E2"
+      ],
+      "remaining": "Discordの編集・削除/tombstone経路はある。新しいderived記憶までの削除・失効伝播は未検証。"
+    },
+    {
+      "id": "FR-IN-04",
+      "original_requirement": "スレッド・返信チェーンの親子関係を保持する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L251",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "reuse_candidate",
+      "track": "R0",
+      "evidence": [
+        "E1"
+      ],
+      "remaining": "既存の許可済み読み取り専用collectorを再利用する。新たな収集範囲・Bot権限は追加しない。現在の稼働は別途確認する。"
+    },
+    {
+      "id": "FR-IN-05",
+      "original_requirement": "添付ファイル・URL をメタデータとして記録する（本文取得は別要件）",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L252",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E1"
+      ],
+      "remaining": "添付・embedメタデータはある。URL専用抽出と新しい記憶への引用形を確認する。本文の自動取得は有効にしない。"
+    },
+    {
+      "id": "FR-IN-06",
+      "original_requirement": "ホワイトリスト判定を通った受信イベントは、**triage・行動より先に永続化する**（処理失敗で観測が失われない）。判定より前に永続化するのはホワイトリスト判定**だけ**である",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L253",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E3"
+      ],
+      "remaining": "allowlist先行とキュー/永続化はあるが、collectorのメモリキューを含むため受信直後の全クラッシュ耐久性を達成済みとしない。"
+    },
+    {
+      "id": "FR-IN-07",
+      "original_requirement": "X のメンション・検索結果・指定アカウント投稿を取得する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L254",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "MUST",
+      "original_phase": "P2",
+      "status": "deferred",
+      "track": "D1",
+      "evidence": [],
+      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。"
+    },
+    {
+      "id": "FR-IN-08",
+      "original_requirement": "LINE Webhook を受信し正規化する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L255",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "MUST",
+      "original_phase": "P3",
+      "status": "reuse_candidate",
+      "track": "R0",
+      "evidence": [
+        "E9"
+      ],
+      "remaining": "既存LINE署名検証と正規化を再利用する。許可済みowner経路に限定し、LINE全体の収集へ拡張しない。"
+    },
+    {
+      "id": "FR-IN-09",
+      "original_requirement": "取り込み対象チャンネルをホワイトリストで管理し、リスト外は一切保存しない",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L256",
+      "source_section": "5.1 取り込み (FR-IN)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "reuse_candidate",
+      "track": "R0",
+      "evidence": [
+        "E1"
+      ],
+      "remaining": "既存の許可済み読み取り専用collectorを再利用する。新たな収集範囲・Bot権限は追加しない。現在の稼働は別途確認する。"
+    },
+    {
+      "id": "FR-DE-01",
+      "original_requirement": "3 段階の triage（ルール → 安価判定 → LLM）を通し、各段で打ち切れること",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L262",
+      "source_section": "5.2 判定 (FR-DE)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R4",
+      "evidence": [
+        "E5"
+      ],
+      "remaining": "Attentionの本人向け通知判定はコミュニティ参加の3段triageではない。公開先の必要性を決めてから別途適合性を検証する。"
+    },
+    {
+      "id": "FR-DE-02",
+      "original_requirement": "各段の判定結果と理由を判断ログに残す",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L263",
+      "source_section": "5.2 判定 (FR-DE)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R4",
+      "evidence": [
+        "E4",
+        "E5"
+      ],
+      "remaining": "既存通知の判定ログ、抑止、上限を再利用候補とする。コミュニティ全体/会話単位の発言制御の証明ではない。"
+    },
+    {
+      "id": "FR-DE-03",
+      "original_requirement": "行動候補は `ignore` / `react` / `reply` / `remember` / `research` / `schedule` / `ask_human` から選ぶ",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L264",
+      "source_section": "5.2 判定 (FR-DE)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R4",
+      "evidence": [
+        "E5"
+      ],
+      "remaining": "Attentionの本人向け通知判定はコミュニティ参加の3段triageではない。公開先の必要性を決めてから別途適合性を検証する。"
+    },
+    {
+      "id": "FR-DE-04",
+      "original_requirement": "現在の自律レベルで許可されていない行動は候補から除外する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L265",
+      "source_section": "5.2 判定 (FR-DE)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "decision_required",
+      "track": "R4",
+      "evidence": [
+        "E3",
+        "E5"
+      ],
+      "remaining": "元の0〜5レベルをHermesの既存権限と同一視しない。本人通知とコミュニティ自発行動を分けた停止/降格の意味を先に決める。"
+    },
+    {
+      "id": "FR-DE-05",
+      "original_requirement": "チャンネル単位・全体で、単位時間あたりの発言数上限を持つ",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L266",
+      "source_section": "5.2 判定 (FR-DE)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R4",
+      "evidence": [
+        "E4",
+        "E5"
+      ],
+      "remaining": "既存通知の判定ログ、抑止、上限を再利用候補とする。コミュニティ全体/会話単位の発言制御の証明ではない。"
+    },
+    {
+      "id": "FR-DE-06",
+      "original_requirement": "判定に使う閾値は設定ファイルで変更でき、再起動なしで反映される",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L267",
+      "source_section": "5.2 判定 (FR-DE)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R4",
+      "evidence": [
+        "E5"
+      ],
+      "remaining": "Attentionの本人向け通知判定はコミュニティ参加の3段triageではない。公開先の必要性を決めてから別途適合性を検証する。"
+    },
+    {
+      "id": "FR-AC-01",
+      "original_requirement": "Discord へのメッセージ送信・返信・リアクション付与",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L273",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "decision_required",
+      "track": "R4",
+      "evidence": [
+        "E1",
+        "E3"
+      ],
+      "remaining": "Knowledge Botは読み取り専用、Interface Botは本人DM専用。guild送信/リアクションを既存Botに追加しない。"
+    },
+    {
+      "id": "FR-AC-02",
+      "original_requirement": "送信前に安全フィルタ（第 16.5 節）を必ず通す。フィルタは決定論的で、迂回不可能",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L274",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E3",
+        "E4",
+        "E7"
+      ],
+      "remaining": "mention抑止、redaction、grounding等はあるが、元のP1〜P11全体を満たす証明ではない。新しい記憶/行動経路はfail-closedの検証が必要。"
+    },
+    {
+      "id": "FR-AC-03",
+      "original_requirement": "実行した行動と、その結果（成功・失敗・例外）を記録する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L275",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E4"
+      ],
+      "remaining": "gatewayの監査/送信予約/重複抑止を再利用する。新たなReflection出力との相関、送信結果不明時の扱いをテストする。全媒体でexactly-onceとは表現しない。"
+    },
+    {
+      "id": "FR-AC-04",
+      "original_requirement": "行動の権限区分（Safe / Moderate / Sensitive / Dangerous）に従って、承認要否を決める",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L276",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "decision_required",
+      "track": "R4",
+      "evidence": [
+        "E8"
+      ],
+      "remaining": "元SRSのDangerousは禁止のまま。Hermesの隔離coding worker権限をコミュニティ/Reflectionへ継承させない。一般的な承認キューと同一視しない。"
+    },
+    {
+      "id": "FR-AC-05",
+      "original_requirement": "送信は冪等に行い、再試行で二重投稿しない",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L277",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E4"
+      ],
+      "remaining": "gatewayの監査/送信予約/重複抑止を再利用する。新たなReflection出力との相関、送信結果不明時の扱いをテストする。全媒体でexactly-onceとは表現しない。"
+    },
+    {
+      "id": "FR-AC-06",
+      "original_requirement": "X への投稿・返信",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L278",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "P2",
+      "status": "deferred",
+      "track": "D1",
+      "evidence": [],
+      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。"
+    },
+    {
+      "id": "FR-AC-07",
+      "original_requirement": "LINE への返信・push",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L279",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "P3",
+      "status": "partial",
+      "track": "R0",
+      "evidence": [
+        "E4",
+        "E9"
+      ],
+      "remaining": "本人向けLINE返信/pushは既存経路を使用する。任意の第三者宛送信は対応済みに含めない。"
+    },
+    {
+      "id": "FR-AC-08",
+      "original_requirement": "DM の送信は既定で禁止。許可する場合も個別承認制",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L280",
+      "source_section": "5.3 行動 (FR-AC)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "decision_required",
+      "track": "R4",
+      "evidence": [
+        "E3"
+      ],
+      "remaining": "元SRSのDM原則禁止とHermesの本人DM主経路は用途が異なる。既存owner通信は維持し、第三者DMは新たに許可しない。"
+    },
+    {
+      "id": "FR-ME-01",
+      "original_requirement": "観測イベントを恒久保存する（observed 層）",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L286",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E4"
+      ],
+      "remaining": "原情報の保存はあるが全記憶の無期限保存を新たに保証しない。保持期間、削除要求、派生物の失効を同時に定義する。"
+    },
+    {
+      "id": "FR-ME-02",
+      "original_requirement": "エピソード記憶（誰と・いつ・何が）を生成・保存する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L287",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R1",
+      "evidence": [
+        "E2",
+        "E6"
+      ],
+      "remaining": "既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。"
+    },
+    {
+      "id": "FR-ME-03",
+      "original_requirement": "人物ごとの関係性レコードを保持・更新する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L288",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [
+        "E6",
+        "E8"
+      ],
+      "remaining": "人物関係・自己記憶・strategyの同等実装は今回の2リポジトリで確認できない。Hermes本体/後続ローカル変更の調査後、必要な差分だけを設計する。"
+    },
+    {
+      "id": "FR-ME-04",
+      "original_requirement": "意味記憶（安定した知識）を保持する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L289",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R1",
+      "evidence": [
+        "E2",
+        "E6"
+      ],
+      "remaining": "既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。"
+    },
+    {
+      "id": "FR-ME-05",
+      "original_requirement": "自己記憶（設定・目標・自分の過去の行動）を保持する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L290",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [
+        "E6",
+        "E8"
+      ],
+      "remaining": "人物関係・自己記憶・strategyの同等実装は今回の2リポジトリで確認できない。Hermes本体/後続ローカル変更の調査後、必要な差分だけを設計する。"
+    },
+    {
+      "id": "FR-ME-06",
+      "original_requirement": "手続き記憶（戦略ルール）を保持し、Reflection で更新する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L291",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [
+        "E6",
+        "E8"
+      ],
+      "remaining": "人物関係・自己記憶・strategyの同等実装は今回の2リポジトリで確認できない。Hermes本体/後続ローカル変更の調査後、必要な差分だけを設計する。"
+    },
+    {
+      "id": "FR-ME-07",
+      "original_requirement": "すべての記憶に出自区分（observed / derived / declared）を持たせる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L292",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R1",
+      "evidence": [
+        "E2",
+        "E6"
+      ],
+      "remaining": "既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。"
+    },
+    {
+      "id": "FR-ME-08",
+      "original_requirement": "ベクトル検索と条件検索を組み合わせた想起ができる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L293",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E2"
+      ],
+      "remaining": "Discord検索はSQLite FTS5。意味ベクトル検索+条件検索の同等実装とは言えない。検索品質を測ってから保存先/方式を決める。"
+    },
+    {
+      "id": "FR-ME-09",
+      "original_requirement": "想起した記憶 ID を、その行動の判断ログに紐付ける",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L294",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R1",
+      "evidence": [
+        "E2",
+        "E6"
+      ],
+      "remaining": "既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。"
+    },
+    {
+      "id": "FR-ME-10",
+      "original_requirement": "記憶の減衰・失効・アクセス統計を持つ",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L295",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R1",
+      "evidence": [
+        "E2",
+        "E6"
+      ],
+      "remaining": "既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。"
+    },
+    {
+      "id": "FR-ME-11",
+      "original_requirement": "記憶をプライバシー範囲（第 16.8 節）で分類し、範囲外への持ち出しを防ぐ",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L296",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E3",
+        "E4",
+        "E8"
+      ],
+      "remaining": "owner通信と読み取り索引の分離はある。新しいderived記憶のpublic/guild/channel/dm/operator制約を想起と出力の両方で保証する必要がある。"
+    },
+    {
+      "id": "FR-ME-12",
+      "original_requirement": "運用者が記憶を検索・訂正・削除できる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L297",
+      "source_section": "5.4 記憶 (FR-ME)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R1",
+      "evidence": [
+        "E2",
+        "E6"
+      ],
+      "remaining": "既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。"
+    },
+    {
+      "id": "FR-IS-01",
+      "original_requirement": "トピックごとの関心度 [0,1] を保持する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L303",
+      "source_section": "5.5 関心・人格 (FR-IS)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "関心/関係性の決定論的bounded update、最小証拠、減衰、履歴、declared不変性は未証明。数値から権限を変えず、合成データで先に評価する。"
+    },
+    {
+      "id": "FR-IS-02",
+      "original_requirement": "関心度の更新は**LLM ではなく決定論的な関数**が行う（第 13.7 節）",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L304",
+      "source_section": "5.5 関心・人格 (FR-IS)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "関心/関係性の決定論的bounded update、最小証拠、減衰、履歴、declared不変性は未証明。数値から権限を変えず、合成データで先に評価する。"
+    },
+    {
+      "id": "FR-IS-03",
+      "original_requirement": "1 回の更新幅に上限を設け、減衰と最小証拠数を適用する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L305",
+      "source_section": "5.5 関心・人格 (FR-IS)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "関心/関係性の決定論的bounded update、最小証拠、減衰、履歴、declared不変性は未証明。数値から権限を変えず、合成データで先に評価する。"
+    },
+    {
+      "id": "FR-IS-04",
+      "original_requirement": "人格の中核（declared）はエージェントが書き換えられない",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L306",
+      "source_section": "5.5 関心・人格 (FR-IS)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "関心/関係性の決定論的bounded update、最小証拠、減衰、履歴、declared不変性は未証明。数値から権限を変えず、合成データで先に評価する。"
+    },
+    {
+      "id": "FR-IS-05",
+      "original_requirement": "関心度の履歴を保存し、推移を可視化できる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L307",
+      "source_section": "5.5 関心・人格 (FR-IS)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "関心/関係性の決定論的bounded update、最小証拠、減衰、履歴、declared不変性は未証明。数値から権限を変えず、合成データで先に評価する。"
+    },
+    {
+      "id": "FR-RF-01",
+      "original_requirement": "日次で当日のイベントを振り返り、重要エピソード・成功・失敗・教訓を抽出する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L313",
+      "source_section": "5.6 Reflection / 学習 (FR-RF)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R2",
+      "evidence": [
+        "E7"
+      ],
+      "remaining": "Morning Briefは今後の予定/約束の提示であり日次Reflectionではない。根拠付きの振り返り提案と成長ログをまず無送信・無自動適用で評価する。"
+    },
+    {
+      "id": "FR-RF-02",
+      "original_requirement": "教訓から戦略ルールを追加・更新・削除する。**すべて derived として記録し、根拠となる observed 行を必ず引用する**",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L314",
+      "source_section": "5.6 Reflection / 学習 (FR-RF)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "出典付きstrategy、上限/試用/退役/版管理、週次Consolidationは未証明。元SRS内のMVP/P2の優先度差も実装前に解消する。"
+    },
+    {
+      "id": "FR-RF-03",
+      "original_requirement": "戦略ルールの総数に上限を設け、上限超過時は低スコアのものを退役させる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L315",
+      "source_section": "5.6 Reflection / 学習 (FR-RF)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "出典付きstrategy、上限/試用/退役/版管理、週次Consolidationは未証明。元SRS内のMVP/P2の優先度差も実装前に解消する。"
+    },
+    {
+      "id": "FR-RF-04",
+      "original_requirement": "週次で記憶の統合（重複排除・要約・昇格・減衰）を行う",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L316",
+      "source_section": "5.6 Reflection / 学習 (FR-RF)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "出典付きstrategy、上限/試用/退役/版管理、週次Consolidationは未証明。元SRS内のMVP/P2の優先度差も実装前に解消する。"
+    },
+    {
+      "id": "FR-RF-05",
+      "original_requirement": "Reflection の結果を、人間が読める「成長ログ」として日次で出力する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L317",
+      "source_section": "5.6 Reflection / 学習 (FR-RF)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R2",
+      "evidence": [
+        "E7"
+      ],
+      "remaining": "Morning Briefは今後の予定/約束の提示であり日次Reflectionではない。根拠付きの振り返り提案と成長ログをまず無送信・無自動適用で評価する。"
+    },
+    {
+      "id": "FR-RF-06",
+      "original_requirement": "行動の成果（返信が来たか、リアクションが付いたか等）を計測して記録する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L318",
+      "source_section": "5.6 Reflection / 学習 (FR-RF)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R2",
+      "evidence": [
+        "E7"
+      ],
+      "remaining": "Morning Briefは今後の予定/約束の提示であり日次Reflectionではない。根拠付きの振り返り提案と成長ログをまず無送信・無自動適用で評価する。"
+    },
+    {
+      "id": "FR-RF-07",
+      "original_requirement": "戦略の更新は、その適用結果を追跡できるようバージョンを持つ",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L319",
+      "source_section": "5.6 Reflection / 学習 (FR-RF)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [],
+      "remaining": "出典付きstrategy、上限/試用/退役/版管理、週次Consolidationは未証明。元SRS内のMVP/P2の優先度差も実装前に解消する。"
+    },
+    {
+      "id": "FR-CT-01",
+      "original_requirement": "自律レベル 0〜5 を実行時に変更でき、Level 0 で全自発行動が停止する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L325",
+      "source_section": "5.7 制御 (FR-CT)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "decision_required",
+      "track": "R4",
+      "evidence": [
+        "E3",
+        "E5"
+      ],
+      "remaining": "元の0〜5レベルをHermesの既存権限と同一視しない。本人通知とコミュニティ自発行動を分けた停止/降格の意味を先に決める。"
+    },
+    {
+      "id": "FR-CT-02",
+      "original_requirement": "承認キューを持ち、承認待ち行動は期限切れで自動失効する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L326",
+      "source_section": "5.7 制御 (FR-CT)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R3",
+      "evidence": [
+        "E8"
+      ],
+      "remaining": "coding jobレビューは会話/記憶変更の承認キューではない。payload固定、期限切れ、対象の再検証、取消を含む専用契約が必要。"
+    },
+    {
+      "id": "FR-CT-03",
+      "original_requirement": "日次・月次の費用上限を持ち、超過時に縮退する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L327",
+      "source_section": "5.7 制御 (FR-CT)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R2",
+      "evidence": [
+        "E5"
+      ],
+      "remaining": "AttentionのLINE通数予算はLLM/API金額の台帳ではない。モデル/用途別tokens・費用と日次/月次上限、失敗時の縮退を別に検証する。"
+    },
+    {
+      "id": "FR-CT-04",
+      "original_requirement": "回路遮断器（連投検知・同内容反復検知・ループ検知）を持つ",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L328",
+      "source_section": "5.7 制御 (FR-CT)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R4",
+      "evidence": [
+        "E4",
+        "E5"
+      ],
+      "remaining": "既存owner通知の重複抑止/ポリシーはあるが、SNS bot間ループ、反復、LLM費用による降格/手動解除の全契約は未証明。"
+    },
+    {
+      "id": "FR-CT-05",
+      "original_requirement": "全設定は宣言的ファイルで管理し、変更履歴が git に残る",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L329",
+      "source_section": "5.7 制御 (FR-CT)",
+      "original_priority": "SHOULD",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R0",
+      "evidence": [
+        "E8"
+      ],
+      "remaining": "サンプル設定とコードはGit管理済み。実配備設定・秘密情報は別であり、全設定をGitへコピーしない。変更履歴は秘密を含めず追跡する。"
+    },
+    {
+      "id": "FR-OB-01",
+      "original_requirement": "イベント / 判断 / 記憶想起 / ツール呼び出し / Reflection / 費用 / トークン / エラー のログを構造化して残す",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L335",
+      "source_section": "5.8 観測性 (FR-OB)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R2",
+      "evidence": [
+        "E4",
+        "E5",
+        "E6"
+      ],
+      "remaining": "既存request/source/evidenceと監査を再利用する。想起→判断→振り返り→提案までの全経路相関は未証明。本文/個人情報をログへ複製しない。"
+    },
+    {
+      "id": "FR-OB-02",
+      "original_requirement": "1 つの発言から、その生成に関与した全要素を復元できる（相関 ID）",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L336",
+      "source_section": "5.8 観測性 (FR-OB)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "partial",
+      "track": "R2",
+      "evidence": [
+        "E4",
+        "E5",
+        "E6"
+      ],
+      "remaining": "既存request/source/evidenceと監査を再利用する。想起→判断→振り返り→提案までの全経路相関は未証明。本文/個人情報をログへ複製しない。"
+    },
+    {
+      "id": "FR-OB-03",
+      "original_requirement": "費用とトークンをモデル別・用途別に集計できる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L337",
+      "source_section": "5.8 観測性 (FR-OB)",
+      "original_priority": "MUST",
+      "original_phase": "MVP",
+      "status": "unverified_gap",
+      "track": "R2",
+      "evidence": [
+        "E5"
+      ],
+      "remaining": "AttentionのLINE通数予算はLLM/API金額の台帳ではない。モデル/用途別tokens・費用と日次/月次上限、失敗時の縮退を別に検証する。"
+    },
+    {
+      "id": "FR-OB-04",
+      "original_requirement": "OpenTelemetry 形式でエクスポートできる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L338",
+      "source_section": "5.8 観測性 (FR-OB)",
+      "original_priority": "MAY",
+      "original_phase": "P2",
+      "status": "deferred",
+      "track": "D1",
+      "evidence": [],
+      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。"
+    },
+    {
+      "id": "NFR-01",
+      "original_requirement": "24 時間稼働。プロセス異常終了時に自動再起動し、5 分以内に観測を再開する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L346",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R0",
+      "evidence": [
+        "E8"
+      ],
+      "remaining": "配備/隔離のコードと過去記録はあるが、現在の再起動5分以内、日次バックアップからの全状態復元は未測定。本番を確認だけのために再起動しない。"
+    },
+    {
+      "id": "NFR-02",
+      "original_requirement": "受信イベントは処理前に永続化され、プロセス断でも失われない",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L347",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E3"
+      ],
+      "remaining": "受信から耐久化までの障害窓を明示し、合成データでcrash/replayを試験する。本番DBを強制killしない。"
+    },
+    {
+      "id": "NFR-03",
+      "original_requirement": "メンションへの応答は中央値 10 秒以内、95 %tile 30 秒以内",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L348",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "unverified_gap",
+      "track": "R2",
+      "evidence": [
+        "E9"
+      ],
+      "remaining": "median 10秒/p95 30秒は新しい経路で未測定。既存過去記録も達成証明にはならない。負荷/モデル別に測る。"
+    },
+    {
+      "id": "NFR-04",
+      "original_requirement": "月間 LLM 費用が Q1 の上限を超えない。超過前に縮退する",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L349",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "unverified_gap",
+      "track": "R2",
+      "evidence": [
+        "E5"
+      ],
+      "remaining": "旧3,000〜5,000円/月はAgentricAI単体の設計上限。Hermesとの合算範囲と実単価を確認し、追加支出の許可としない。"
+    },
+    {
+      "id": "NFR-05",
+      "original_requirement": "新しいプラットフォームの追加が Adapter 実装のみで済む（コア変更不要）",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L350",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E3",
+        "E7",
+        "E9"
+      ],
+      "remaining": "adapter分離とrenderer選択経路はある。新媒体がadapterだけで済む保証、全Hermesで2プロバイダ疎通は未検証。"
+    },
+    {
+      "id": "NFR-06",
+      "original_requirement": "LLM プロバイダの差し替えが設定変更のみで済む",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L351",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E3",
+        "E7",
+        "E9"
+      ],
+      "remaining": "adapter分離とrenderer選択経路はある。新媒体がadapterだけで済む保証、全Hermesで2プロバイダ疎通は未検証。"
+    },
+    {
+      "id": "NFR-07",
+      "original_requirement": "記憶スキーマの変更がマイグレーションで管理される",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L352",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "decision_required",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E2",
+        "E6",
+        "E8"
+      ],
+      "remaining": "PostgreSQL+pgvector/Alembic/1DBという旧構成を既存SQLite・権限分離へ強制しない。必要な差分と運用負担をADRで比較して決める。"
+    },
+    {
+      "id": "NFR-08",
+      "original_requirement": "任意の発言について理由の再現ができる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L353",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R2",
+      "evidence": [
+        "E4",
+        "E6"
+      ],
+      "remaining": "request/source/evidenceの既存監査から新しい想起・振り返りまで追跡できるかをUC-14で検証する。"
+    },
+    {
+      "id": "NFR-09",
+      "original_requirement": "外部由来テキストが指示として解釈された事例が 0 件",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L354",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E3",
+        "E7",
+        "E8"
+      ],
+      "remaining": "既存の防御/テストを維持し、新しい記憶経由の遅延注入とscope越境を含むT1〜T11を追加する。既存テストの存在だけで統合合格としない。"
+    },
+    {
+      "id": "NFR-10",
+      "original_requirement": "記憶が定義されたプライバシー範囲外に出力されない",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L355",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R1",
+      "evidence": [
+        "E3",
+        "E7",
+        "E8"
+      ],
+      "remaining": "既存の防御/テストを維持し、新しい記憶経由の遅延注入とscope越境を含むT1〜T11を追加する。既存テストの存在だけで統合合格としない。"
+    },
+    {
+      "id": "NFR-11",
+      "original_requirement": "DB の日次バックアップから全状態を復元できる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L356",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "partial",
+      "track": "R0",
+      "evidence": [
+        "E8"
+      ],
+      "remaining": "配備/隔離のコードと過去記録はあるが、現在の再起動5分以内、日次バックアップからの全状態復元は未測定。本番を確認だけのために再起動しない。"
+    },
+    {
+      "id": "NFR-12",
+      "original_requirement": "コアの実行パスが 1 プロセス・1 DB で説明できる",
+      "source_url": "https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L357",
+      "source_section": "6. 非機能要件",
+      "original_priority": null,
+      "original_phase": null,
+      "status": "decision_required",
+      "track": "R1",
+      "evidence": [
+        "E1",
+        "E2",
+        "E6",
+        "E8"
+      ],
+      "remaining": "PostgreSQL+pgvector/Alembic/1DBという旧構成を既存SQLite・権限分離へ強制しない。必要な差分と運用負担をADRで比較して決める。"
+    }
+  ]
+}
