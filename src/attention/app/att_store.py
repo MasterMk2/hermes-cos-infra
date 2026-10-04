@@ -595,6 +595,8 @@ def engine_health(con: sqlite3.Connection) -> dict:
         "pending_notifications": one(
             "SELECT COUNT(*) FROM notifications"
             " WHERE state IN ('PENDING','DELIVERING')") or 0,
+        "unknown_notifications": one(
+            "SELECT COUNT(*) FROM notifications WHERE state = 'UNKNOWN'") or 0,
         "oldest_pending_at": one(
             "SELECT MIN(created_at) FROM notifications"
             " WHERE state IN ('PENDING','DELIVERING')"),

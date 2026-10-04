@@ -13,6 +13,8 @@ that is working, and an idle service is not a broken one (section 41).
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import att_health as health
 import att_store as store
@@ -256,7 +258,11 @@ class TestDiskProbe(unittest.TestCase):
         cfg = fx.config(sources={"disk_path": "/"},
                         health={"disk_warn_percent": 100,
                                 "disk_critical_percent": 100})
-        p = health.probe_disk(cfg, fx.clock_at("2026-09-04T12:00"))
+        # A capacity policy test must not depend on how full the CI runner's
+        # root filesystem happens to be (some fixtures report 100% free).
+        with patch.object(health.shutil, "disk_usage",
+                          return_value=SimpleNamespace(total=1000, used=900, free=100)):
+            p = health.probe_disk(cfg, fx.clock_at("2026-09-04T12:00"))
         self.assertFalse(p.ok)
         self.assertEqual(p.reason, "disk_critical")
         self.assertEqual(health.SEVERITY_BY_REASON["disk_critical"], "CRITICAL")

@@ -58,7 +58,12 @@ OUTBOUND_STATES = ("PENDING", "SENDING", "SENT", "FAILED", "ABANDONED")
 # Proactive lifecycle (G.2 spec section 45). SENDING is the dangerous one: it
 # means an adapter call was started and its outcome is not yet known, which is
 # exactly the state a crash leaves behind.
-PROACTIVE_STATES = ("PENDING", "SENDING", "SENT", "FAILED")
+# UNKNOWN is a durable hold, not a failure or permission to retry. A process
+# can die after the provider accepted a message but before SENT was recorded.
+PROACTIVE_STATES = ("PENDING", "SENDING", "SENT", "FAILED", "UNKNOWN", "NOT_SENT")
+# NOT_SENT carries a definite negative receipt and may be retried. Historical
+# FAILED rows did not distinguish a rejection from a partial/ambiguous send;
+# claim() conservatively holds those as UNKNOWN instead of guessing.
 
 PROACTIVE_CHANNELS = ("discord", "line")
 

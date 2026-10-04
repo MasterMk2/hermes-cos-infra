@@ -221,13 +221,11 @@ class InterfaceBot(discord.Client):
     async def send_owner_dm(self, chunks: list) -> tuple:
         """Deliver a proactive notification. Returns (sent_count, error).
 
-        Discord has no idempotency key, so unlike the LINE push this cannot
-        prove to the platform that a retry is a retry. The caller's
-        `proactive_deliveries` row is the only guard, and a crash in the
-        window between `channel.send` returning and that row being written
-        can duplicate a DM. That residual is real and is stated rather than
-        hidden; it is one message to one person on the cheap channel, which
-        is why the expensive channel is the one that got the retry key.
+        This adapter does not submit a provider-side idempotency key. The
+        caller must hold partial/ambiguous sends as UNKNOWN instead of
+        replaying them. Its durable SENDING row also survives a crash after
+        channel.send but before the receipt is recorded. This is an at-most
+        one automatic attempt on uncertain outcomes, not a delivery guarantee.
         """
         if not self.cfg.owner_discord_user_id:
             return 0, "owner_not_configured"

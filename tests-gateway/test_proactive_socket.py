@@ -61,7 +61,7 @@ class FakeLineClient:
             "to": owner_user_id, "messages": messages,
             "outbound_id": outbound_id, "retry_key": retry_key(outbound_id),
         })
-        return FakeLineResult(self.ok, self.category)
+        return FakeLineResult(self.ok, self.category, status=200 if self.ok else 429)
 
 
 class FakeDiscordBot:
@@ -329,7 +329,7 @@ class TestDelivery(SocketCase):
             "SELECT state, last_error FROM proactive_deliveries"
             " WHERE notification_id = 'ntf_fail'").fetchone()
         con.close()
-        self.assertEqual(row["state"], "FAILED")
+        self.assertEqual(row["state"], "NOT_SENT")
         self.assertTrue(row["last_error"])
 
     async def test_an_unconfigured_channel_fails_loudly(self):
