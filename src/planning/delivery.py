@@ -27,6 +27,7 @@ cannot reach `_send_line` and cannot spend a LINE push.
 | `status=delivered`                    |  200 | `delivered`        | done   |
 | `status=duplicate detail=already_delivered` | 200 | `already_delivered` | done |
 | `status=in_flight detail=delivery_in_progress` | 409 | `in_flight`  | **no** |
+| `status=outcome_unknown`              |  409 | `outcome_unknown`  | **no** |
 | `status=rejected detail=content_revision_mismatch` | 409 | `content_mismatch` | **no** |
 | `status=rejected` (malformed request) |  400 | `rejected`         | **no** |
 | owner not configured                  |  503 | `rejected`         | **no** |
@@ -41,6 +42,9 @@ brief differing by a single character re-posts under the same
 retryable is an infinite loop; treating it as "someone already handled this
 date" is correct, because a row under that id exists only if a brief for that
 date was already accepted.
+
+`outcome_unknown` is a durable gateway hold and requires reconciliation. It
+is not a duplicate-success receipt. `unknown` below is only transport loss.
 
 `unknown` is kept distinct from `failed` on purpose: the request went out and
 the answer was lost, so the message may well have been delivered. Retrying is
@@ -88,14 +92,16 @@ REJECTED = "rejected"
 FAILED = "failed"
 UNREACHABLE = "unreachable"
 UNKNOWN = "unknown"
+OUTCOME_UNKNOWN = "outcome_unknown"
 
 #: The owner has the brief.
 SUCCESS = frozenset({DELIVERED, ALREADY_DELIVERED})
-#: Stop immediately. Either the brief is already handled for this date, or the
-#: request is one no repetition can fix. Section 59's bound depends on this
+#: Stop immediately. This includes a durable unresolved receipt, which is
+#: neither successful delivery nor a request another send can safely fix.
+#: Section 59's bound depends on this
 #: set being non-empty for exactly these cases.
 TERMINAL = frozenset({DELIVERED, ALREADY_DELIVERED, IN_FLIGHT,
-                      CONTENT_MISMATCH, REJECTED})
+                      CONTENT_MISMATCH, REJECTED, OUTCOME_UNKNOWN})
 #: Worth another attempt inside the bounded budget.
 RETRYABLE = frozenset({FAILED, UNREACHABLE, UNKNOWN})
 
@@ -299,11 +305,16 @@ def classify_response(status: int, parsed) -> Result:
         return Result(ALREADY_DELIVERED, **common)
     if status == 409 and reported == "in_flight":
         return Result(IN_FLIGHT, **common)
-    if status == 409:
-        # `content_revision_mismatch` is the only other 409. A row under this
-        # id already exists, so the date is already handled. Stop.
+    if status == 409 and reported == OUTCOME_UNKNOWN:
+        # The gateway has a durable hold: unlike a lost socket answer, this
+        # cannot be resolved by another send attempt. Do not call it a
+        # content mismatch or infer that the owner received the brief.
+        return Result(OUTCOME_UNKNOWN, **common)
+    if status == 409 and detail == "content_revision_mismatch":
         return Result(CONTENT_MISMATCH,
                       **{**common, "detail": detail or "content_revision_mismatch"})
+    if status == 409:
+        return Result(REJECTED, **{**common, "detail": detail or "conflict"})
     if status == 400:
         return Result(REJECTED, **{**common, "detail": detail or "rejected"})
     if status == 503:

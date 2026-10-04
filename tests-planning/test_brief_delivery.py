@@ -303,5 +303,5 @@ def test_status_and_failure_reason_vocabularies_are_closed(tmp_path, state):
             or outcome["failure_reason"] in brief_service.ALL_FAILURE_REASONS)
     assert brief_service.ALL_FAILURE_REASONS == {
         "planner_error", "renderer_error", "delivery_error", "stale_source",
-        "duplicate_suppressed",
+        "duplicate_suppressed", "delivery_outcome_unknown",
     }

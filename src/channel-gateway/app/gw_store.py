@@ -499,6 +499,9 @@ def liveness(con: sqlite3.Connection) -> dict:
             "SELECT COUNT(*) FROM proactive_deliveries"
             " WHERE state IN ('PENDING','SENDING')"
         ) or 0,
+        "proactive_unknown": one(
+            "SELECT COUNT(*) FROM proactive_deliveries WHERE state = 'UNKNOWN'"
+        ) or 0,
         "processing_failure_count": int(m.get("failed") or 0),
         "hermes_failure_count": int(m.get("hermes_failed") or 0),
         "delivery_failure_count": one(
@@ -593,33 +596,24 @@ def mark_proactive(con: sqlite3.Connection, delivery_id: str, state: str, *,
 def recover_stuck_proactive(con: sqlite3.Connection, *,
                             lease_seconds: int = 180,
                             max_attempts: int = 3) -> dict:
-    """Unstick deliveries whose outcome was never written (section 89).
+    """Hold abandoned sends without guessing whether the provider accepted.
 
-    A row left SENDING means the process died between the API call and the
-    state write. For LINE that is safe to retry: the retry key is derived
-    from the delivery id, so LINE answers 409 for a message it already
-    accepted rather than charging a second one (section 87). For Discord
-    there is no such key, so a retry can duplicate the DM — which is why the
-    lease is generous and the attempt budget small, and why the residual is
-    stated plainly rather than papered over.
+    A lease expiring is not evidence of non-delivery. Both channels become
+    UNKNOWN and a subsequent claim is refused. Even a provider retry key
+    cannot be assumed valid after an arbitrarily long outage. Keep the old
+    max_attempts argument/result counters for callers, but never turn an
+    uncertain send into a retryable PENDING/FAILED row based on an attempt
+    count. A still-running adapter may later record its actual result.
     """
     cutoff = _iso_minus(lease_seconds)
-    rows = con.execute(
-        "SELECT delivery_id, attempts FROM proactive_deliveries"
-        " WHERE state = 'SENDING' AND updated_at < ?",
-        (cutoff,),
-    ).fetchall()
-    requeued, failed = 0, 0
-    for r in rows:
-        if int(r["attempts"] or 0) >= max_attempts:
-            mark_proactive(con, r["delivery_id"], "FAILED",
-                           error="stuck_max_attempts")
-            failed += 1
-        else:
-            mark_proactive(con, r["delivery_id"], "PENDING",
-                           error="reclaimed_stuck")
-            requeued += 1
-    return {"proactive_requeued": requeued, "proactive_failed": failed}
+    cur = con.execute(
+        "UPDATE proactive_deliveries SET state = 'UNKNOWN', updated_at = ?,"
+        " last_error = 'delivery_outcome_unknown'"
+        " WHERE state = 'SENDING' AND (updated_at IS NULL OR updated_at < ?)",
+        (_now(), cutoff),
+    )
+    return {"proactive_requeued": 0, "proactive_failed": 0,
+            "proactive_unknown": cur.rowcount}
 
 
 def proactive_summary(con: sqlite3.Connection) -> dict:

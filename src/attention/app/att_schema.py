@@ -56,6 +56,7 @@ NOTIFICATION_STATES = (
     "FAILED",       # every channel refused, and retries are exhausted
     "SUPPRESSED",   # decided against before it was ever sent
     "DEFERRED",     # held for quiet hours or a burst cap
+    "UNKNOWN",      # gateway receipt unresolved; no automatic replay
 )
 
 SEVERITIES = ("INFO", "IMPORTANT", "URGENT", "CRITICAL")

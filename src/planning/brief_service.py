@@ -84,9 +84,11 @@ ST_EARLY_BOOT = "skipped_early"
 ST_DISABLED = "skipped_disabled"
 ST_FAILED = "failed"
 ST_DRY_RUN = "dry_run"
+ST_OUTCOME_UNKNOWN = "outcome_unknown"
 
 ALL_STATUSES = frozenset({ST_DELIVERED, ST_SUPPRESSED, ST_LATE_BOOT,
-                          ST_EARLY_BOOT, ST_DISABLED, ST_FAILED, ST_DRY_RUN})
+                          ST_EARLY_BOOT, ST_DISABLED, ST_FAILED, ST_DRY_RUN,
+                          ST_OUTCOME_UNKNOWN})
 
 # -- failure reasons (phase section 106) -----------------------------------
 
@@ -95,9 +97,10 @@ FR_RENDERER = "renderer_error"
 FR_DELIVERY = "delivery_error"
 FR_STALE = "stale_source"
 FR_DUPLICATE = "duplicate_suppressed"
+FR_DELIVERY_UNKNOWN = "delivery_outcome_unknown"
 
 ALL_FAILURE_REASONS = frozenset({FR_PLANNER, FR_RENDERER, FR_DELIVERY,
-                                 FR_STALE, FR_DUPLICATE})
+                                 FR_STALE, FR_DUPLICATE, FR_DELIVERY_UNKNOWN})
 
 #: Section 59. Three calls to the socket, never more.
 MAX_DELIVERY_ATTEMPTS = 3
@@ -367,6 +370,13 @@ def run_scheduled_brief(config: dict, *, now=None, trigger: str = "timer",
     own_state = state is None
     st, con = _resolve_state(state, planning_dir)
     try:
+        if st is not None and st.has_unknown_outcome(local_date):
+            outcome.update(status=ST_OUTCOME_UNKNOWN,
+                           failure_reason=FR_DELIVERY_UNKNOWN,
+                           channel=PERMITTED_CHANNEL,
+                           notification_id=delivery.notification_id_for(local_date))
+            _health(planning_dir, status="unknown", failure_reason=FR_DELIVERY_UNKNOWN)
+            return outcome
         if st is not None and st.is_settled(local_date):
             log.info("brief for %s already settled locally — not regenerating",
                      local_date)
@@ -508,6 +518,15 @@ def run_scheduled_brief(config: dict, *, now=None, trigger: str = "timer",
                     failure_reason=FR_STALE if stale else None)
             log.info("morning brief delivered %s (%s, %d attempt(s), %d chars)",
                      notification_id, result.outcome, attempts, len(text))
+        elif result.outcome == delivery.OUTCOME_UNKNOWN:
+            if st is not None:
+                st.mark_status(local_date, brief_state.UNKNOWN,
+                               last_error=result.detail, channel=PERMITTED_CHANNEL)
+            outcome.update(status=ST_OUTCOME_UNKNOWN,
+                           failure_reason=FR_DELIVERY_UNKNOWN)
+            _health(planning_dir, status="unknown", failure_reason=FR_DELIVERY_UNKNOWN)
+            log.warning("morning brief %s outcome unknown — automatic retry held",
+                        notification_id)
         elif result.outcome in (delivery.IN_FLIGHT, delivery.CONTENT_MISMATCH):
             # The gateway already holds a row for this date. Stop, and record
             # it as suppressed rather than failed — nothing is wrong.
