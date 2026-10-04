@@ -177,21 +177,22 @@ class TestSocketLifecycle(SocketCase):
         self.assertEqual(body["status"], "ok")
 
     async def test_a_stale_socket_file_does_not_block_the_next_start(self):
-        # A CLEAN shutdown removes the file — measured, and the reason this
-        # test has to forge the stale one rather than produce it by stopping
-        # the server. The case that matters is SIGKILL or a power cut, which
-        # leaves the file with nothing behind it; `bind` then fails with
-        # EADDRINUSE and takes the whole gateway down over a dead file.
+        # Python 3.13 cleans up the socket on close; 3.12 can leave it behind.
+        # In either case test the same input: an abandoned, unlistened socket
+        # file such as a power cut leaves. Do not assume a runtime's cleanup
+        # behaviour is a gateway contract.
         import socket as socket_mod
+        import stat as stat_mod
 
         await self.client.close()
         await self.server.stop()
-        self.assertFalse(os.path.exists(self.sock))
-
-        abandoned = socket_mod.socket(socket_mod.AF_UNIX,
-                                      socket_mod.SOCK_STREAM)
-        abandoned.bind(self.sock)
-        abandoned.close()                      # file survives: no unlink
+        if os.path.exists(self.sock):
+            self.assertTrue(stat_mod.S_ISSOCK(os.stat(self.sock).st_mode))
+        else:
+            abandoned = socket_mod.socket(socket_mod.AF_UNIX,
+                                          socket_mod.SOCK_STREAM)
+            abandoned.bind(self.sock)
+            abandoned.close()                  # file survives: no unlink
         self.assertTrue(os.path.exists(self.sock))
 
         self.server = ProactiveServer(self.gw)
@@ -206,6 +207,12 @@ class TestSocketLifecycle(SocketCase):
         # destructive. Only a socket is ever removed.
         await self.client.close()
         await self.server.stop()
+        # 3.12 may leave the stopped fixture's socket; remove only that
+        # verified socket so the actual test input can be a regular file.
+        if os.path.exists(self.sock):
+            import stat as stat_mod
+            self.assertTrue(stat_mod.S_ISSOCK(os.stat(self.sock).st_mode))
+            os.unlink(self.sock)
         with open(self.sock, "w", encoding="utf-8") as fh:
             fh.write("not a socket")
         server2 = ProactiveServer(self.gw)
