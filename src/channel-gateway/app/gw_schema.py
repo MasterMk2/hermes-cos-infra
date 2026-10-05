@@ -40,7 +40,7 @@ import sqlite3
 SCHEMA_VERSION = 2
 
 # Inbound lifecycle (spec section 57). Terminal states are RESPONDED, FAILED
-# and CANCELLED; everything else is expected to move.
+# and CANCELLED; UNKNOWN is a non-retrying hold, not success or failure.
 INBOUND_STATES = (
     "RECEIVED",       # accepted from the platform, signature already verified
     "AUTHENTICATED",  # sender matched the owner allowlist
@@ -49,16 +49,24 @@ INBOUND_STATES = (
     "RESPONDED",      # a reply was delivered
     "FAILED",         # gave up after bounded retries
     "CANCELLED",      # superseded or dropped deliberately
+    "UNKNOWN",        # unresolved reply; held, never automatically retried
 )
 
-TERMINAL_INBOUND = frozenset({"RESPONDED", "FAILED", "CANCELLED"})
+TERMINAL_INBOUND = frozenset({"RESPONDED", "FAILED", "CANCELLED", "UNKNOWN"})
 
-OUTBOUND_STATES = ("PENDING", "SENDING", "SENT", "FAILED", "ABANDONED")
+OUTBOUND_STATES = ("PENDING", "SENDING", "SENT", "FAILED", "ABANDONED", "NOT_SENT", "UNKNOWN")
+# Reply NOT_SENT is a new, proven-unsent reservation or local preflight failure.
+# Old PENDING/FAILED rows predate write-ahead sending and cannot prove that.
 
 # Proactive lifecycle (G.2 spec section 45). SENDING is the dangerous one: it
 # means an adapter call was started and its outcome is not yet known, which is
 # exactly the state a crash leaves behind.
-PROACTIVE_STATES = ("PENDING", "SENDING", "SENT", "FAILED")
+# UNKNOWN is a durable hold, not a failure or permission to retry. A process
+# can die after the provider accepted a message but before SENT was recorded.
+PROACTIVE_STATES = ("PENDING", "SENDING", "SENT", "FAILED", "UNKNOWN", "NOT_SENT")
+# NOT_SENT carries a definite negative receipt and may be retried. Historical
+# FAILED rows did not distinguish a rejection from a partial/ambiguous send;
+# claim() conservatively holds those as UNKNOWN instead of guessing.
 
 PROACTIVE_CHANNELS = ("discord", "line")
 

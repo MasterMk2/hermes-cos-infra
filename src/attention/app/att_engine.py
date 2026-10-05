@@ -55,6 +55,8 @@ import att_store as store
 from att_config import ConfigError, load_config
 from att_gateway import GatewayClient
 from att_gateway import UNKNOWN as GW_UNKNOWN
+from att_gateway import OUTCOME_UNKNOWN as GW_OUTCOME_UNKNOWN
+from att_gateway import IN_FLIGHT as GW_IN_FLIGHT
 from att_schema import get_meta, open_db, set_meta
 from att_time import Clock, parse_iso
 
@@ -305,7 +307,7 @@ class Engine:
             subject=subject, body=body, reason=decision.reason,
             source_type=row["source_type"], source_id=row["source_id"],
         )
-        if not is_new and notification["state"] in ("DELIVERED", "DELIVERING"):
+        if not is_new and notification["state"] in ("DELIVERED", "DELIVERING", "UNKNOWN"):
             # Somebody already did this — a previous scan, or this scan's
             # predecessor before a crash. Not an error, and not a second send.
             log.info("notification %s already %s", notification["notification_id"],
@@ -323,12 +325,18 @@ class Engine:
         silence a notification that also went to Discord (section 84).
         """
         nid = notification["notification_id"]
+        # A durable unknown result must survive a new scan or direct retry.
+        # Read the current row too: the caller may hold an older snapshot.
+        current = store.get_notification(con, nid)
+        if current is not None and current["state"] == "UNKNOWN":
+            return False
         store.mark_notification(con, nid, "DELIVERING", count_attempt=True)
         con.commit()
 
         delivered = []
         last_error = None
         certainly_unsent = True
+        held_unknown = False
 
         for channel in channels:
             if channel == "line":
@@ -366,7 +374,8 @@ class Engine:
                 detail=result.detail, quota_consumed=result.quota_consumed,
                 http_status=result.http_status,
             )
-            if channel == "line":
+            if channel == "line" and result.status not in (
+                    GW_UNKNOWN, GW_OUTCOME_UNKNOWN, GW_IN_FLIGHT):
                 store.settle_budget(con, channel="line", notification_id=nid,
                                     spent=result.quota_consumed or result.ok)
             con.commit()
@@ -376,6 +385,8 @@ class Engine:
                 certainly_unsent = False
             else:
                 last_error = f"{channel}:{result.status}:{result.detail}"
+                if result.status == GW_OUTCOME_UNKNOWN:
+                    held_unknown = True
                 if not result.certainly_unsent:
                     certainly_unsent = False
 
@@ -385,6 +396,13 @@ class Engine:
             log.info("delivered %s via %s sev=%s", nid, ",".join(delivered),
                      notification["severity"])
             return True
+
+        if held_unknown:
+            store.mark_notification(con, nid, "UNKNOWN",
+                                    error="delivery_outcome_unknown")
+            con.commit()
+            log.warning("notification %s outcome unknown — automatic retry held", nid)
+            return False
 
         attempts = int(notification["attempts"] or 0) + 1
         if attempts >= int(self.cfg.notifications["max_delivery_attempts"]):

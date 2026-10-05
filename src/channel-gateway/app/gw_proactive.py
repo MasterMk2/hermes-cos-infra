@@ -30,10 +30,11 @@ what this API *cannot* express (spec sections 48-51):
   the component most exposed to hostile text — has no route here at all.
 
 Idempotency is the other half. `proactive_deliveries` is unique on
-(notification_id, channel), so a crash between the send and the state write
-cannot produce a second charged LINE push: the retry computes the same
-delivery id, finds the row, and the LINE retry key derived from that id makes
-LINE answer 409 for a message it already accepted (sections 46, 86, 87).
+(notification_id, channel). A crash between send and receipt persistence now
+holds that row as UNKNOWN rather than replaying an uncertain side effect.
+Only proven pre-send failures use NOT_SENT. The LINE transport still uses its
+stable retry key within a bounded attempt; a long-outage recovery does not
+assume that the provider retains that key forever.
 """
 
 from __future__ import annotations
@@ -46,8 +47,7 @@ import stat
 from aiohttp import web
 
 import gw_store as store
-from gw_format import prepare_outbound
-from gw_line import build_text_messages
+from gw_line import build_text_messages, prepare_line_outbound
 from gw_schema import PROACTIVE_CHANNELS, SEVERITIES, open_db
 
 log = logging.getLogger("gateway.proactive")
@@ -145,6 +145,22 @@ CLAIMED = "claimed"
 ALREADY_SENT = "already_sent"
 IN_FLIGHT = "in_flight"
 CONTENT_MISMATCH = "content_mismatch"
+OUTCOME_UNKNOWN = "outcome_unknown"
+TARGET_MISMATCH = "target_mismatch"
+
+def proven_pre_send_failure(channel: str, detail) -> bool:
+    """These categories are emitted before the first message send only.
+
+    A final negative HTTP response can follow an SDK/transport retry whose
+    earlier outcome was lost. It is not proof for replay after a long outage.
+    This also checks NOT_SENT rows created by the previous classifier.
+    """
+    detail = str(detail or "")
+    if detail == "empty_after_preparation":
+        return True
+    if channel == CHANNEL_DISCORD:
+        return detail in {"discord_not_configured", "owner_not_configured"} or detail.startswith("owner_dm_unavailable:")
+    return channel == CHANNEL_LINE and detail == "line_not_configured"
 
 
 def claim(con, *, notification_id: str, channel: str, severity: str,
@@ -162,11 +178,27 @@ def claim(con, *, notification_id: str, channel: str, severity: str,
         body=body, target_user_id=target_user_id,
     )
     if not is_new:
+        if row["target_user_id"] != target_user_id:
+            # A retry does not inherit a newly configured recipient. The
+            # persisted body/id/recipient form one delivery intent.
+            return row, TARGET_MISMATCH
         state = row["state"]
+        if (state == "FAILED" or (state == "PENDING" and row["attempts"] > 0)
+                or (state == "NOT_SENT" and not proven_pre_send_failure(channel, row["last_error"]))):
+            # Older versions stored ambiguous/partial sends as FAILED or
+            # requeued abandoned SENDING rows as PENDING. Neither record is
+            # evidence that replay is safe. Do not inherit that old guess.
+            store.mark_proactive(con, row["delivery_id"], "UNKNOWN",
+                                 error="legacy_delivery_outcome_unknown")
+            return store.get_proactive(con, row["delivery_id"]), OUTCOME_UNKNOWN
         if state == "SENT":
             return row, ALREADY_SENT
         if state == "SENDING":
             return row, IN_FLIGHT
+        if state == "UNKNOWN":
+            return row, OUTCOME_UNKNOWN
+        if state not in ("PENDING", "NOT_SENT"):
+            return row, OUTCOME_UNKNOWN
         if row["content_revision"] != store.content_revision(body):
             # Same notification id, different words. That is a second
             # notification wearing the first one's name, and honouring it
@@ -191,20 +223,21 @@ class ProactiveServer:
     # -- delivery ------------------------------------------------------
 
     async def _send_discord(self, row) -> tuple:
-        """(ok, mode, detail). The owner's DM channel, opened if needed."""
+        """(ok, mode, detail, uncertain). Never retry a partial send."""
         bot = self.gw.discord_bot
         if bot is None:
-            return False, "", "discord_not_configured"
+            return False, "", "discord_not_configured", False
         chunks = bot.prepare(row["body"])
         if not chunks:
-            return False, "", "empty_after_preparation"
+            return False, "", "empty_after_preparation", False
         sent, error = await bot.send_owner_dm(chunks)
         if error is None and sent == len(chunks):
-            return True, "dm", "ok"
-        return False, "dm", error or "partial"
+            return True, "dm", "ok", False
+        uncertain = bool(sent) or not proven_pre_send_failure(CHANNEL_DISCORD, error)
+        return False, "dm", error or "partial", uncertain
 
     async def _send_line(self, row) -> tuple:
-        """(ok, mode, detail). Always a push: nobody replied to us.
+        """(ok, mode, detail, uncertain). Always a push: nobody replied to us.
 
         The retry key is derived from `delivery_id`, which is derived from
         (notification_id, channel) — so a retry of this exact notification is
@@ -213,22 +246,24 @@ class ProactiveServer:
         """
         client = self.gw.line
         if client is None or not self.gw.cfg.owner_line_user_id:
-            return False, "", "line_not_configured"
-        chunks = prepare_outbound(
+            return False, "", "line_not_configured", False
+        chunks = prepare_line_outbound(
             row["body"],
             limit=int(self.gw.cfg.line["text_chunk_chars"]),
             max_chunks=int(self.gw.cfg.line["max_messages_per_request"]),
-            neutralize=False,
             soft_limit=int(self.gw.cfg.limits["response_soft_limit_chars"]),
             hard_limit=int(self.gw.cfg.limits["response_hard_limit_chars"]),
         )
         if not chunks:
-            return False, "", "empty_after_preparation"
+            return False, "", "empty_after_preparation", False
         result = await client.push(
-            self.gw.session, self.gw.cfg.owner_line_user_id,
+            self.gw.session, row["target_user_id"],
             build_text_messages(chunks), outbound_id=row["delivery_id"],
         )
-        return result.ok, "push", result.category
+        # _post can retry before yielding its final response. Do not infer
+        # non-acceptance from that last status or extend the retry-key lifetime.
+        uncertain = not result.ok
+        return result.ok, "push", result.category, uncertain
 
     # -- routes --------------------------------------------------------
 
@@ -282,16 +317,33 @@ class ProactiveServer:
                 "status": "in_flight", "delivery_id": row["delivery_id"],
                 "channel": channel, "detail": "delivery_in_progress",
             }, status=409)
+        if outcome == OUTCOME_UNKNOWN:
+            return web.json_response({
+                "status": OUTCOME_UNKNOWN, "delivery_id": row["delivery_id"],
+                "channel": channel, "detail": "delivery_outcome_unknown",
+            }, status=409)
         if outcome == CONTENT_MISMATCH:
             return web.json_response({
                 "status": "rejected", "delivery_id": row["delivery_id"],
                 "channel": channel, "detail": "content_revision_mismatch",
             }, status=409)
+        if outcome == TARGET_MISMATCH:
+            return web.json_response({
+                "status": "rejected", "delivery_id": row["delivery_id"],
+                "channel": channel, "detail": "delivery_target_mismatch",
+            }, status=409)
 
-        if channel == CHANNEL_LINE:
-            ok, mode, detail = await self._send_line(row)
-        else:
-            ok, mode, detail = await self._send_discord(row)
+        try:
+            if channel == CHANNEL_LINE:
+                ok, mode, detail, uncertain = await self._send_line(row)
+            else:
+                ok, mode, detail, uncertain = await self._send_discord(row)
+        except Exception as exc:
+            # The adapter may have transmitted before losing its answer.
+            # CancelledError is deliberately not caught: the durable SENDING
+            # claim will become UNKNOWN on recovery, never a new send.
+            ok, mode = False, "push" if channel == CHANNEL_LINE else "dm"
+            detail, uncertain = f"adapter_exception:{type(exc).__name__}", True
 
         # A LINE push is charged whether or not we are pleased with it; an
         # `already_sent` (409 on the retry key) means the charge happened on
@@ -301,23 +353,25 @@ class ProactiveServer:
         )
         await self.gw._in_thread(
             store.mark_proactive, row["delivery_id"],
-            "SENT" if ok else "FAILED",
+            "SENT" if ok else "UNKNOWN" if uncertain else "NOT_SENT",
             error=None if ok else detail, mode=mode,
-            quota_consumed=quota_consumed,
+            quota_consumed=None if uncertain else quota_consumed,
         )
         if quota_consumed and self.gw.line_quota is not None:
             # Keep the cached figure honest between refreshes (section 80).
             self.gw.line_quota.note_push_sent(1)
 
         log.info("proactive %s %s channel=%s mode=%s ok=%s detail=%s chars=%d",
-                 "delivered" if ok else "failed", req["notification_id"],
+                 "delivered" if ok else "unknown" if uncertain else "failed",
+                 req["notification_id"],
                  channel, mode or "-", ok, detail, len(req["text"]))
 
         return web.json_response({
-            "status": "delivered" if ok else "failed",
+            "status": "delivered" if ok else OUTCOME_UNKNOWN if uncertain else "failed",
             "delivery_id": row["delivery_id"], "channel": channel,
-            "mode": mode, "detail": detail, "quota_consumed": quota_consumed,
-        }, status=200 if ok else 502)
+            "mode": mode, "detail": detail,
+            "quota_consumed": None if uncertain else quota_consumed,
+        }, status=200 if ok else 409 if uncertain else 502)
 
     async def handle_line_budget(self, request: web.Request) -> web.Response:
         """Facts about the monthly allowance. No token, ever."""

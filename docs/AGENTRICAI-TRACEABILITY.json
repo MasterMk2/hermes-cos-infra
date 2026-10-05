@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "assessed_on": "2026-10-04",
+  "assessed_on": "2026-10-05",
   "scope": "Repository-level traceability only; no deployed-runtime verification or feature-completion claim.",
   "baselines": {
     "AgentricAI": "64a6e1aa7449f8f571b9e60baa2a7eb714c86985",
-    "hermes-cos-infra": "640d9db1044a68612e2b9fdf0204a68ebef9ea0f",
+    "hermes-cos-infra": "0445c7c8b7da7b52553eccf3f156b0882e6a8438",
     "hermes-pi-setup": "f3b378eb6a39e721ef6e1d585ec7e76e35b313b6"
   },
   "statuses": {
@@ -16,50 +16,63 @@
   },
   "evidence": {
     "E1": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/collector.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/dk_normalize.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/dk_store.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/collector.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/dk_normalize.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/dk_store.py"
     ],
     "E2": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/indexer.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/mcp/discord_mcp.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/indexer.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/mcp/discord_mcp.py"
     ],
     "E3": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_discord.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_canonical.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_service.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_discord.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_canonical.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_service.py"
     ],
     "E4": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_proactive.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_store.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_format.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_proactive.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_store.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_format.py"
     ],
     "E5": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_engine.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_policy.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_budget.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_store.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_engine.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_policy.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_budget.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_store.py"
     ],
     "E6": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/models.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/reconcile.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/store.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/commitments/models.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/commitments/reconcile.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/commitments/store.py"
     ],
     "E7": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/planner.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/renderer.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/brief_service.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/tests-planning/test_renderer_injection.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/tests-planning/test_privacy_guard.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/planning/planner.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/planning/renderer.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/planning/brief_service.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-planning/test_renderer_injection.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-planning/test_privacy_guard.py"
     ],
     "E8": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/worker/README.md",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/docs/17-phase-h32s-antigravity-security-closeout.md"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/worker/README.md",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/17-phase-h32s-antigravity-security-closeout.md"
     ],
     "E9": [
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_line.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_canonical.py",
-      "https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_service.py"
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_line.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_canonical.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_service.py"
+    ],
+    "E10": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/RESTART-SAFETY.md",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/REPLY-RESTART-SAFETY.md",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/LINE-RESTART-SAFETY.md",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-gateway/test_delivery.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-gateway/test_line_recovery.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-planning/test_brief_delivery.py"
+    ],
+    "E11": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/OFFLINE-TESTS.md",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/.github/workflows/offline-tests.yml",
+      "https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869"
     ]
   },
   "requirements": [
@@ -149,7 +162,7 @@
         "E1",
         "E3"
       ],
-      "remaining": "allowlist先行とキュー/永続化はあるが、collectorのメモリキューを含むため受信直後の全クラッシュ耐久性を達成済みとしない。"
+      "remaining": "allowlist先行とキュー/永続化はあるが、collectorのメモリキューを含むため受信直後の全クラッシュ耐久性を達成済みとしない。PR #3〜#5の送信側再起動安全性を、この受信側要件の達成証明にしない。"
     },
     {
       "id": "FR-IN-07",
@@ -319,9 +332,15 @@
       "status": "partial",
       "track": "R1",
       "evidence": [
-        "E4"
+        "E3",
+        "E4",
+        "E5",
+        "E7",
+        "E9",
+        "E10",
+        "E11"
       ],
-      "remaining": "gatewayの監査/送信予約/重複抑止を再利用する。新たなReflection出力との相関、送信結果不明時の扱いをテストする。全媒体でexactly-onceとは表現しない。"
+      "remaining": "PR #3〜#5で既存owner配送の固定intent・結果記録・UNKNOWN保留・プロセス境界/並行claim/receipt失敗を合成検証済み。Reflectionとの全経路相関、手動reconcile、実機評価は残る。SENTはprovider受理のみ。SDK内部retryを含む全媒体exactly-onceは保証しない。"
     },
     {
       "id": "FR-AC-04",
@@ -347,9 +366,15 @@
       "status": "partial",
       "track": "R1",
       "evidence": [
-        "E4"
+        "E3",
+        "E4",
+        "E5",
+        "E7",
+        "E9",
+        "E10",
+        "E11"
       ],
-      "remaining": "gatewayの監査/送信予約/重複抑止を再利用する。新たなReflection出力との相関、送信結果不明時の扱いをテストする。全媒体でexactly-onceとは表現しない。"
+      "remaining": "PR #3〜#5で既存owner配送の固定intent・結果記録・UNKNOWN保留・プロセス境界/並行claim/receipt失敗を合成検証済み。Reflectionとの全経路相関、手動reconcile、実機評価は残る。SENTはprovider受理のみ。SDK内部retryを含む全媒体exactly-onceは保証しない。"
     },
     {
       "id": "FR-AC-06",
@@ -374,9 +399,11 @@
       "track": "R0",
       "evidence": [
         "E4",
-        "E9"
+        "E9",
+        "E10",
+        "E11"
       ],
-      "remaining": "本人向けLINE返信/pushは既存経路を使用する。任意の第三者宛送信は対応済みに含めない。"
+      "remaining": "本人向けLINEは固定batch/modeを保存し、reply開始後の不明結果から自動pushしない経路を合成検証済み。到達/既読追跡・現在の実機評価は未実装/未確認。任意の第三者宛送信は対応済みに含めない。"
     },
     {
       "id": "FR-AC-08",
@@ -880,7 +907,7 @@
         "E1",
         "E3"
       ],
-      "remaining": "受信から耐久化までの障害窓を明示し、合成データでcrash/replayを試験する。本番DBを強制killしない。"
+      "remaining": "受信から耐久化までの障害窓を明示し、合成データでcrash/replayを試験する。本番DBを強制killしない。送信側の固定batch/UNKNOWN保留を追加したが、collectorを含む受信直後の全耐久性は未証明。"
     },
     {
       "id": "NFR-03",
@@ -1037,5 +1064,34 @@
       ],
       "remaining": "PostgreSQL+pgvector/Alembic/1DBという旧構成を既存SQLite・権限分離へ強制しない。必要な差分と運用負担をADRで比較して決める。"
     }
-  ]
+  ],
+  "initial_assessment": {
+    "assessed_on": "2026-10-04",
+    "baselines": {
+      "AgentricAI": "64a6e1aa7449f8f571b9e60baa2a7eb714c86985",
+      "hermes-cos-infra": "640d9db1044a68612e2b9fdf0204a68ebef9ea0f",
+      "hermes-pi-setup": "f3b378eb6a39e721ef6e1d585ec7e76e35b313b6"
+    }
+  },
+  "verification": {
+    "code_revision": "0445c7c8b7da7b52553eccf3f156b0882e6a8438",
+    "ci_url": "https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869",
+    "command": "python scripts/check_offline.py",
+    "os": "Ubuntu 24.04",
+    "python_versions": [
+      "3.12.14",
+      "3.13.15"
+    ],
+    "per_python": {
+      "gateway_passed": 344,
+      "attention_passed": 158,
+      "planning_passed": 607,
+      "passed_total": 1109,
+      "subtests_passed": 1188,
+      "skipped": 3
+    },
+    "skips": "External private privacy denylist unavailable; not counted as passed.",
+    "scope": "Offline synthetic Gateway/Attention/Planning suites; not all repository suites or deployed runtime.",
+    "deployed_runtime_verified": false
+  }
 }

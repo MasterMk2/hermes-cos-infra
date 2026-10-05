@@ -1,6 +1,6 @@
 # AgentricAI → Hermes: 要件統合と次の実装順序
 
-照合日: 2026-10-04。これは機能完成報告ではなく、重複開発を止めるための設計統合。
+初回照合: 2026-10-04。現行コード追随: 2026-10-05。機能全体の完成報告ではなく、重複開発を止めるための設計統合。
 
 ## 決定と今回の範囲
 
@@ -20,15 +20,29 @@ archive、既存Botの権限変更、データ移行、配備はこの変更に�
 | 対象 | 固定したrevision | 確認内容 |
 |---|---|---|
 | AgentricAI | [64a6e1a](https://github.com/MasterMk2/AgentricAI/commit/64a6e1aa7449f8f571b9e60baa2a7eb714c86985) | srcはversionのみ、テストはimportのみ。要件定義0.3のBot/記憶/Reflectionは実装済みではない |
-| Hermes infra | [640d9db](https://github.com/MasterMk2/hermes-cos-infra/commit/640d9db1044a68612e2b9fdf0204a68ebef9ea0f) | collector、Gateway、Attention、commitments、Planning等の実コード |
+| Hermes infra | [0445c7c8](https://github.com/MasterMk2/hermes-cos-infra/commit/0445c7c8b7da7b52553eccf3f156b0882e6a8438) | 既存collector/commitments等と、PR #3〜#5のGateway・Attention・Planning送信境界修正 |
 | Hermes Pi記録 | [f3b378e](https://github.com/MasterMk2/hermes-pi-setup/commit/f3b378eb6a39e721ef6e1d585ec7e76e35b313b6) | I.2と後続ローカル作業の過去の報告。現在のPi実測ではない |
 
 [AgentricAI原要件0.3](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md)の第5章・第6章を全IDで追跡する。
 GitHubにないHermes本体の記憶実装、Piの実行状態、9月10日記録の後続ローカル変更は
 未確認。「証拠なし」は「どこにも実装がない」という断定ではない。
-既存のI.2を作り直さず、[状況照合PR](https://github.com/MasterMk2/hermes-cos-infra/pull/1)と
+既存のI.2を作り直さず、[状況照合の正本](STATUS-RECONCILIATION.md)と
 [Pi記録の照合PR](https://github.com/MasterMk2/hermes-pi-setup/pull/1)の残件を先に確認する。
-そのPRのテスト件数を、この統合のテスト結果へ転記しない。
+初回基準 `640d9db` と当時の595件等は状況照合の履歴欄に残す。以下の1,109件は別のSHA・3-suiteの検証であり、統合全要件の合格数ではない。
+
+### 送信境界で今回までに確認できたこと
+
+- [PR #3](https://github.com/MasterMk2/hermes-cos-infra/pull/3) は proactive / Attention / Planning の結果不明を永続化して保留する
+- [PR #4](https://github.com/MasterMk2/hermes-cos-infra/pull/4) は通常Discordの固定chunk・宛先と確認済みreceiptを保存する。UNKNOWNが一つでもあれば返信全体を保留し、確認済み先頭＋確実な未送信tailだけを継続する。Morning BriefのIN_FLIGHT/本文不一致を成功にしない
+- [PR #5](https://github.com/MasterMk2/hermes-cos-infra/pull/5) は通常LINEの固定batch・宛先・reply/push mode・件数を保存する。reply開始後の不明結果から自動pushしない。409は有効期間内の固定push intentと受理IDがある場合だけ受理として扱う
+- [0445c7c8 の offline CI](https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869) は Ubuntu 24.04 / Python 3.12.14・3.13.15 のそれぞれで Gateway 344 + Attention 158 + Planning 607 = **1,109 passed**、別に **1,188 subtests passed / 3 skipped**。3件の外部private denylistは未検証。再現入口は [OFFLINE-TESTS.md](OFFLINE-TESTS.md)
+
+これはFR-AC-03/05/07の部分的証拠を追加する。68要件の状態ラベルは変更しない。
+FR-IN-06/NFR-02は受信側の要件であり、この送信側修正で完了とはしない。
+UNKNOWNの手動reconcile/UI、端末到達/既読追跡は未実装。SENTはprovider受理のみ。
+SDK内部retryを含めたexactly-onceは保証せず、再起動やretryで認可は増えない。
+実機への配備・実DB移行・現在の自然配信は未確認。旧版への状態DB互換を確かめずrollbackしない。
+記憶契約、Reflection、bounded adaptation、コミュニティ参加判断の残件は変わらない。
 
 ## 2. 再利用するものと、同一ではないもの
 
@@ -87,11 +101,11 @@ AgentricAI のUC-02/UC-03（会話への参加/リアクション）を実現す
 ## 4. 一本化したロードマップ
 
 R番号はこの統合の作業順を指す。Hermesの既存Phase番号を振り直さない。
-「完了」はこの文書で実装済みに読み替えない。各実装PRで証拠を追加して更新する。
+「完了」はこの文書で実装済みに読み替えない。各実装PRで証拠を追加して更新する。R0の送信境界修正はR1の記憶契約を完了させるものではない。
 
 | 順 | 作業/状態 | 完了条件と依存 |
 |---|---|---|
-| R0 | 基盤の現状照合。文書統合は今回、運用残件は未完了 | 後続ローカルworktree/差分を安全に回収しGitHubと比較。既存Hermes本体の記憶能力も調査。自然な朝の実配信とI/O/起動の証拠を別々に記録 |
+| R0 | 基盤の現状照合。文書統合と送信境界修正はコード反映済み、運用残件は未完了 | 後続ローカルworktree/差分を安全に回収しGitHubと比較。既存Hermes本体の記憶能力も調査。自然な朝の実配信とI/O/起動の証拠を別々に記録 |
 | R1 | 記憶・出典・scope契約。設計/未実装 | 既存source IDを使う最小schema/adapter案。出典なし/失効出典、scope越境、削除伝播、クラッシュ再実行、遅延注入を合成データで検証。保存方式は測定後に判断。R0のコード実体確認に依存 |
 | R2 | 読み取り入力から振り返り候補と成長ログ。未実装 | R1の検証済みデータだけで、日本語の事実/解釈/変更候補/根拠/保留を区別する。まずoffline・無送信・無自動適用。相関ID、用途別費用、上限超過時縮退をテスト |
 | R3 | bounded adaptationと整理。後続、未実装 | R2のレビュー後にstrategyのprobation/active/retired、版とrollback、declared優先を実装。数値更新は決定論。4週間相当の合成入力で急変/証拠不足を検証し、実データ評価は別の承認済み段階にする |
@@ -131,7 +145,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-IN-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L250) | partial | R1 | Discordの編集・削除/tombstone経路はある。新しいderived記憶までの削除・失効伝播は未検証。 |
 | [FR-IN-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L251) | reuse_candidate | R0 | 既存の許可済み読み取り専用collectorを再利用する。新たな収集範囲・Bot権限は追加しない。現在の稼働は別途確認する。 |
 | [FR-IN-05](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L252) | partial | R1 | 添付・embedメタデータはある。URL専用抽出と新しい記憶への引用形を確認する。本文の自動取得は有効にしない。 |
-| [FR-IN-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L253) | partial | R1 | allowlist先行とキュー/永続化はあるが、collectorのメモリキューを含むため受信直後の全クラッシュ耐久性を達成済みとしない。 |
+| [FR-IN-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L253) | partial | R1 | allowlist先行とキュー/永続化はあるが、collectorのメモリキューを含むため受信直後の全クラッシュ耐久性を達成済みとしない。PR #3〜#5の送信側再起動安全性を、この受信側要件の達成証明にしない。 |
 | [FR-IN-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L254) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。 |
 | [FR-IN-08](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L255) | reuse_candidate | R0 | 既存LINE署名検証と正規化を再利用する。許可済みowner経路に限定し、LINE全体の収集へ拡張しない。 |
 | [FR-IN-09](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L256) | reuse_candidate | R0 | 既存の許可済み読み取り専用collectorを再利用する。新たな収集範囲・Bot権限は追加しない。現在の稼働は別途確認する。 |
@@ -143,11 +157,11 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-DE-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L267) | unverified_gap | R4 | Attentionの本人向け通知判定はコミュニティ参加の3段triageではない。公開先の必要性を決めてから別途適合性を検証する。 |
 | [FR-AC-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L273) | decision_required | R4 | Knowledge Botは読み取り専用、Interface Botは本人DM専用。guild送信/リアクションを既存Botに追加しない。 |
 | [FR-AC-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L274) | partial | R1 | mention抑止、redaction、grounding等はあるが、元のP1〜P11全体を満たす証明ではない。新しい記憶/行動経路はfail-closedの検証が必要。 |
-| [FR-AC-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L275) | partial | R1 | gatewayの監査/送信予約/重複抑止を再利用する。新たなReflection出力との相関、送信結果不明時の扱いをテストする。全媒体でexactly-onceとは表現しない。 |
+| [FR-AC-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L275) | partial | R1 | PR #3〜#5で既存owner配送の固定intent・結果記録・UNKNOWN保留・プロセス境界/並行claim/receipt失敗を合成検証済み。Reflectionとの全経路相関、手動reconcile、実機評価は残る。SENTはprovider受理のみ。SDK内部retryを含む全媒体exactly-onceは保証しない。 |
 | [FR-AC-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L276) | decision_required | R4 | 元SRSのDangerousは禁止のまま。Hermesの隔離coding worker権限をコミュニティ/Reflectionへ継承させない。一般的な承認キューと同一視しない。 |
-| [FR-AC-05](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L277) | partial | R1 | gatewayの監査/送信予約/重複抑止を再利用する。新たなReflection出力との相関、送信結果不明時の扱いをテストする。全媒体でexactly-onceとは表現しない。 |
+| [FR-AC-05](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L277) | partial | R1 | PR #3〜#5で既存owner配送の固定intent・結果記録・UNKNOWN保留・プロセス境界/並行claim/receipt失敗を合成検証済み。Reflectionとの全経路相関、手動reconcile、実機評価は残る。SENTはprovider受理のみ。SDK内部retryを含む全媒体exactly-onceは保証しない。 |
 | [FR-AC-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L278) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。 |
-| [FR-AC-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L279) | partial | R0 | 本人向けLINE返信/pushは既存経路を使用する。任意の第三者宛送信は対応済みに含めない。 |
+| [FR-AC-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L279) | partial | R0 | 本人向けLINEは固定batch/modeを保存し、reply開始後の不明結果から自動pushしない経路を合成検証済み。到達/既読追跡・現在の実機評価は未実装/未確認。任意の第三者宛送信は対応済みに含めない。 |
 | [FR-AC-08](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L280) | decision_required | R4 | 元SRSのDM原則禁止とHermesの本人DM主経路は用途が異なる。既存owner通信は維持し、第三者DMは新たに許可しない。 |
 | [FR-ME-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L286) | partial | R1 | 原情報の保存はあるが全記憶の無期限保存を新たに保証しない。保持期間、削除要求、派生物の失効を同時に定義する。 |
 | [FR-ME-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L287) | unverified_gap | R1 | 既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。 |
@@ -183,7 +197,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-OB-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L337) | unverified_gap | R2 | AttentionのLINE通数予算はLLM/API金額の台帳ではない。モデル/用途別tokens・費用と日次/月次上限、失敗時の縮退を別に検証する。 |
 | [FR-OB-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L338) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。 |
 | [NFR-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L346) | partial | R0 | 配備/隔離のコードと過去記録はあるが、現在の再起動5分以内、日次バックアップからの全状態復元は未測定。本番を確認だけのために再起動しない。 |
-| [NFR-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L347) | partial | R1 | 受信から耐久化までの障害窓を明示し、合成データでcrash/replayを試験する。本番DBを強制killしない。 |
+| [NFR-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L347) | partial | R1 | 受信から耐久化までの障害窓を明示し、合成データでcrash/replayを試験する。本番DBを強制killしない。送信側の固定batch/UNKNOWN保留を追加したが、collectorを含む受信直後の全耐久性は未証明。 |
 | [NFR-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L348) | unverified_gap | R2 | median 10秒/p95 30秒は新しい経路で未測定。既存過去記録も達成証明にはならない。負荷/モデル別に測る。 |
 | [NFR-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L349) | unverified_gap | R2 | 旧3,000〜5,000円/月はAgentricAI単体の設計上限。Hermesとの合算範囲と実単価を確認し、追加支出の許可としない。 |
 | [NFR-05](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L350) | partial | R1 | adapter分離とrenderer選択経路はある。新媒体がadapterだけで済む保証、全Hermesで2プロバイダ疎通は未検証。 |
@@ -197,23 +211,25 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 
 ## 7. 実コードへの参照
 
-- **E1**: [collector.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/collector.py), [dk_normalize.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/dk_normalize.py), [dk_store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/dk_store.py)
-- **E2**: [indexer.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/app/indexer.py), [discord_mcp.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/discord-knowledge/mcp/discord_mcp.py)
-- **E3**: [gw_discord.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_discord.py), [gw_canonical.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_canonical.py), [gw_service.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_service.py)
-- **E4**: [gw_proactive.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_proactive.py), [gw_store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_store.py), [gw_format.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_format.py)
-- **E5**: [att_engine.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_engine.py), [att_policy.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_policy.py), [att_budget.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_budget.py), [att_store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/attention/app/att_store.py)
-- **E6**: [models.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/models.py), [reconcile.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/reconcile.py), [store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/commitments/store.py)
-- **E7**: [planner.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/planner.py), [renderer.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/renderer.py), [brief_service.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/planning/brief_service.py), [test_renderer_injection.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/tests-planning/test_renderer_injection.py), [test_privacy_guard.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/tests-planning/test_privacy_guard.py)
-- **E8**: [README.md](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/worker/README.md), [17-phase-h32s-antigravity-security-closeout.md](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/docs/17-phase-h32s-antigravity-security-closeout.md)
-- **E9**: [gw_line.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_line.py), [gw_canonical.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_canonical.py), [gw_service.py](https://github.com/MasterMk2/hermes-cos-infra/blob/640d9db1044a68612e2b9fdf0204a68ebef9ea0f/src/channel-gateway/app/gw_service.py)
+- **E1**: [collector.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/collector.py), [dk_normalize.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/dk_normalize.py), [dk_store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/dk_store.py)
+- **E2**: [indexer.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/app/indexer.py), [discord_mcp.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/discord-knowledge/mcp/discord_mcp.py)
+- **E3**: [gw_discord.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_discord.py), [gw_canonical.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_canonical.py), [gw_service.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_service.py)
+- **E4**: [gw_proactive.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_proactive.py), [gw_store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_store.py), [gw_format.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_format.py)
+- **E5**: [att_engine.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_engine.py), [att_policy.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_policy.py), [att_budget.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_budget.py), [att_store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/attention/app/att_store.py)
+- **E6**: [models.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/commitments/models.py), [reconcile.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/commitments/reconcile.py), [store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/commitments/store.py)
+- **E7**: [planner.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/planning/planner.py), [renderer.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/planning/renderer.py), [brief_service.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/planning/brief_service.py), [test_renderer_injection.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-planning/test_renderer_injection.py), [test_privacy_guard.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-planning/test_privacy_guard.py)
+- **E8**: [README.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/worker/README.md), [17-phase-h32s-antigravity-security-closeout.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/17-phase-h32s-antigravity-security-closeout.md)
+- **E9**: [gw_line.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_line.py), [gw_canonical.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_canonical.py), [gw_service.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_service.py)
+- **E10**: [RESTART-SAFETY.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/RESTART-SAFETY.md), [REPLY-RESTART-SAFETY.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/REPLY-RESTART-SAFETY.md), [LINE-RESTART-SAFETY.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/LINE-RESTART-SAFETY.md), [test_delivery.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-gateway/test_delivery.py), [test_line_recovery.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-gateway/test_line_recovery.py), [test_brief_delivery.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-planning/test_brief_delivery.py)
+- **E11**: [OFFLINE-TESTS.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/OFFLINE-TESTS.md), [offline-tests.yml](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/.github/workflows/offline-tests.yml), [37247078869](https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869)
 
-## 8. 今回の検証範囲
+## 8. 文書統合の検証範囲
 
 - 原要件のFR/NFR全IDについて重複なし・欠落なしを機械的に照合
 - 対応表のsource行、参照するファイルと固定revision、相対リンクを検査
 - AgentricAIの既存import smoke、ruff check、ruff format --checkを実行
 - 変更対象は文書と要件データのみ。src、依存、サービス設定、workflowは変更しない
-- 全Hermes回帰、Pi、LLM API、実Discord/LINE、権限、現在の自然配信は今回未検証
+- 現行コードの3-suite offline CIは上記SHAの証拠。今回の文書headでも既存CIを実行する。全Hermes回帰、Pi、LLM API、実Discord/LINE、権限、現在の自然配信は未検証
 
 次の実装判断はR0のコード回収後に行う。コミュニティ参加を残すかの判断はR4まで待てる。
 それまで安全に進められるのは出典/範囲契約とoffline評価の設計であり、公開範囲の拡張ではない。

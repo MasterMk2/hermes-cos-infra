@@ -193,10 +193,11 @@ class TestTextMeasurement(unittest.TestCase):
         self.assertEqual(line_length(""), 0)
         self.assertEqual(line_length(None), 0)
 
-    def test_build_text_messages_caps_at_five(self):
-        msgs = build_text_messages([f"chunk{i}" for i in range(9)])
+    def test_build_text_messages_rejects_overflow_instead_of_silent_slice(self):
+        with self.assertRaises(ValueError):
+            build_text_messages([f"chunk{i}" for i in range(9)])
+        msgs = build_text_messages([f"chunk{i}" for i in range(5)])
         self.assertEqual(len(msgs), MAX_MESSAGES_PER_REQUEST)
-        self.assertTrue(all(m["type"] == "text" for m in msgs))
 
 
 if __name__ == "__main__":
