@@ -174,7 +174,7 @@
       "status": "deferred",
       "track": "D1",
       "evidence": [],
-      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。"
+      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、提供元のAPI文書、費用、対象範囲を確認するまで追加しない。"
     },
     {
       "id": "FR-IN-08",
@@ -386,7 +386,7 @@
       "status": "deferred",
       "track": "D1",
       "evidence": [],
-      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。"
+      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、提供元のAPI文書、費用、対象範囲を確認するまで追加しない。"
     },
     {
       "id": "FR-AC-07",
@@ -878,7 +878,7 @@
       "status": "deferred",
       "track": "D1",
       "evidence": [],
-      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。"
+      "remaining": "X/公開SNSまたはOpenTelemetryは後続候補。利用価値、提供元のAPI文書、費用、対象範囲を確認するまで追加しない。"
     },
     {
       "id": "NFR-01",

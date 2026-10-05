@@ -96,7 +96,7 @@ AgentricAI のUC-02/UC-03（会話への参加/リアクション）を実現す
 - 旧月額3,000〜5,000円はAgentricAI単体の設計制約として引き継ぐ。Hermesとの合算範囲、
   契約/モデルの実単価は未確定。LINE通数予算をLLM費用上限の実装済み証拠にしない
 - 元要件のX/LINE/Discord仕様・料金の古い記載は現在値として採用しない。
-  使う前に公式仕様/実契約を再確認する。今回API仕様や権限は変更しない
+  使う前に提供元のAPI文書/実契約を再確認する。今回API仕様や権限は変更しない
 
 ## 4. 一本化したロードマップ
 
@@ -110,7 +110,7 @@ R番号はこの統合の作業順を指す。Hermesの既存Phase番号を振�
 | R2 | 読み取り入力から振り返り候補と成長ログ。未実装 | R1の検証済みデータだけで、日本語の事実/解釈/変更候補/根拠/保留を区別する。まずoffline・無送信・無自動適用。相関ID、用途別費用、上限超過時縮退をテスト |
 | R3 | bounded adaptationと整理。後続、未実装 | R2のレビュー後にstrategyのprobation/active/retired、版とrollback、declared優先を実装。数値更新は決定論。4週間相当の合成入力で急変/証拠不足を検証し、実データ評価は別の承認済み段階にする |
 | R4 | コミュニティ参加の要否判断。保留 | 個人秘書のみか、同一製品内に分離したcommunity用途も残すかを決める。後者は対象/周知/自律レベル/停止/予算/安全境界の設計承認が先。第三のBotを今作らない |
-| D1 | X、OpenTelemetry、高度UI等。延期 | 価値、費用、公式仕様を再確認した個別要件があるときのみ。原要件のPhase 2/3をそのまま開始しない |
+| D1 | X、OpenTelemetry、高度UI等。延期 | 価値、費用、提供元のAPI文書を再確認した個別要件があるときのみ。原要件のPhase 2/3をそのまま開始しない |
 
 元W1/W2の汎用基盤・通信を重複実装する代わりにR0で照合し、W3をR1、W4/W5をR2/R3、
 W6/W7の安全/監査/費用を各段の合格条件へ移す。W8以降のコミュニティ投入はR4で保留。
@@ -146,7 +146,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-IN-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L251) | reuse_candidate | R0 | 既存の許可済み読み取り専用collectorを再利用する。新たな収集範囲・Bot権限は追加しない。現在の稼働は別途確認する。 |
 | [FR-IN-05](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L252) | partial | R1 | 添付・embedメタデータはある。URL専用抽出と新しい記憶への引用形を確認する。本文の自動取得は有効にしない。 |
 | [FR-IN-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L253) | partial | R1 | allowlist先行とキュー/永続化はあるが、collectorのメモリキューを含むため受信直後の全クラッシュ耐久性を達成済みとしない。PR #3〜#5の送信側再起動安全性を、この受信側要件の達成証明にしない。 |
-| [FR-IN-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L254) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。 |
+| [FR-IN-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L254) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、提供元のAPI文書、費用、対象範囲を確認するまで追加しない。 |
 | [FR-IN-08](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L255) | reuse_candidate | R0 | 既存LINE署名検証と正規化を再利用する。許可済みowner経路に限定し、LINE全体の収集へ拡張しない。 |
 | [FR-IN-09](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L256) | reuse_candidate | R0 | 既存の許可済み読み取り専用collectorを再利用する。新たな収集範囲・Bot権限は追加しない。現在の稼働は別途確認する。 |
 | [FR-DE-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L262) | unverified_gap | R4 | Attentionの本人向け通知判定はコミュニティ参加の3段triageではない。公開先の必要性を決めてから別途適合性を検証する。 |
@@ -160,7 +160,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-AC-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L275) | partial | R1 | PR #3〜#5で既存owner配送の固定intent・結果記録・UNKNOWN保留・プロセス境界/並行claim/receipt失敗を合成検証済み。Reflectionとの全経路相関、手動reconcile、実機評価は残る。SENTはprovider受理のみ。SDK内部retryを含む全媒体exactly-onceは保証しない。 |
 | [FR-AC-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L276) | decision_required | R4 | 元SRSのDangerousは禁止のまま。Hermesの隔離coding worker権限をコミュニティ/Reflectionへ継承させない。一般的な承認キューと同一視しない。 |
 | [FR-AC-05](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L277) | partial | R1 | PR #3〜#5で既存owner配送の固定intent・結果記録・UNKNOWN保留・プロセス境界/並行claim/receipt失敗を合成検証済み。Reflectionとの全経路相関、手動reconcile、実機評価は残る。SENTはprovider受理のみ。SDK内部retryを含む全媒体exactly-onceは保証しない。 |
-| [FR-AC-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L278) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。 |
+| [FR-AC-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L278) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、提供元のAPI文書、費用、対象範囲を確認するまで追加しない。 |
 | [FR-AC-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L279) | partial | R0 | 本人向けLINEは固定batch/modeを保存し、reply開始後の不明結果から自動pushしない経路を合成検証済み。到達/既読追跡・現在の実機評価は未実装/未確認。任意の第三者宛送信は対応済みに含めない。 |
 | [FR-AC-08](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L280) | decision_required | R4 | 元SRSのDM原則禁止とHermesの本人DM主経路は用途が異なる。既存owner通信は維持し、第三者DMは新たに許可しない。 |
 | [FR-ME-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L286) | partial | R1 | 原情報の保存はあるが全記憶の無期限保存を新たに保証しない。保持期間、削除要求、派生物の失効を同時に定義する。 |
@@ -195,7 +195,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-OB-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L335) | partial | R2 | 既存request/source/evidenceと監査を再利用する。想起→判断→振り返り→提案までの全経路相関は未証明。本文/個人情報をログへ複製しない。 |
 | [FR-OB-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L336) | partial | R2 | 既存request/source/evidenceと監査を再利用する。想起→判断→振り返り→提案までの全経路相関は未証明。本文/個人情報をログへ複製しない。 |
 | [FR-OB-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L337) | unverified_gap | R2 | AttentionのLINE通数予算はLLM/API金額の台帳ではない。モデル/用途別tokens・費用と日次/月次上限、失敗時の縮退を別に検証する。 |
-| [FR-OB-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L338) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、公式仕様、費用、対象範囲を確認するまで追加しない。 |
+| [FR-OB-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L338) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、提供元のAPI文書、費用、対象範囲を確認するまで追加しない。 |
 | [NFR-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L346) | partial | R0 | 配備/隔離のコードと過去記録はあるが、現在の再起動5分以内、日次バックアップからの全状態復元は未測定。本番を確認だけのために再起動しない。 |
 | [NFR-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L347) | partial | R1 | 受信から耐久化までの障害窓を明示し、合成データでcrash/replayを試験する。本番DBを強制killしない。送信側の固定batch/UNKNOWN保留を追加したが、collectorを含む受信直後の全耐久性は未証明。 |
 | [NFR-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L348) | unverified_gap | R2 | median 10秒/p95 30秒は新しい経路で未測定。既存過去記録も達成証明にはならない。負荷/モデル別に測る。 |
