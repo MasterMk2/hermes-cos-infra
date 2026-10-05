@@ -395,3 +395,15 @@ asyncio.run(gw.deliver_line(row,msg,'answer'))
     current=recover(restarted,row)
     run(restarted.process(current))
     assert current['state']=='UNKNOWN' and restarted.session.calls==[]
+
+
+@pytest.mark.parametrize('soft,hard',[(4000,'20000'),('4000',20000),('4000','20000')])
+def test_quoted_yaml_response_limits_preserve_numeric_behavior(tmp_path,soft,hard):
+    # parse_config intentionally preserves quoted YAML scalars; both limits
+    # used to be normalized by the LINE call site before formatting.
+    gw,row,msg=gateway(tmp_path,[200],age=90,config={'limits':{'response_soft_limit_chars':soft,'response_hard_limit_chars':hard}})
+    assert run(gw.deliver_line(row,msg,'あ'*21000))[0]
+    saved=outbound(gw,row)
+    assert 1<=len(saved)<=5 and all(line_length(r['body'])<=5000 for r in saved)
+    assert [r['body'] for r in saved]==[m['text'] for m in gw.session.calls[0]['body']['messages']]
+    assert '結果が長いため' in saved[-1]['body']

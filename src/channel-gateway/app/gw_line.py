@@ -243,6 +243,7 @@ def prepare_line_outbound(text, *, limit, max_chunks, soft_limit, hard_limit) ->
     """Redact and bound a LINE batch by UTF-16 units, with visible truncation."""
     from gw_format import redact, summarize_if_oversized
     limit, maximum = min(int(limit), MAX_TEXT_UNITS), min(int(max_chunks), MAX_MESSAGES_PER_REQUEST)
+    soft_limit, hard_limit = int(soft_limit), int(hard_limit)
     if limit <= 0 or maximum <= 0:
         return []
     body, _ = summarize_if_oversized(text, soft_limit=soft_limit, hard_limit=hard_limit)
