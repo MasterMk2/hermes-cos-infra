@@ -1,3 +1,42 @@
+# Hermes Resume — 実装・運用記録の照合
+
+履歴中の個人識別子・固有の接続情報はプレースホルダに置換した。`<...>` は実値ではなく、過去の検証結果を現在の稼働保証として扱わない。
+
+初回照合日: 2026-10-04。現行コード追記: 2026-10-05
+
+## 現行コードと検証（2026-10-05）
+
+GitHub の実装基準は [`0445c7c8`](https://github.com/MasterMk2/hermes-cos-infra/commit/0445c7c8b7da7b52553eccf3f156b0882e6a8438)。
+以下はコードの main 反映と合成テストの結果であり、現在の Pi への配備・実配信は未確認。
+
+- [PR #3](https://github.com/MasterMk2/hermes-cos-infra/pull/3): proactive 通知、Attention、Planning の送信結果不明を永続化し、自動再送・誤成功を抑止。既存の状態管理を拡張した
+- [PR #4](https://github.com/MasterMk2/hermes-cos-infra/pull/4): 通常 Discord 返信の本文・宛先・chunk を固定し、確認済み先頭部分と確実な未送信 tail のみを継続。UNKNOWN があれば返信全体を保留。Morning Brief の予約中・本文不一致を配信成功にしない
+- [PR #5](https://github.com/MasterMk2/hermes-cos-infra/pull/5): 通常 LINE の固定 batch（最大5件、UTF-16上限）と reply/push mode を保存。reply 開始後に結果不明なら自動 push しない。409 は有効期間内の固定 push intent と provider 受理IDが確認できる場合だけ受理として扱う
+- [main の offline CI](https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869): Ubuntu 24.04、Python 3.12.14 / 3.13.15 の各環境で Gateway 344 + Attention 158 + Planning 607 = **1,109 passed**、別に **1,188 subtests passed / 3 skipped**。3件は外部 private denylist がなく未検証。全サービスの回帰・実機・実サービスの検証ではない
+- 送信開始後の曖昧な失敗やクラッシュ窓は `UNKNOWN` のまま保持する。手動 reconcile / UI は未実装。`SENT` は provider の受理を表し、端末到達・既読を保証しない。SDK 内部 retry を含む exactly-once は保証しない
+- 旧版へ戻す前に状態DB互換を確認する。新しい UNKNOWN を旧版が再送可能へ読み替える rollback は安全ではない。実機DBの変更・移行は今回行っていない
+
+再現方法と制約は [OFFLINE-TESTS.md](docs/OFFLINE-TESTS.md)、
+[proactive](docs/RESTART-SAFETY.md)、[Discord](docs/REPLY-RESTART-SAFETY.md)、
+[LINE](docs/LINE-RESTART-SAFETY.md) を参照。
+既存 events / commitments / jobs / Attention / Planning は存在する。
+出典・時刻・確信度・訂正を統一した記憶、Reflection、成長ログの完成証明にはならない。
+9月10日記録の後続ローカル変更回収、自然配信、I/O・起動順序の運用残件は引き続き未確認。
+
+## 初回照合時の状態（2026-10-04）
+
+- GitHub `main` の照合基準は `640d9db1044a68612e2b9fdf0204a68ebef9ea0f`（2026-09-08）。I.2 の日次計画・朝ブリーフ実装と、その本番投入で見つかった設定パス・Discord freshness の修正を含む。I.2 を未実装として開始し直さない。
+- [hermes-pi-setup の進捗記録](https://github.com/MasterMk2/hermes-pi-setup/blob/f3b378eb6a39e721ef6e1d585ec7e76e35b313b6/PROGRESS.md) は、9月9日の I.2 完了と担当者判定・広告除外、9月10日のプレミアムCLI経路の本番適用を報告している。これは当時の作業記録であり、現在の Pi 稼働を再検証した結果ではない。
+- 同記録が挙げるローカル main `cf7a647`、`fix/owner-task-routing` の変更、最終レポート `docs/20-phase-i2-daily-planning-morning-brief.md` は、今回参照できる GitHub main の実体と一致しない。後続のローカル実装・配備内容をこのスナップショットから復元・推測しない。
+- 当時の運用残件は、ローカル作業の回収・比較と自然な朝の実配信、I/O 停止の再発、Docker/Bridge 起動順序の観測。I.3 開始、再配備、再起動、push/merge はこの文書からは承認されない。
+- 照合根拠、今回の隔離テスト結果、未確認の境界は [STATUS-RECONCILIATION.md](docs/STATUS-RECONCILIATION.md) を参照する。
+
+## 以下は各フェーズ完了時の履歴
+
+以下の「Next phase」「Execute」、件数、PASS、本番構成はそれぞれの記録時点のもの。現在の開始指示や稼働保証として扱わない。履歴を保つため、当時の記載は残す。
+
+---
+
 # Hermes I.1-S Resume
 
 ## Objective
@@ -8,7 +47,7 @@ Execute Phase I.1-S Production Closeout for Unified Commitments & Agenda Layer (
 
 - A. Synthetic Production Data Cleanup:
   - 4 synthetic commitments (`cmt_e2e_discord_req_b`, `cmt_e2e_gmail_req_b`, `cmt_ambig_1`, `cmt_ambig_2`) and 4 synthetic evidence rows safely purged.
-  - Mock evidence (`gmail:h2_e2e_mock_exam_confirm`) removed from real commitment `cmt_bf343048b742`; `source_count` restored to 1.
+  - Mock evidence (`gmail:h2_e2e_mock_exam_confirm`) removed from real commitment `<COMMITMENT_ID>`; `source_count` restored to 1.
   - Transactional cleanup executed; database integrity verified (`PRAGMA integrity_check: ok`, `PRAGMA foreign_key_check: ok`).
   - Production DB count: commitments 737, evidence 737, history 737, events 656.
   - Backfill idempotency re-run verified: 0 added, 0 duplicates, stable 737 rows.
@@ -76,17 +115,17 @@ Harden the Antigravity runtime isolation and complete security closeout (dedicat
 
 ## Completed: COMPLETED (2026-09-06)
 
-- Dedicated Service Account `hermesantigravity` (UID 994, GID 979, shell `/usr/sbin/nologin`, home `/home/hermesantigravity` 0700):
+- Dedicated Service Account `hermesantigravity` (UID 994, GID 979, shell `/usr/sbin/nologin`, home `<SERVICE_HOME>` 0700):
   - Completely isolated from privileged groups (`docker`, `sudo`, `adm`, `root`).
   - Read access to published Gmail index via `hermesreconcile` group.
-  - Dedicated Google OAuth token in `/home/hermesantigravity/.gemini/antigravity-cli/antigravity-oauth-token` (0600).
+  - Dedicated Google OAuth token in `<SERVICE_HOME>/.gemini/antigravity-cli/antigravity-oauth-token` (0600).
   - Managed under host systemd service `hermes-antigravity.service`.
 - Exact 25 MCP Read-Only Tools Allowlist:
   - Wildcard `mcp(*)` eliminated; replaced by exact 25 entries across GitHub (8), Gmail (4), Calendar (3), Discord (3), LINE (3), Event (4).
   - Explicit deny rules for execution (`command(*)`, `file(*)`, `browser(*)`, `terminal(*)`) and mutations (`mcp(event/event_mark_*)`, etc.).
   - Verified allowed tool execution and denial interception.
 - Bridge Caller Isolation & Authentication:
-  - Bound exclusively to `172.18.0.1:8765` (Docker bridge gateway interface); LAN connections refused.
+  - Bound exclusively to `<DOCKER_BRIDGE_IP>:8765` (Docker bridge gateway interface); LAN connections refused.
   - Internal Bearer token authentication enforced on completions and models endpoints.
   - Sanitized `/health` and `/status` endpoints with zero secret, path, or project leakage.
 - Regression Test Count Discrepancy Resolved (Item D):
@@ -133,7 +172,7 @@ Establish Gemini 3.8 Flash via Google Antigravity consumer quota as the Primary 
   - Failover Test: When Bridge was stopped, Hermes automatically transitioned to Fallback #1 (`z-ai/glm-5.3-flash` via CommandCode), executed GitHub MCP, and returned answer.
   - Recovery Test: When Bridge was restarted, Hermes automatically restored Primary (`gemini-3.8-flash-medium`) and answered greetings normally.
 - Resilience Fallback Chain Active in Production:
-  - Primary: `gemini-3.8-flash-medium` via Antigravity Bridge (`http://172.18.0.1:8765/v1`)
+  - Primary: `gemini-3.8-flash-medium` via Antigravity Bridge (`http://<DOCKER_BRIDGE_IP>:8765/v1`)
   - Fallback #1: `z-ai/glm-5.3-flash` via `commandcode`
   - Fallback #2: `laguna-s-2.1-free` via `opencode-free`
   - Fallback #3: `deepseek-v4-flash-free` via `opencode-free`
