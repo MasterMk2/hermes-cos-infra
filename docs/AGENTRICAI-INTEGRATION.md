@@ -50,7 +50,7 @@ SDK内部retryを含めたexactly-onceは保証せず、再起動やretryで認�
 |---|---|---|
 | Discord取り込み | D.1 allowlist、編集/削除、thread/返信/添付メタデータ | 受信から永続化までの障害窓、derived記憶への削除伝播 |
 | 検索と出典 | Discord FTS5とsource ID、commitment evidence | 6種の記憶、ベクトル検索、observed/derived/declaredの全制約は別 |
-| 通信 | 既存owner専用Discord DM/LINEと重複抑止 | guild発言、リアクション、第三者DMは既存の権限外 |
+| 通信 | 既存Discord DM/LINEのowner限定処理・返信と重複抑止 | guild発言、リアクション、第三者宛返信は既存の権限外。非owner Discord DMの記録・保持は下記参照 |
 | 通知判断 | Attentionの通知ポリシーと抑止、LINE通数予算 | コミュニティ3段triage、0〜5自律レベル、LLM/API金額台帳は別 |
 | 日次出力 | Planningの事実ベースMorning Briefとgrounding | Reflection、strategy更新、関心履歴、成長ログは別 |
 | 安全/監査 | source/request ID、送信先固定、mention抑止、secret redaction、隔離 | 新記憶のscope、遅延注入、削除、提案の版管理までの全経路を検証する |
@@ -63,8 +63,14 @@ SDK内部retryを含めたexactly-onceは保証せず、再起動やretryで認�
 
 ### Discordコミュニティと本人向け秘書は別の公開範囲
 
-`collector.py` は読み取り専用。`gw_discord.py` は owner のDM専用で、guild intentを
-持たず、`AllowedMentions.none()`を使う。`gw_proactive.py` はrecipientを指定できない。
+`collector.py` は読み取り専用。`gw_discord.py` の処理・返信は owner のDMに限定され、
+guild intentを持たず、`AllowedMentions.none()`を使う。`gw_proactive.py` はrecipientを指定できない。
+ただし **非owner DMを保存しない境界ではない**。現行 `_handle` は認可判定の前に
+`record_inbound` を呼び、非owner DMの送信者ID・会話ID・本文もSQLiteへ保存してから、
+queue投入・Hermes処理・返信を拒否する（E12）。既存 `retention.days` は既定14日で、
+maintenanceの `purge_expired` が期限超過の本文/tokenを消すが、重複抑止用のID行は残る。
+実機での設定値・purge実行・第三者データの有無は未確認。第三者記録の最小化、
+IDの保持期間と削除要求への対応はR1の未決契約であり、今回の文書で適切さを承認しない。
 AgentricAI のUC-02/UC-03（会話への参加/リアクション）を実現するためにこれらを緩めない。
 個人秘書を先行させ、コミュニティ参加を残すかはR4の判断事項とする。採用するとしても、
 対象、参加者周知、データ/権限分離、停止方法を別レビューするまで無効のまま。
@@ -106,7 +112,7 @@ R番号はこの統合の作業順を指す。Hermesの既存Phase番号を振�
 | 順 | 作業/状態 | 完了条件と依存 |
 |---|---|---|
 | R0 | 基盤の現状照合。文書統合と送信境界修正はコード反映済み、運用残件は未完了 | 後続ローカルworktree/差分を安全に回収しGitHubと比較。既存Hermes本体の記憶能力も調査。自然な朝の実配信とI/O/起動の証拠を別々に記録 |
-| R1 | 記憶・出典・scope契約。設計/未実装 | 既存source IDを使う最小schema/adapter案。出典なし/失効出典、scope越境、削除伝播、クラッシュ再実行、遅延注入を合成データで検証。保存方式は測定後に判断。R0のコード実体確認に依存 |
+| R1 | 記憶・出典・scope契約。設計/未実装 | 既存source IDを使う最小schema/adapter案。出典なし/失効出典、scope越境、削除伝播、クラッシュ再実行、遅延注入を合成データで検証。既存非owner DM記録の最小化・ID保持も決める。保存方式は測定後に判断。R0のコード実体確認に依存 |
 | R2 | 読み取り入力から振り返り候補と成長ログ。未実装 | R1の検証済みデータだけで、日本語の事実/解釈/変更候補/根拠/保留を区別する。まずoffline・無送信・無自動適用。相関ID、用途別費用、上限超過時縮退をテスト |
 | R3 | bounded adaptationと整理。後続、未実装 | R2のレビュー後にstrategyのprobation/active/retired、版とrollback、declared優先を実装。数値更新は決定論。4週間相当の合成入力で急変/証拠不足を検証し、実データ評価は別の承認済み段階にする |
 | R4 | コミュニティ参加の要否判断。保留 | 個人秘書のみか、同一製品内に分離したcommunity用途も残すかを決める。後者は対象/周知/自律レベル/停止/予算/安全境界の設計承認が先。第三のBotを今作らない |
@@ -163,7 +169,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-AC-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L278) | deferred | D1 | X/公開SNSまたはOpenTelemetryは後続候補。利用価値、提供元のAPI文書、費用、対象範囲を確認するまで追加しない。 |
 | [FR-AC-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L279) | partial | R0 | 本人向けLINEは固定batch/modeを保存し、reply開始後の不明結果から自動pushしない経路を合成検証済み。到達/既読追跡・現在の実機評価は未実装/未確認。任意の第三者宛送信は対応済みに含めない。 |
 | [FR-AC-08](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L280) | decision_required | R4 | 元SRSのDM原則禁止とHermesの本人DM主経路は用途が異なる。既存owner通信は維持し、第三者DMは新たに許可しない。 |
-| [FR-ME-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L286) | partial | R1 | 原情報の保存はあるが全記憶の無期限保存を新たに保証しない。保持期間、削除要求、派生物の失効を同時に定義する。 |
+| [FR-ME-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L286) | partial | R1 | 原情報の保存はあるが全記憶の無期限保存を新たに保証しない。保持期間、削除要求、派生物の失効を同時に定義する。Discord非owner DMも既存Gatewayに本文/IDを保存する。本文の期限削除後もID行が残るため、第三者記録の最小化と保持/削除契約は未決。 |
 | [FR-ME-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L287) | unverified_gap | R1 | 既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。 |
 | [FR-ME-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L288) | unverified_gap | R3 | 人物関係・自己記憶・strategyの同等実装は今回の2リポジトリで確認できない。Hermes本体/後続ローカル変更の調査後、必要な差分だけを設計する。 |
 | [FR-ME-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L289) | unverified_gap | R1 | 既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。 |
@@ -173,7 +179,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [FR-ME-08](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L293) | partial | R1 | Discord検索はSQLite FTS5。意味ベクトル検索+条件検索の同等実装とは言えない。検索品質を測ってから保存先/方式を決める。 |
 | [FR-ME-09](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L294) | unverified_gap | R1 | 既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。 |
 | [FR-ME-10](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L295) | unverified_gap | R1 | 既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。 |
-| [FR-ME-11](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L296) | partial | R1 | owner通信と読み取り索引の分離はある。新しいderived記憶のpublic/guild/channel/dm/operator制約を想起と出力の両方で保証する必要がある。 |
+| [FR-ME-11](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L296) | partial | R1 | owner通信と読み取り索引の分離はある。新しいderived記憶のpublic/guild/channel/dm/operator制約を想起と出力の両方で保証する必要がある。owner限定は処理/返信の境界であり、非owner DMを保存しない保証ではない。 |
 | [FR-ME-12](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L297) | unverified_gap | R1 | 既存source/evidence参照を出発点とし、observed/derived/declared、出典制約、訂正・削除伝播、想起監査を新しい契約として検証する。commitmentを汎用記憶へ読み替えない。 |
 | [FR-IS-01](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L303) | unverified_gap | R3 | 関心/関係性の決定論的bounded update、最小証拠、減衰、履歴、declared不変性は未証明。数値から権限を変えず、合成データで先に評価する。 |
 | [FR-IS-02](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L304) | unverified_gap | R3 | 関心/関係性の決定論的bounded update、最小証拠、減衰、履歴、declared不変性は未証明。数値から権限を変えず、合成データで先に評価する。 |
@@ -201,7 +207,7 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 | [NFR-03](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L348) | unverified_gap | R2 | median 10秒/p95 30秒は新しい経路で未測定。既存過去記録も達成証明にはならない。負荷/モデル別に測る。 |
 | [NFR-04](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L349) | unverified_gap | R2 | 旧3,000〜5,000円/月はAgentricAI単体の設計上限。Hermesとの合算範囲と実単価を確認し、追加支出の許可としない。 |
 | [NFR-05](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L350) | partial | R1 | adapter分離とrenderer選択経路はある。新媒体がadapterだけで済む保証、全Hermesで2プロバイダ疎通は未検証。 |
-| [NFR-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L351) | partial | R1 | adapter分離とrenderer選択経路はある。新媒体がadapterだけで済む保証、全Hermesで2プロバイダ疎通は未検証。 |
+| [NFR-06](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L351) | partial | R1 | BridgeのYAML/環境変数でmodel/binary等を選択するコードと、既存provider fallbackの過去記録がある。汎用provider解決はこのsnapshot外のHermes本体に依存し、資格情報・API/MCP互換性を含めた2プロバイダの設定のみでの切替/復帰は今回未再現。媒体adapter交換とは区別する。 |
 | [NFR-07](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L352) | decision_required | R1 | PostgreSQL+pgvector/Alembic/1DBという旧構成を既存SQLite・権限分離へ強制しない。必要な差分と運用負担をADRで比較して決める。 |
 | [NFR-08](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L353) | partial | R2 | request/source/evidenceの既存監査から新しい想起・振り返りまで追跡できるかをUC-14で検証する。 |
 | [NFR-09](https://github.com/MasterMk2/AgentricAI/blob/64a6e1aa7449f8f571b9e60baa2a7eb714c86985/docs/要件定義.md#L354) | partial | R1 | 既存の防御/テストを維持し、新しい記憶経由の遅延注入とscope越境を含むT1〜T11を追加する。既存テストの存在だけで統合合格としない。 |
@@ -222,6 +228,16 @@ reuse_candidateも「全要件達成」ではなく、既存経路を確認し�
 - **E9**: [gw_line.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_line.py), [gw_canonical.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_canonical.py), [gw_service.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_service.py)
 - **E10**: [RESTART-SAFETY.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/RESTART-SAFETY.md), [REPLY-RESTART-SAFETY.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/REPLY-RESTART-SAFETY.md), [LINE-RESTART-SAFETY.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/LINE-RESTART-SAFETY.md), [test_delivery.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-gateway/test_delivery.py), [test_line_recovery.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-gateway/test_line_recovery.py), [test_brief_delivery.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-planning/test_brief_delivery.py)
 - **E11**: [OFFLINE-TESTS.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/OFFLINE-TESTS.md), [offline-tests.yml](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/.github/workflows/offline-tests.yml), [37247078869](https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869)
+- **E12**: [gw_discord.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_discord.py), [gw_store.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_store.py), [gw_config.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_config.py)
+- **E13**: [bridge_config.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/antigravity-bridge/app/bridge_config.py), [16-phase-h32-constrained-antigravity-backend.md](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/16-phase-h32-constrained-antigravity-backend.md), [test_bridge_config.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-antigravity/test_bridge_config.py), [test_model_resilience.py](https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-github/test_model_resilience.py)
+
+### LLM provider設定と通信adapterを分ける
+
+NFR-06の根拠はE13。`bridge_config.load_config` はYAML/環境変数からmodel・binary等を選ぶ。
+H.3.2文書のfallback成功は当時の実機記録。`test_model_resilience.py` はsnapshot外の
+`agent` / `hermes_cli` をimportし、今回の3-suite CIの対象でもない。したがって
+現行2プロバイダの設定のみでの差替え・復帰や、資格情報/API/MCP互換性を検証済みとはしない。
+NFR-05の媒体adapter分離とは別に、既存Hermes本体の対応実体と切替契約を確認する。
 
 ## 8. 文書統合の検証範囲
 

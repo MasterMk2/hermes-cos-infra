@@ -73,6 +73,17 @@
       "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/OFFLINE-TESTS.md",
       "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/.github/workflows/offline-tests.yml",
       "https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869"
+    ],
+    "E12": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_discord.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_store.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/channel-gateway/app/gw_config.py"
+    ],
+    "E13": [
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/src/antigravity-bridge/app/bridge_config.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/docs/16-phase-h32-constrained-antigravity-backend.md",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-antigravity/test_bridge_config.py",
+      "https://github.com/MasterMk2/hermes-cos-infra/blob/0445c7c8b7da7b52553eccf3f156b0882e6a8438/tests-github/test_model_resilience.py"
     ]
   },
   "requirements": [
@@ -430,9 +441,10 @@
       "track": "R1",
       "evidence": [
         "E1",
-        "E4"
+        "E4",
+        "E12"
       ],
-      "remaining": "原情報の保存はあるが全記憶の無期限保存を新たに保証しない。保持期間、削除要求、派生物の失効を同時に定義する。"
+      "remaining": "原情報の保存はあるが全記憶の無期限保存を新たに保証しない。保持期間、削除要求、派生物の失効を同時に定義する。Discord非owner DMも既存Gatewayに本文/IDを保存する。本文の期限削除後もID行が残るため、第三者記録の最小化と保持/削除契約は未決。"
     },
     {
       "id": "FR-ME-02",
@@ -581,9 +593,10 @@
         "E1",
         "E3",
         "E4",
-        "E8"
+        "E8",
+        "E12"
       ],
-      "remaining": "owner通信と読み取り索引の分離はある。新しいderived記憶のpublic/guild/channel/dm/operator制約を想起と出力の両方で保証する必要がある。"
+      "remaining": "owner通信と読み取り索引の分離はある。新しいderived記憶のpublic/guild/channel/dm/operator制約を想起と出力の両方で保証する必要がある。owner限定は処理/返信の境界であり、非owner DMを保存しない保証ではない。"
     },
     {
       "id": "FR-ME-12",
@@ -963,11 +976,9 @@
       "status": "partial",
       "track": "R1",
       "evidence": [
-        "E3",
-        "E7",
-        "E9"
+        "E13"
       ],
-      "remaining": "adapter分離とrenderer選択経路はある。新媒体がadapterだけで済む保証、全Hermesで2プロバイダ疎通は未検証。"
+      "remaining": "BridgeのYAML/環境変数でmodel/binary等を選択するコードと、既存provider fallbackの過去記録がある。汎用provider解決はこのsnapshot外のHermes本体に依存し、資格情報・API/MCP互換性を含めた2プロバイダの設定のみでの切替/復帰は今回未再現。媒体adapter交換とは区別する。"
     },
     {
       "id": "NFR-07",
