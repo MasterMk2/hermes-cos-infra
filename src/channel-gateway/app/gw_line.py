@@ -34,8 +34,8 @@ SIGNATURE_HEADER = "x-line-signature"
 # "Reply tokens must be used within one minute after receiving the webhook."
 # The same page warns the limit "is subject to change without notice… don't
 # rely on the time limit for implementation", so this is a scheduling hint for
-# choosing reply-vs-push, never a correctness assumption: a reply that loses
-# the race fails with 400 and the caller falls back.
+# choosing the initial method, never evidence that a failed reply is unsent.
+# Once a reply starts, an invalid token does not authorize a push fallback.
 REPLY_TOKEN_TTL_SECONDS = 60
 
 # A redelivered webhook's token is usable for a minute from the REDELIVERY,
@@ -49,11 +49,8 @@ REPLY_TOKEN_ABSOLUTE_CEILING_SECONDS = 20 * 60
 # margin decides where the free/metered line falls, and the answers cluster
 # right on it, so it is set from that measurement rather than by feel.
 #
-# 8 seconds, not the 15 first written here: a reply that loses the race fails
-# with 400 and the caller immediately pushes instead, so an optimistic attempt
-# costs one wasted request and a few hundred milliseconds, while a pessimistic
-# one costs a push credit out of a monthly 200. When the downside is that
-# asymmetric, try the free path.
+# Keep the existing scheduling margin. It is a preference for the first
+# method, not permission to switch to a metered push after uncertain reply.
 REPLY_TOKEN_SAFETY_MARGIN_SECONDS = 8
 
 # "Max character limit: 5000" — but counted in UTF-16 code units, so an emoji
@@ -205,9 +202,8 @@ def reply_still_viable(received_at: str, *, now=None,
                        margin: int = REPLY_TOKEN_SAFETY_MARGIN_SECONDS) -> bool:
     """Whether a reply token is worth spending.
 
-    A reply that arrives after the token expires is rejected with 400 and the
-    answer is lost unless a push follows — and push is metered, so the
-    decision is made with a margin, before the send, rather than discovered.
+    This is a scheduling hint before the first send. Expiration and prior
+    use cannot be distinguished by a later invalid-token response.
     """
     now = now or datetime.now(timezone.utc)
     return now < (reply_token_deadline(received_at) - timedelta(seconds=margin))
@@ -222,12 +218,58 @@ def choose_delivery_mode(message, *, now=None) -> str:
     """
     if not getattr(message, "reply_token", None):
         return "push"
+    now = now or datetime.now(timezone.utc)
+    try:
+        event_at = datetime.fromisoformat(message.timestamp)
+        if event_at.tzinfo is None:
+            event_at = event_at.replace(tzinfo=timezone.utc)
+        if not 0 <= (now - event_at).total_seconds() < REPLY_TOKEN_ABSOLUTE_CEILING_SECONDS:
+            return "push"
+    except (AttributeError, TypeError, ValueError):
+        return "push"  # missing event age is not proof the token remains usable
     return "reply" if reply_still_viable(message.received_at, now=now) else "push"
 
 
 def build_text_messages(chunks) -> list:
-    """LINE message objects for a list of already-chunked strings."""
-    return [{"type": "text", "text": c} for c in chunks][:MAX_MESSAGES_PER_REQUEST]
+    """Validate the exact frozen batch; never silently drop a sixth message."""
+    if not 1 <= len(chunks) <= MAX_MESSAGES_PER_REQUEST:
+        raise ValueError("invalid LINE batch count")
+    if any(not c or line_length(c) > MAX_TEXT_UNITS for c in chunks):
+        raise ValueError("invalid LINE message length")
+    return [{"type": "text", "text": c} for c in chunks]
+
+
+def prepare_line_outbound(text, *, limit, max_chunks, soft_limit, hard_limit) -> list:
+    """Redact and bound a LINE batch by UTF-16 units, with visible truncation."""
+    from gw_format import redact, summarize_if_oversized
+    limit, maximum = min(int(limit), MAX_TEXT_UNITS), min(int(max_chunks), MAX_MESSAGES_PER_REQUEST)
+    soft_limit, hard_limit = int(soft_limit), int(hard_limit)
+    if limit <= 0 or maximum <= 0:
+        return []
+    body, _ = summarize_if_oversized(text, soft_limit=soft_limit, hard_limit=hard_limit)
+    body = redact(body)
+    if not body:
+        return []
+    chunks, current, units = [], [], 0
+    for char in body:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if width > limit:
+            return []  # impossible configured width: fail before any send
+        if units + width > limit:
+            chunks.append(''.join(current)); current, units = [], 0
+        current.append(char); units += width
+    if current:
+        chunks.append(''.join(current))
+    if len(chunks) > maximum:
+        chunks = chunks[:maximum]
+        notice = "…(以降は長いため省略しました)"
+        while line_length(notice) > limit:
+            notice = notice[:-1]
+        tail = chunks[-1]
+        while tail and line_length(tail + notice) > limit:
+            tail = tail[:-1]
+        chunks[-1] = tail + notice
+    return chunks
 
 
 # Seven inbound message types exist; only text is in scope for G.1. The others
@@ -250,18 +292,17 @@ def unsupported_input_reply(message_type: str = "") -> str:
 
 
 def classify_send_failure(status_code: int) -> str:
-    """'retryable' | 'permanent' | 'token' for a send response.
+    """Status category only; never authority for reply→push or 409 success.
 
-    400 on a reply is almost always the token: expired and already-used are
-    indistinguishable, both returning `{"message": "Invalid reply token"}`.
-    The caller's answer to that is a push, not a retry of the same reply.
+    Invalid token can mean expired OR already used. Endpoint, fixed intent
+    and retry-window evidence must be checked by the sending caller.
     """
-    if status_code in (500, 502, 503, 504):
+    if 500 <= status_code < 600:
         return "retryable"
     if status_code == 429:
-        return "retryable"
+        return "rejected"
     if status_code == 409:
-        return "already_sent"
+        return "conflict"
     if status_code == 400:
-        return "token"
+        return "rejected"
     return "permanent"

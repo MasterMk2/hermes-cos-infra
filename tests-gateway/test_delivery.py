@@ -36,7 +36,7 @@ from gw_line import (
 def message_at(seconds_ago=0, reply_token="tok-1"):
     received = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
     msg = canonical_from_line(
-        fx.line_text_event(reply_token=reply_token),
+        fx.line_text_event(reply_token=reply_token, timestamp=int(received.timestamp()*1000)),
         owner_line_user_id=fx.OWNER_LINE,
     )
     return msg.__class__(**{**msg.to_dict(), "received_at": received.isoformat()})
@@ -58,13 +58,7 @@ class TestReplyVersusPush(unittest.TestCase):
         self.assertEqual(choose_delivery_mode(message_at(cutoff + 2)), "push")
 
     def test_margin_reflects_the_measured_latency(self):
-        """Measured 2026-09-03: median answer 49.6s, max 88.3s.
-
-        The margin is what decides how many answers stay free. It was
-        deliberately narrowed from 15s to 8s because a failed reply falls
-        back to push at negligible cost, so an optimistic attempt is nearly
-        free while a pessimistic one always spends a credit.
-        """
+        """The existing 8s first-attempt margin is retained, not a retry proof."""
         self.assertEqual(REPLY_TOKEN_SAFETY_MARGIN_SECONDS, 8)
         window = REPLY_TOKEN_TTL_SECONDS - REPLY_TOKEN_SAFETY_MARGIN_SECONDS
         self.assertGreaterEqual(window, 49.6)   # the measured median still fits
@@ -94,17 +88,20 @@ class TestRetryKey(unittest.TestCase):
 
 
 class TestFailureClassification(unittest.TestCase):
-    def test_400_is_the_token(self):
-        """Expired and already-used are indistinguishable; both mean push."""
-        self.assertEqual(classify_send_failure(400), "token")
+    def test_400_alone_is_not_token_or_fallback_authority(self):
+        """Expired, used token and invalid message must not authorize fallback."""
+        self.assertEqual(classify_send_failure(400), "rejected")
 
-    def test_409_means_already_sent(self):
-        self.assertEqual(classify_send_failure(409), "already_sent")
+    def test_409_requires_endpoint_and_intent_evidence(self):
+        self.assertEqual(classify_send_failure(409), "conflict")
 
     def test_transient_statuses_retry(self):
-        for code in (429, 500, 502, 503, 504):
+        for code in (500, 502, 503, 504):
             with self.subTest(code=code):
                 self.assertEqual(classify_send_failure(code), "retryable")
+
+    def test_429_does_not_authorize_another_transport_attempt(self):
+        self.assertEqual(classify_send_failure(429), "rejected")
 
     def test_auth_failures_are_permanent(self):
         for code in (401, 403, 404):

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import aiohttp
 
@@ -32,28 +33,49 @@ from gw_line import (
     RETRY_KEY_HEADER,
     classify_send_failure,
     retry_key,
+    line_length,
+    MAX_TEXT_UNITS,
 )
 
 # LINE's own guidance is to keep webhook processing off the send path; these
 # timeouts are for the send, which happens on the worker, not the webhook.
 SEND_TIMEOUT_SECONDS = 20
 
-# Retries here are only for the classes `classify_send_failure` calls
-# retryable — 5xx and 429. A 400 is the reply token and is answered by
-# switching to push, never by sending the same request again.
+# Only same-key push 5xx/transport failures retry within this bounded call.
+# Reply never retries or falls back: a used token may mean acceptance happened.
 MAX_TRANSPORT_RETRIES = 2
 RETRY_BACKOFF_SECONDS = (1.0, 3.0)
 
 
-class LineSendResult:
-    __slots__ = ("ok", "status", "category", "detail", "mode")
+def valid_text_batch(messages) -> bool:
+    return (isinstance(messages, list) and 1 <= len(messages) <= MAX_MESSAGES_PER_REQUEST
+            and all(isinstance(m, dict) and m.get("type") == "text"
+                    and isinstance(m.get("text"), str) and m["text"]
+                    and line_length(m["text"]) <= MAX_TEXT_UNITS for m in messages))
 
-    def __init__(self, ok, status, category, detail="", mode=""):
+
+def push_retry_window_open(started_at: str, *, now=None, reserve_seconds=0) -> bool:
+    """Never extend the provider's 24h window or trust a backwards clock."""
+    try:
+        start = datetime.fromisoformat(started_at)
+        if start.tzinfo is None:
+            return False
+        elapsed = ((now or datetime.now(timezone.utc)) - start).total_seconds()
+        return 0 <= elapsed < 24 * 60 * 60 - reserve_seconds
+    except (TypeError, ValueError):
+        return False
+
+
+class LineSendResult:
+    __slots__ = ("ok", "status", "category", "detail", "mode", "not_sent")
+
+    def __init__(self, ok, status, category, detail="", mode="", *, not_sent=False):
         self.ok = ok
         self.status = status
         self.category = category
         self.detail = detail
         self.mode = mode
+        self.not_sent = not_sent
 
     def __repr__(self):  # no token, no body — safe to log
         return (f"LineSendResult(ok={self.ok}, status={self.status}, "
@@ -83,52 +105,69 @@ class LineClient:
         h.update(extra or {})
         return h
 
-    async def _post(self, session, url, body, headers) -> LineSendResult:
-        """One HTTP attempt, with retries for transport-class failures only."""
-        last = LineSendResult(False, 0, "retryable", "no attempt made")
-        for attempt in range(MAX_TRANSPORT_RETRIES + 1):
+    async def _post(self, session, url, body, headers, *, started_at=None) -> LineSendResult:
+        """One reply attempt, or bounded same-key push transport retries.
+
+        A final failure does not summarize earlier attempts. The caller holds
+        all failed/ambiguous sends; this function never chooses a fallback.
+        """
+        push = url == PUSH_ENDPOINT and bool(headers.get(RETRY_KEY_HEADER))
+        attempts = MAX_TRANSPORT_RETRIES + 1 if push else 1
+        if started_at is None:
+            started_at = datetime.now(timezone.utc).isoformat()
+        last = LineSendResult(False, 0, "unknown", "no attempt made")
+        for attempt in range(attempts):
+            if push and not push_retry_window_open(started_at, reserve_seconds=self._timeout.total or SEND_TIMEOUT_SECONDS):
+                return LineSendResult(False, 0, "retry_window_expired")
             try:
                 async with session.post(
                     url, data=json.dumps(body).encode("utf-8"),
                     headers=headers, timeout=self._timeout,
                 ) as resp:
-                    text = (await resp.text())[:300]
+                    # Consume the response without propagating body/token text.
+                    await resp.text()
                     if resp.status == 200:
                         return LineSendResult(True, 200, "ok")
+                    accepted_id = next((str(v) for k, v in resp.headers.items()
+                                        if k.lower() == "x-line-accepted-request-id"), "").strip()
+                    if (resp.status == 409 and push and accepted_id
+                            and push_retry_window_open(started_at)):
+                        # Provider acceptance of this frozen push, NOT arrival
+                        # at the user's device and never a reply-token receipt.
+                        return LineSendResult(True, 409, "already_sent")
                     category = classify_send_failure(resp.status)
-                    # 409 means this exact retry key was already accepted:
-                    # the message is delivered, and reporting failure would
-                    # make the worker send it a third time.
-                    if category == "already_sent":
-                        return LineSendResult(True, resp.status, "already_sent")
-                    last = LineSendResult(False, resp.status, category, text)
-                    if category != "retryable":
+                    last = LineSendResult(False, resp.status, category)
+                    # Official retry guidance: 4xx (including 429) do not
+                    # authorize another attempt; only push 5xx/transport do.
+                    if not (push and resp.status >= 500):
                         return last
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                last = LineSendResult(False, 0, "retryable", type(exc).__name__)
-            if attempt < MAX_TRANSPORT_RETRIES:
+                last = LineSendResult(False, 0, "unknown", type(exc).__name__)
+            if attempt < attempts - 1:
                 await asyncio.sleep(RETRY_BACKOFF_SECONDS[attempt])
         return last
 
     async def reply(self, session, reply_token: str, messages: list) -> LineSendResult:
         """Answer on the inbound event's token. Free, and single use.
 
-        No retry key exists for reply: the token itself is the idempotency
-        mechanism, since LINE accepts it exactly once.
+        Reply does not support retry keys. The token can only be used once,
+        but a lost response is not evidence that it has not been used.
         """
+        if not valid_text_batch(messages):
+            return LineSendResult(False, 0, "invalid_batch", mode="reply", not_sent=True)
         if not reply_token:
-            return LineSendResult(False, 0, "token", "no reply token", mode="reply")
+            return LineSendResult(False, 0, "no_reply_token", mode="reply", not_sent=True)
         result = await self._post(
             session, REPLY_ENDPOINT,
             {"replyToken": reply_token,
-             "messages": messages[:MAX_MESSAGES_PER_REQUEST]},
+             "messages": messages},
             self._headers(),
         )
         result.mode = "reply"
         return result
 
     async def push(self, session, owner_user_id: str, messages: list, *,
-                   outbound_id: str) -> LineSendResult:
+                   outbound_id: str, started_at=None) -> LineSendResult:
         """Send to the configured owner. Metered — 200/month on the free plan.
 
         `owner_user_id` is the value the gateway was configured with. It is a
@@ -140,13 +179,16 @@ class LineClient:
         chunk is recognised by LINE as a duplicate and answered 409 instead
         of delivering — and charging for — a second copy.
         """
+        if not valid_text_batch(messages):
+            return LineSendResult(False, 0, "invalid_batch", mode="push", not_sent=True)
         if not owner_user_id:
-            return LineSendResult(False, 0, "permanent", "no owner id", mode="push")
+            return LineSendResult(False, 0, "no_owner", mode="push", not_sent=True)
         result = await self._post(
             session, PUSH_ENDPOINT,
             {"to": owner_user_id,
-             "messages": messages[:MAX_MESSAGES_PER_REQUEST]},
+             "messages": messages},
             self._headers({RETRY_KEY_HEADER: retry_key(outbound_id)}),
+            started_at=started_at,
         )
         result.mode = "push"
         return result
