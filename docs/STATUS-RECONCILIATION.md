@@ -1,16 +1,37 @@
 # Hermes implementation / runtime reconciliation
 
+## 現行コードと検証（2026-10-05）
+
+GitHub の実装基準は [`0445c7c8`](https://github.com/MasterMk2/hermes-cos-infra/commit/0445c7c8b7da7b52553eccf3f156b0882e6a8438)。
+以下はコードの main 反映と合成テストの結果であり、現在の Pi への配備・実配信は未確認。
+
+- [PR #3](https://github.com/MasterMk2/hermes-cos-infra/pull/3): proactive 通知、Attention、Planning の送信結果不明を永続化し、自動再送・誤成功を抑止。既存の状態管理を拡張した
+- [PR #4](https://github.com/MasterMk2/hermes-cos-infra/pull/4): 通常 Discord 返信の本文・宛先・chunk を固定し、確認済み先頭部分と確実な未送信 tail のみを継続。UNKNOWN があれば返信全体を保留。Morning Brief の予約中・本文不一致を配信成功にしない
+- [PR #5](https://github.com/MasterMk2/hermes-cos-infra/pull/5): 通常 LINE の固定 batch（最大5件、UTF-16上限）と reply/push mode を保存。reply 開始後に結果不明なら自動 push しない。409 は有効期間内の固定 push intent と provider 受理IDが確認できる場合だけ受理として扱う
+- [main の offline CI](https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869): Ubuntu 24.04、Python 3.12.14 / 3.13.15 の各環境で Gateway 344 + Attention 158 + Planning 607 = **1,109 passed**、別に **1,188 subtests passed / 3 skipped**。3件は外部 private denylist がなく未検証。全サービスの回帰・実機・実サービスの検証ではない
+- 送信開始後の曖昧な失敗やクラッシュ窓は `UNKNOWN` のまま保持する。手動 reconcile / UI は未実装。`SENT` は provider の受理を表し、端末到達・既読を保証しない。SDK 内部 retry を含む exactly-once は保証しない
+- 旧版へ戻す前に状態DB互換を確認する。新しい UNKNOWN を旧版が再送可能へ読み替える rollback は安全ではない。実機DBの変更・移行は今回行っていない
+
+再現方法と制約は [OFFLINE-TESTS.md](OFFLINE-TESTS.md)、
+[proactive](RESTART-SAFETY.md)、[Discord](REPLY-RESTART-SAFETY.md)、
+[LINE](LINE-RESTART-SAFETY.md) を参照。
+既存 events / commitments / jobs / Attention / Planning は存在する。
+出典・時刻・確信度・訂正を統一した記憶、Reflection、成長ログの完成証明にはならない。
+9月10日記録の後続ローカル変更回収、自然配信、I/O・起動順序の運用残件は引き続き未確認。
+
+## 初回照合の記録（2026-10-04）
+
 照合日: 2026-10-04。対象は GitHub の実装と文書、隔離クラウド上で再実行した
 合成テスト。初回照合時には Pi への接続、認証値の読み取り、本番操作、
 再配備、再起動、送信、push / merge は行っていない。
 
-その後の GitHub 反映は、再確認した基準コミットを親とする文書のみの
-draft PR として扱う。実装・本番構成は変更しない。送信対象の全文を確認し、
+初回照合文書の GitHub 反映は、再確認した基準コミットを親とする文書のみの
+draft PR として扱った。この文書PRは実装・本番構成を変更しない。送信対象の全文を確認し、
 履歴中の個人識別子・固有の接続情報をプレースホルダへ置換した。
 これは送信する5文書の確認であり、全履歴・完全なtracked tree・
 外部private denylistの検査を代替しない。
 
-## 1. 三つの状態を分ける
+## 1. 初回照合で三つの状態を分ける
 
 | 証拠の種類 | 確認できたこと | 確認できないこと |
 |---|---|---|
@@ -41,8 +62,8 @@ I.2 を新規実装し直すことや I.3 の開始は今回の残件ではな�
    collectorが正常に読める場合はそのheartbeatを優先する。fallback先が
    設定されていない場合は元のエラー種別を保持する。権限を拡張する修正ではない。
 
-既存テストでこれらの形を確認した。今回、追加の挙動変更が必要な
-再現不具合は確認していない。変更は文書のみ。
+初回照合の既存テストでこれらの形を確認した。その時点では追加の挙動変更が必要な
+再現不具合は確認していなかった。その後に再現・修正した送信境界は上の現行コード欄を参照。この文書PRの変更は文書のみ。
 
 ## 3. リモートと後続ローカル作業の差
 
@@ -65,7 +86,7 @@ https://github.com/MasterMk2/hermes-pi-setup/blob/f3b378eb6a39e721ef6e1d585ec7e7
 
 ## 4. テスト結果の出所
 
-### 今回再実行したもの
+### 初回照合で再実行したもの（履歴）
 
 - 基準: infra `640d9db1044a68612e2b9fdf0204a68ebef9ea0f`
 - 環境: Linux cloud workspace、Python 3.12.14、pytest 9.1.1
@@ -101,8 +122,7 @@ Gateway、Pi用環境、Hermesコンテナ、他の全回帰スイートも今�
   実行対象・時点の完全なログを回収するまで、どちらかを現在の総数に採用しない。
   履歴を保つため当時の数字は書き換えない
 
-GitHub Actionsでは、このexact main SHAに対するworkflow runは
-今回の問い合わせで0件だった。上記ローカルテストをCI成功と表現しない。
+初回照合の GitHub Actions 問い合わせでは、基準 `640d9db` の exact SHA に対する workflow run は0件だった。上記ローカルテストをCI成功と表現しない。
 
 ## 5. 再開後の完了条件
 

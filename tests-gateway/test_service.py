@@ -326,6 +326,17 @@ class TestHermesReachabilityProbe(unittest.TestCase):
     silently failed.
     """
 
+    def setUp(self):
+        # Exercise a refused transport deterministically. Port 1 is not
+        # guaranteed closed on a developer machine, and offline CI must not
+        # probe any running service, even on loopback.
+        from unittest.mock import patch
+        import urllib.error
+        refusal = patch.object(gw_service.urllib.request, "urlopen",
+                               side_effect=urllib.error.URLError("fixture refused"))
+        refusal.start()
+        self.addCleanup(refusal.stop)
+
     def _cfg(self, base_url, **kw):
         import tempfile as tf
         return parse_config(fx.config_dict(
@@ -336,7 +347,7 @@ class TestHermesReachabilityProbe(unittest.TestCase):
         ))
 
     def test_closed_port_reports_unreachable(self):
-        # Port 1 on loopback: nothing listens, so this refuses immediately.
+        # The configured URL is preserved in the diagnostic; transport is a fake.
         ok, detail = gw_service.probe_hermes(self._cfg("http://127.0.0.1:1"))
         self.assertFalse(ok)
         self.assertIn("127.0.0.1:1/health", detail)

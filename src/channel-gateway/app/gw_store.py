@@ -9,19 +9,17 @@ that matter are provable in one place:
   reconnect that replays the same message finds the row already there and
   does not queue a second run (sections 58, 59, 110).
 
-* **An answer is sent once.** `reserve_outbound` is a unique insert on
-  (gateway_request_id, chunk_index). A retry after a timeout re-reserves the
-  same row and learns it already exists, instead of sending a second copy
-  (sections 60, 116).
+* **Discord replies have write-ahead, per-chunk receipts.** A confirmed
+  prefix is never replayed; an unknown chunk holds the whole reply. Unique
+  reservations alone cannot make an external send and SQLite commit atomic.
+  LINE's ordinary reply/push path still has separate unresolved boundaries.
 
-* **A conversation is answered in order.** `claim_next` refuses to hand out
-  work for a conversation that already has a request in flight, and picks the
-  oldest waiting message within a conversation — so B cannot overtake A
-  (sections 61, 119).
+* **A conversation is answered in order.** `claim_next` permits one active
+  request per conversation. A held unknown reply releases that lock so future
+  independent messages are not blocked forever; it never resumes its tail.
 
-* **A crash loses nothing.** PROCESSING is a claim with a timestamp, not a
-  commitment. `recover_stale` returns claims older than a lease back to
-  QUEUED on startup and periodically (section 118).
+* **Process restarts preserve intent.** `recover_stale` requeues only safe
+  work. A stale Discord SENDING becomes UNKNOWN, not permission to resend.
 
 Message text is stored because a queue that cannot replay is not durable.
 `purge_expired` bounds how long it stays (section 87).
@@ -185,20 +183,46 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
                   max_attempts: int = 3) -> dict:
     """Return abandoned claims to the queue (section 118).
 
-    A worker that died mid-request left the row PROCESSING. Returning it to
-    QUEUED is safe because the expensive half — the Hermes call — is
-    idempotent on the request id, and the send half is guarded by the unique
-    outbound reservation. A row that has burned its attempts becomes FAILED
-    rather than looping.
+    Discord replies resume only a confirmed prefix plus a proven-unsent tail.
+    SENDING and legacy ambiguous rows become UNKNOWN, never retry authority.
+    All confirmed chunks settle the request without regenerating or sending.
+    LINE batches follow the same hold rule, but never resume a partial batch
+    or change a started reply into a push. A request without uncertain
+    delivery is bounded by max_attempts.
     """
+    # Select and recover under the same write lock as chunk claims. Otherwise
+    # a live caller can refresh the lease between selection and invalidation.
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    else:
+        # Store callers may already own a transaction. Acquire its write lock
+        # before reading stale rows (also safe for an existing write txn).
+        con.execute("UPDATE inbound_messages SET updated_at=updated_at WHERE 0")
     cutoff = _iso_minus(lease_seconds)
     rows = con.execute(
-        "SELECT gateway_request_id, attempts, conversation_id FROM inbound_messages"
+        "SELECT gateway_request_id, attempts, conversation_id, platform FROM inbound_messages"
         " WHERE state = 'PROCESSING' AND (claimed_at IS NULL OR claimed_at < ?)",
         (cutoff,),
     ).fetchall()
-    requeued, failed = 0, 0
+    requeued, failed, reply_unknown, reply_confirmed = 0, 0, 0, 0
     for r in rows:
+        if r["platform"] in {"discord", "line"} and outbound_for_request(con, r["gateway_request_id"]):
+            con.execute(
+                "UPDATE outbound_messages SET state='UNKNOWN', updated_at=?,"
+                " last_error='delivery_outcome_unknown'"
+                " WHERE gateway_request_id=? AND state='SENDING'",
+                (_now(), r["gateway_request_id"]))
+            status_fn = _discord_reply_status if r["platform"] == "discord" else line_reply_status
+            status, _ = status_fn(con, r["gateway_request_id"])
+            if status == "already_delivered":
+                set_state(con, r["gateway_request_id"], "RESPONDED")
+                release_conversation(con, r["conversation_id"])
+                reply_confirmed += 1
+                continue
+            if status != "ready":
+                # Unknown is held even when the request exhausted its budget.
+                reply_unknown += 1
+                continue
         if int(r["attempts"] or 0) >= max_attempts:
             set_state(con, r["gateway_request_id"], "FAILED", error="max_attempts")
             failed += 1
@@ -206,7 +230,8 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
             set_state(con, r["gateway_request_id"], "QUEUED", error="reclaimed")
             requeued += 1
         release_conversation(con, r["conversation_id"])
-    return {"requeued": requeued, "failed": failed}
+    return {"requeued": requeued, "failed": failed,
+            "reply_unknown": reply_unknown, "reply_confirmed": reply_confirmed}
 
 
 # ------------------------------------------------------------ outbound
@@ -288,6 +313,260 @@ def already_delivered(con: sqlite3.Connection, request_id: str) -> bool:
     """True when every reserved chunk for this request has been sent."""
     rows = outbound_for_request(con, request_id)
     return bool(rows) and all(r["state"] == "SENT" for r in rows)
+
+
+# ------------------------------------------ ordinary Discord reply ledger
+
+
+def hold_reply(con, request_id: str, reason: str) -> None:
+    row = get_inbound(con, request_id)
+    set_state(con, request_id, "UNKNOWN", error=reason)
+    if row is not None:
+        con.execute("UPDATE conversation_state SET active_request_id=NULL, "
+                    "active_since=NULL, updated_at=? WHERE conversation_id=? "
+                    "AND active_request_id=?", (_now(), row["conversation_id"], request_id))
+
+
+def _discord_reply_status(con, request_id: str) -> tuple:
+    """Evaluate the ENTIRE reply. An unknown prefix blocks its unsent tail.
+
+    The caller holds a write transaction. Historical PENDING/FAILED did not
+    write SENDING before I/O: even attempts=0 may have reached Discord.
+    """
+    rows = outbound_for_request(con, request_id)
+    if not rows:
+        return "empty_answer", rows
+    for r in rows:
+        if r["state"] not in {"SENT", "NOT_SENT", "SENDING", "UNKNOWN"}:
+            mark_outbound(con, r["outbound_id"], "UNKNOWN",
+                          error="legacy_delivery_outcome_unknown")
+    rows = outbound_for_request(con, request_id)
+    if any(r["state"] == "UNKNOWN" for r in rows):
+        hold_reply(con, request_id, "delivery_outcome_unknown")
+        return "delivery_outcome_unknown", rows
+    # Do not turn another live caller's claim into a retry or release its lock.
+    if any(r["state"] == "SENDING" for r in rows):
+        return "in_flight", rows
+    tail = False
+    for i, r in enumerate(rows):
+        if r["chunk_index"] != i or r["chunk_total"] != len(rows):
+            hold_reply(con, request_id, "reply_shape_mismatch")
+            return "reply_shape_mismatch", rows
+        if r["state"] == "NOT_SENT":
+            if not r["body"]:
+                hold_reply(con, request_id, "reply_body_expired")
+                return "reply_body_expired", rows
+            tail = True
+        elif tail:  # a confirmed chunk after an unconfirmed one is not a prefix
+            hold_reply(con, request_id, "reply_order_mismatch")
+            return "reply_order_mismatch", rows
+    return ("ready" if tail else "already_delivered"), rows
+
+
+def prepare_discord_reply(con, *, request_id: str, conversation_id: str,
+                          owner_id: str, chunks: list | None) -> tuple:
+    """Freeze the whole reply once, or validate its original authorization.
+
+    None means resume the stored answer without regenerating it. NOT_SENT is
+    committed in the SAME transaction as a new reservation, so an old
+    PENDING row never masquerades as proof that no adapter was called.
+    """
+    con.execute("BEGIN IMMEDIATE")
+    inbound = get_inbound(con, request_id)
+    if inbound is None:
+        return "reply_scope_mismatch", []
+    if inbound["state"] == "UNKNOWN":
+        return "delivery_outcome_unknown", outbound_for_request(con, request_id)
+    if inbound["state"] == "CANCELLED":
+        return "reply_cancelled", []
+    if (not owner_id or inbound["authz_subject"] != SUBJECT_OWNER
+            or inbound["platform"] != "discord"
+            or inbound["platform_user_id"] != owner_id
+            or inbound["conversation_id"] != conversation_id
+            or not conversation_id.startswith("discord:")):
+        hold_reply(con, request_id, "reply_scope_mismatch")
+        return "reply_scope_mismatch", []
+    rows = outbound_for_request(con, request_id)
+    if not rows:
+        if not chunks:
+            return "empty_answer", []
+        for i, body in enumerate(chunks):
+            oid, _ = reserve_outbound(
+                con, request_id=request_id, platform="discord",
+                conversation_id=conversation_id, target_user_id=owner_id,
+                body=body, chunk_index=i, chunk_total=len(chunks), delivery_mode="dm")
+            mark_outbound(con, oid, "NOT_SENT", mode="dm")
+        rows = outbound_for_request(con, request_id)
+    if any(r["platform"] != "discord" or r["conversation_id"] != conversation_id
+           or r["target_user_id"] != owner_id or r["delivery_mode"] != "dm"
+           for r in rows):
+        hold_reply(con, request_id, "reply_scope_mismatch")
+        return "reply_scope_mismatch", rows
+    if chunks is not None and [r["body"] for r in rows] != chunks:
+        hold_reply(con, request_id, "content_revision_mismatch")
+        return "content_revision_mismatch", rows
+    return _discord_reply_status(con, request_id)
+
+
+def claim_discord_chunk(con, request_id: str) -> tuple:
+    """Commit this claim before adapter I/O. Only the first unsent tail may run.
+
+    BEGIN IMMEDIATE serializes separate connections, including two processes.
+    A replay or concurrent caller never receives the same chunk to send.
+    """
+    con.execute("BEGIN IMMEDIATE")
+    inbound = get_inbound(con, request_id)
+    if inbound is None or inbound["state"] == "UNKNOWN":
+        return "delivery_outcome_unknown", None
+    if inbound["state"] == "CANCELLED":
+        return "reply_cancelled", None
+    status, rows = _discord_reply_status(con, request_id)
+    if status != "ready":
+        return status, None
+    row = next(r for r in rows if r["state"] == "NOT_SENT")
+    mark_outbound(con, row["outbound_id"], "SENDING", mode="dm")
+    con.execute("UPDATE inbound_messages SET claimed_at=?, updated_at=? "
+                "WHERE gateway_request_id=? AND state='PROCESSING'",
+                (_now(), _now(), request_id))
+    return "send", row
+
+
+def record_discord_receipt(con, outbound_id: str, *, state: str, error=None) -> bool:
+    """Receipt + attempt are one transaction; a recovered hold is never reset."""
+    con.execute("BEGIN IMMEDIATE")
+    row = get_outbound(con, outbound_id)
+    if row is None or row["state"] != "SENDING":
+        return False
+    if state not in {"SENT", "NOT_SENT", "UNKNOWN"}:
+        raise ValueError("invalid Discord receipt")
+    mark_outbound(con, outbound_id, state, error=error, mode="dm")
+    if state == "SENT":
+        con.execute("UPDATE outbound_messages SET last_error=NULL WHERE outbound_id=?",
+                    (outbound_id,))
+    record_attempt(con, outbound_id, mode="dm",
+                   outcome="ok" if state == "SENT" else state.lower(),
+                   error_category=error)
+    if state == "UNKNOWN":
+        hold_reply(con, row["gateway_request_id"], "delivery_outcome_unknown")
+    return True
+
+
+# ---------------------------------------------------- ordinary LINE batch
+
+
+def line_reply_status(con, request_id: str) -> tuple:
+    rows = outbound_for_request(con, request_id)
+    if not rows:
+        return "empty_answer", rows
+    for row in rows:
+        if row["state"] not in {"SENT", "NOT_SENT", "SENDING", "UNKNOWN"}:
+            mark_outbound(con, row["outbound_id"], "UNKNOWN", error="legacy_delivery_outcome_unknown")
+    rows = outbound_for_request(con, request_id)
+    if any(row["state"] == "UNKNOWN" for row in rows):
+        hold_reply(con, request_id, "delivery_outcome_unknown")
+        return "delivery_outcome_unknown", rows
+    if any(row["state"] == "SENDING" for row in rows):
+        return "in_flight", rows
+    valid = (1 <= len(rows) <= 5
+             and all(row["chunk_index"] == i and row["chunk_total"] == len(rows)
+                     for i, row in enumerate(rows))
+             and len({row["delivery_mode"] for row in rows}) == 1
+             and rows[0]["delivery_mode"] in {"reply", "push"})
+    if not valid or len({row["state"] for row in rows}) != 1:
+        hold_reply(con, request_id, "line_batch_mismatch")
+        return "line_batch_mismatch", rows
+    if all(row["state"] == "SENT" for row in rows):
+        return "already_delivered", rows
+    from gw_line import build_text_messages
+    try:
+        build_text_messages([row["body"] for row in rows])
+    except ValueError:
+        hold_reply(con, request_id, "line_batch_invalid_or_expired")
+        return "line_batch_invalid_or_expired", rows
+    return "ready", rows
+
+
+def prepare_line_reply(con, *, request_id, conversation_id, owner_id, chunks, mode):
+    """Freeze the exact batch and method; only fresh, proven-unsent work starts."""
+    con.execute("BEGIN IMMEDIATE")
+    inbound = get_inbound(con, request_id)
+    if inbound is None or inbound["state"] == "UNKNOWN":
+        return "delivery_outcome_unknown", []
+    if inbound["state"] == "CANCELLED":
+        return "reply_cancelled", []
+    if (not owner_id or inbound["authz_subject"] != SUBJECT_OWNER
+            or inbound["platform"] != "line" or inbound["platform_user_id"] != owner_id
+            or inbound["conversation_id"] != conversation_id
+            or conversation_id != "line:" + owner_id):
+        hold_reply(con, request_id, "reply_scope_mismatch")
+        return "reply_scope_mismatch", []
+    rows = outbound_for_request(con, request_id)
+    if not rows:
+        if not chunks:
+            return "empty_answer", []
+        from gw_line import build_text_messages
+        build_text_messages(chunks)
+        if mode not in {"reply", "push"}:
+            raise ValueError("invalid LINE method")
+        for i, body in enumerate(chunks):
+            oid, _ = reserve_outbound(con, request_id=request_id, platform="line",
+                conversation_id=conversation_id, target_user_id=owner_id,
+                body=body, chunk_index=i, chunk_total=len(chunks), delivery_mode=mode)
+            mark_outbound(con, oid, "NOT_SENT", mode=mode)
+        rows = outbound_for_request(con, request_id)
+    if any(row["platform"] != "line" or row["target_user_id"] != owner_id
+           or row["conversation_id"] != conversation_id for row in rows):
+        hold_reply(con, request_id, "reply_scope_mismatch")
+        return "reply_scope_mismatch", rows
+    if chunks is not None and chunks != [row["body"] for row in rows]:
+        hold_reply(con, request_id, "content_revision_mismatch")
+        return "content_revision_mismatch", rows
+    return line_reply_status(con, request_id)
+
+
+def claim_line_batch(con, request_id):
+    con.execute("BEGIN IMMEDIATE")
+    inbound = get_inbound(con, request_id)
+    if inbound is None or inbound["state"] == "UNKNOWN":
+        return "delivery_outcome_unknown", None
+    if inbound["state"] == "CANCELLED":
+        return "reply_cancelled", None
+    status, rows = line_reply_status(con, request_id)
+    if status != "ready":
+        return status, None
+    first_attempt = con.execute("SELECT MIN(attempted_at) FROM delivery_attempts "
+        "WHERE outbound_id=? AND outcome='started'", (rows[0]["outbound_id"],)).fetchone()[0]
+    started = first_attempt or _now()
+    for row in rows:
+        mark_outbound(con, row["outbound_id"], "SENDING")
+    # The first transport-attempt boundary is durable, not regenerated on retry.
+    record_attempt(con, rows[0]["outbound_id"], mode=rows[0]["delivery_mode"], outcome="started")
+    con.execute("UPDATE inbound_messages SET claimed_at=?, updated_at=? "
+                "WHERE gateway_request_id=? AND state='PROCESSING'", (_now(), _now(), request_id))
+    return "send", {"rows": rows, "reply_token": inbound["reply_token"], "started_at": started}
+
+
+def record_line_receipt(con, request_id, *, ok, status_code, category, not_sent=False):
+    con.execute("BEGIN IMMEDIATE")
+    rows = outbound_for_request(con, request_id)
+    if not rows or any(row["state"] != "SENDING" for row in rows):
+        return False
+    # Only the supported endpoint's positive receipt can certify acceptance.
+    ok = bool(ok) and (status_code == 200 or (status_code == 409
+        and rows[0]["delivery_mode"] == "push" and category == "already_sent"))
+    # Only explicit local preflight outcomes, never a provider's final status.
+    not_sent = bool(not_sent) and category in {"invalid_batch", "no_reply_token", "no_owner"}
+    state = "SENT" if ok else "NOT_SENT" if not_sent else "UNKNOWN"
+    for row in rows:
+        mark_outbound(con, row["outbound_id"], state,
+                      error=None if ok else category if not_sent else "delivery_outcome_unknown")
+    con.execute("INSERT INTO delivery_attempts (outbound_id, attempted_at, mode, outcome,"
+                "status_code, error_category) VALUES (?,?,?,?,?,?)",
+                (rows[0]["outbound_id"], _now(), rows[0]["delivery_mode"],
+                 "ok" if ok else "not_sent" if not_sent else "unknown", status_code, category))
+    if not ok and not not_sent:
+        hold_reply(con, request_id, "delivery_outcome_unknown")
+    return state
 
 
 # ------------------------------------------------------- conversation
@@ -493,16 +772,22 @@ def liveness(con: sqlite3.Connection) -> dict:
         ) or 0,
         "outbound_pending": one(
             "SELECT COUNT(*) FROM outbound_messages"
-            " WHERE state IN ('PENDING','SENDING')"
+            " WHERE state IN ('PENDING','SENDING','NOT_SENT')"
+        ) or 0,
+        "reply_unknown": one(
+            "SELECT COUNT(*) FROM inbound_messages WHERE state = 'UNKNOWN'"
         ) or 0,
         "proactive_pending": one(
             "SELECT COUNT(*) FROM proactive_deliveries"
             " WHERE state IN ('PENDING','SENDING')"
         ) or 0,
+        "proactive_unknown": one(
+            "SELECT COUNT(*) FROM proactive_deliveries WHERE state = 'UNKNOWN'"
+        ) or 0,
         "processing_failure_count": int(m.get("failed") or 0),
         "hermes_failure_count": int(m.get("hermes_failed") or 0),
         "delivery_failure_count": one(
-            "SELECT COUNT(*) FROM delivery_attempts WHERE outcome <> 'ok'"
+            "SELECT COUNT(*) FROM delivery_attempts WHERE outcome NOT IN ('ok','started')"
         ) or 0,
         "responded_count": int(m.get("responded") or 0),
     }
@@ -593,33 +878,24 @@ def mark_proactive(con: sqlite3.Connection, delivery_id: str, state: str, *,
 def recover_stuck_proactive(con: sqlite3.Connection, *,
                             lease_seconds: int = 180,
                             max_attempts: int = 3) -> dict:
-    """Unstick deliveries whose outcome was never written (section 89).
+    """Hold abandoned sends without guessing whether the provider accepted.
 
-    A row left SENDING means the process died between the API call and the
-    state write. For LINE that is safe to retry: the retry key is derived
-    from the delivery id, so LINE answers 409 for a message it already
-    accepted rather than charging a second one (section 87). For Discord
-    there is no such key, so a retry can duplicate the DM — which is why the
-    lease is generous and the attempt budget small, and why the residual is
-    stated plainly rather than papered over.
+    A lease expiring is not evidence of non-delivery. Both channels become
+    UNKNOWN and a subsequent claim is refused. Even a provider retry key
+    cannot be assumed valid after an arbitrarily long outage. Keep the old
+    max_attempts argument/result counters for callers, but never turn an
+    uncertain send into a retryable PENDING/FAILED row based on an attempt
+    count. A still-running adapter may later record its actual result.
     """
     cutoff = _iso_minus(lease_seconds)
-    rows = con.execute(
-        "SELECT delivery_id, attempts FROM proactive_deliveries"
-        " WHERE state = 'SENDING' AND updated_at < ?",
-        (cutoff,),
-    ).fetchall()
-    requeued, failed = 0, 0
-    for r in rows:
-        if int(r["attempts"] or 0) >= max_attempts:
-            mark_proactive(con, r["delivery_id"], "FAILED",
-                           error="stuck_max_attempts")
-            failed += 1
-        else:
-            mark_proactive(con, r["delivery_id"], "PENDING",
-                           error="reclaimed_stuck")
-            requeued += 1
-    return {"proactive_requeued": requeued, "proactive_failed": failed}
+    cur = con.execute(
+        "UPDATE proactive_deliveries SET state = 'UNKNOWN', updated_at = ?,"
+        " last_error = 'delivery_outcome_unknown'"
+        " WHERE state = 'SENDING' AND (updated_at IS NULL OR updated_at < ?)",
+        (_now(), cutoff),
+    )
+    return {"proactive_requeued": 0, "proactive_failed": 0,
+            "proactive_unknown": cur.rowcount}
 
 
 def proactive_summary(con: sqlite3.Connection) -> dict:

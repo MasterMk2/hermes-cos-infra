@@ -41,6 +41,9 @@ REJECTED = "rejected"
 IN_FLIGHT = "in_flight"
 UNREACHABLE = "unreachable"
 UNKNOWN = "unknown"
+# The gateway itself has persisted uncertainty. Unlike transport UNKNOWN,
+# the engine must hold this notification instead of requesting another send.
+OUTCOME_UNKNOWN = "outcome_unknown"
 
 #: Outcomes after which the owner has the message.
 SUCCESS = frozenset({DELIVERED, DUPLICATE})
@@ -174,6 +177,7 @@ class GatewayClient:
         result_status = {
             "delivered": DELIVERED, "duplicate": DUPLICATE,
             "failed": FAILED, "rejected": REJECTED, "in_flight": IN_FLIGHT,
+            "outcome_unknown": OUTCOME_UNKNOWN,
         }.get(reported)
         if result_status is None:
             # An answer we do not understand is not a success. Treating an

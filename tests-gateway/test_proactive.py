@@ -198,10 +198,10 @@ class TestClaim(unittest.TestCase):
         _, outcome = do_claim(con)
         self.assertEqual(outcome, IN_FLIGHT)
 
-    def test_a_failed_notification_may_be_retried(self):
+    def test_a_definitely_unsent_notification_may_be_retried(self):
         con = mem_db()
         row, _ = do_claim(con)
-        store.mark_proactive(con, row["delivery_id"], "FAILED", error="http:500")
+        store.mark_proactive(con, row["delivery_id"], "NOT_SENT", error="owner_dm_unavailable:synthetic")
         row2, outcome = do_claim(con)
         self.assertEqual(outcome, CLAIMED)
         self.assertEqual(row2["attempts"], 2)
@@ -209,7 +209,7 @@ class TestClaim(unittest.TestCase):
     def test_same_id_with_different_words_is_refused(self):
         con = mem_db()
         row, _ = do_claim(con, body="A")
-        store.mark_proactive(con, row["delivery_id"], "FAILED", error="x")
+        store.mark_proactive(con, row["delivery_id"], "NOT_SENT", error="owner_dm_unavailable:synthetic")
         _, outcome = do_claim(con, body="B")
         self.assertEqual(outcome, CONTENT_MISMATCH)
 
@@ -253,7 +253,7 @@ class TestClaim(unittest.TestCase):
 
 
 class TestCrashRecovery(unittest.TestCase):
-    def test_a_stuck_sending_row_is_returned_for_retry(self):
+    def test_a_stuck_sending_row_is_held_without_retry(self):
         con = mem_db()
         row, _ = do_claim(con)
         con.execute(
@@ -261,12 +261,13 @@ class TestCrashRecovery(unittest.TestCase):
             " WHERE delivery_id = ?", (row["delivery_id"],)
         )
         result = store.recover_stuck_proactive(con, lease_seconds=60)
-        self.assertEqual(result["proactive_requeued"], 1)
+        self.assertEqual(result["proactive_requeued"], 0)
+        self.assertEqual(result["proactive_unknown"], 1)
         self.assertEqual(
-            store.get_proactive(con, row["delivery_id"])["state"], "PENDING"
+            store.get_proactive(con, row["delivery_id"])["state"], "UNKNOWN"
         )
 
-    def test_a_row_that_has_burned_its_attempts_fails_rather_than_looping(self):
+    def test_attempt_count_cannot_turn_an_unknown_outcome_into_a_known_failure(self):
         con = mem_db()
         row, _ = do_claim(con)
         con.execute(
@@ -275,9 +276,10 @@ class TestCrashRecovery(unittest.TestCase):
         )
         result = store.recover_stuck_proactive(con, lease_seconds=60,
                                                max_attempts=3)
-        self.assertEqual(result["proactive_failed"], 1)
+        self.assertEqual(result["proactive_failed"], 0)
+        self.assertEqual(result["proactive_unknown"], 1)
         self.assertEqual(
-            store.get_proactive(con, row["delivery_id"])["state"], "FAILED"
+            store.get_proactive(con, row["delivery_id"])["state"], "UNKNOWN"
         )
 
     def test_a_recent_sending_row_is_left_alone(self):

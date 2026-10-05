@@ -12,7 +12,8 @@ The split is the design (spec sections 12, 29, 31). LINE gives the receiver
 about two seconds and switches a failing webhook off, so the handler must not
 wait on an assistant that takes half a minute to think. Handing off through a
 committed database row rather than an in-memory queue is what makes a restart
-mid-conversation lose nothing: the row survives, the worker picks it up.
+mid-conversation preserve its intent. The worker resumes safe work and holds
+unconfirmed sends rather than silently replaying them.
 
 Three decisions in here are easy to get backwards, so they are stated:
 
@@ -62,12 +63,13 @@ from gw_config import (
     load_secret,
     secret_status,
 )
-from gw_format import prepare_outbound, user_facing_error
+from gw_format import user_facing_error
 from gw_hermes import HermesClient, HermesRejected, HermesUnavailable
 from gw_line import (
     SIGNATURE_HEADER,
     build_text_messages,
     choose_delivery_mode,
+    prepare_line_outbound,
     extract_events,
     header_lookup,
     is_redelivery,
@@ -163,6 +165,15 @@ def message_from_row(row) -> CanonicalMessage:
         reply_token=row["reply_token"],
         received_at=row["received_at"],
     )
+
+
+def discord_definitely_not_sent(error) -> bool:
+    """Only the adapter's pre-send channel lookup can prove no message send.
+
+    discord.py may internally retry 5xx/resets before returning a final 4xx.
+    A final HTTP status alone cannot rule out an earlier accepted attempt.
+    """
+    return str(error or "").startswith("channel_unavailable:")
 
 
 # --------------------------------------------------------------- the gateway
@@ -361,6 +372,14 @@ class Gateway:
         log.info("processing %s platform=%s conversation=%s",
                  request_id, message.platform, message.conversation_id)
 
+        # Resume the immutable channel reply before asking Hermes again. The
+        # original chunks/target are authoritative across a process restart.
+        if message.platform in {PLATFORM_DISCORD, PLATFORM_LINE}:
+            saved = await self._in_thread(store.outbound_for_request, request_id)
+            if saved or row["state"] == "UNKNOWN":
+                await self.deliver(row, message, None)
+                return
+
         # A non-text message is answered briefly rather than ignored, and its
         # media is never fetched: nothing here calls LINE's content endpoint
         # or downloads a Discord attachment (spec section 39).
@@ -425,17 +444,16 @@ class Gateway:
 
     # -- outbound -----------------------------------------------------
 
-    async def deliver(self, row, message: CanonicalMessage, text: str,
+    async def deliver(self, row, message: CanonicalMessage, text: str | None,
                       run_id=None):
         if message.platform == PLATFORM_LINE:
             ok, detail, mode = await self.deliver_line(row, message, text)
         else:
             ok, detail, mode = await self.deliver_discord(row, message, text)
 
-        # Whether the answer actually reached the owner is the single most
-        # important fact this service produces, and it was missing from the
-        # journal entirely: the first real message showed only "processing"
-        # and nothing about its fate. Log the outcome, the mode (reply is
+        # Whether the provider accepted the answer is the outcome available
+        # here; it does not prove device delivery or a read receipt.
+        # Log the outcome, the mode (reply is
         # free, push is metered) and the size — never the text.
         log.info("delivered %s platform=%s mode=%s ok=%s detail=%s chars=%d",
                  row["gateway_request_id"], message.platform, mode or "-",
@@ -445,6 +463,29 @@ class Gateway:
     def _settle(self, row, ok: bool, detail, run_id, mode=""):
         con = self.db()
         try:
+            if row["platform"] in {PLATFORM_DISCORD, PLATFORM_LINE}:
+                con.execute("BEGIN IMMEDIATE")
+                # A concurrent live sender keeps its claim; a held reply must
+                # not become FAILED through a generic exception/settle path.
+                if detail in {"in_flight", "reply_cancelled"}:
+                    return
+                current = store.get_inbound(con, row["gateway_request_id"])
+                if current is not None and current["state"] == "UNKNOWN":
+                    return
+                reply = store.outbound_for_request(con, row["gateway_request_id"])
+                if reply and all(r["state"] == "SENT" for r in reply):
+                    ok, detail = True, "already_delivered"
+                if any(r["state"] == "SENDING" for r in reply):
+                    # This may be a NEW caller's claim after our known negative
+                    # receipt. Settlement owns no send token, so it must not
+                    # invalidate that claim. If our own receipt write failed,
+                    # lease recovery will hold it once truly stale instead.
+                    return
+                if any(r["state"] == "UNKNOWN" for r in reply):
+                    store.hold_reply(con, row["gateway_request_id"],
+                                              "delivery_outcome_unknown")
+                    con.commit()
+                    return
             store.set_state(con, row["gateway_request_id"],
                             "RESPONDED" if ok else "FAILED",
                             error=None if ok else detail, run_id=run_id)
@@ -466,149 +507,82 @@ class Gateway:
     def _fail(self, row, detail):
         self._settle(row, False, detail, None)
 
-    async def deliver_line(self, row, message: CanonicalMessage, text: str):
+    async def deliver_line(self, row, message: CanonicalMessage, text: str | None):
         if self.line is None:
             return False, "line_not_configured", ""
-
-        chunks = prepare_outbound(
-            text,
-            limit=int(self.cfg.line["text_chunk_chars"]),
-            max_chunks=int(self.cfg.line["max_messages_per_request"]),
-            neutralize=False,   # LINE has no @everyone to neutralise
-            soft_limit=int(self.cfg.limits["response_soft_limit_chars"]),
-            hard_limit=int(self.cfg.limits["response_hard_limit_chars"]),
-        )
-        if not chunks:
-            return False, "empty_answer", ""
-
-        # One row per chunk for the durable record, but ONE API call for all
-        # of them: LINE accepts up to five message objects per request, and a
-        # push is metered, so five separate pushes would cost five times what
-        # one does.
-        con = self.db()
+        chunks = None if text is None else prepare_line_outbound(
+            text, limit=self.cfg.line["text_chunk_chars"],
+            max_chunks=self.cfg.line["max_messages_per_request"],
+            soft_limit=self.cfg.limits["response_soft_limit_chars"],
+            hard_limit=self.cfg.limits["response_hard_limit_chars"])
+        status, _ = await self._in_thread(store.prepare_line_reply,
+            request_id=row["gateway_request_id"], conversation_id=row["conversation_id"],
+            owner_id=self.cfg.owner_line_user_id, chunks=chunks, mode=choose_delivery_mode(message))
+        if status != "ready":
+            return status == "already_delivered", status, "none"
+        status, batch = await self._in_thread(store.claim_line_batch, row["gateway_request_id"])
+        if status != "send":
+            return status == "already_delivered", status, "none"
+        rows = batch["rows"]
+        mode = rows[0]["delivery_mode"]
+        messages = build_text_messages([r["body"] for r in rows])
         try:
-            reserved = []
-            for i, chunk in enumerate(chunks):
-                oid, _is_new = store.reserve_outbound(
-                    con, request_id=row["gateway_request_id"],
-                    platform=PLATFORM_LINE,
-                    conversation_id=row["conversation_id"],
-                    target_user_id=self.cfg.owner_line_user_id,
-                    body=chunk, chunk_index=i, chunk_total=len(chunks),
-                    delivery_mode="pending",
-                )
-                reserved.append(oid)
-            already = store.already_delivered(con, row["gateway_request_id"])
-            con.commit()
-        finally:
-            con.close()
+            if mode == "reply":
+                result = await self.line.reply(self.session, batch["reply_token"], messages)
+            else:
+                result = await self.line.push(self.session, rows[0]["target_user_id"], messages,
+                    outbound_id=rows[0]["outbound_id"], started_at=batch["started_at"])
+        except Exception as exc:
+            # Cancellation leaves the durable SENDING for stale recovery.
+            from gw_line_client import LineSendResult
+            result = LineSendResult(False, 0, "adapter_exception:" + type(exc).__name__)
+        recorded = await self._in_thread(store.record_line_receipt,
+            row["gateway_request_id"], ok=result.ok, status_code=result.status,
+            category=result.category, not_sent=getattr(result, "not_sent", False))
+        if recorded == "NOT_SENT":
+            return False, result.category, mode
+        if recorded != "SENT":
+            return False, "delivery_outcome_unknown", mode
+        return True, result.category, mode
 
-        if already:
-            # A previous attempt got all the way through; sending again would
-            # duplicate the answer and spend quota.
-            log.info("line: already delivered %s", row["gateway_request_id"])
-            return True, "already_delivered", "none"
-
-        messages = build_text_messages(chunks)
-        mode = choose_delivery_mode(message)
-        result = None
-
-        if mode == "reply":
-            result = await self.line.reply(self.session, message.reply_token,
-                                           messages)
-            if not result.ok and result.category == "token":
-                # Expired or already used — indistinguishable, and both are
-                # answered the same way: spend a push rather than lose the
-                # answer (sections 33, 34).
-                log.info("line: reply token unusable for %s, pushing",
-                         row["gateway_request_id"])
-                await self._record_attempt(reserved[0], "reply", result)
-                result = None
-
-        if result is None:
-            result = await self.line.push(
-                self.session, self.cfg.owner_line_user_id, messages,
-                outbound_id=reserved[0],
-            )
-
-        await self._record_attempt(reserved[0], result.mode, result)
-        await asyncio.to_thread(self._mark_chunks, reserved, result)
-        return result.ok, result.category, result.mode
-
-    def _mark_chunks(self, outbound_ids, result):
-        con = self.db()
-        try:
-            for oid in outbound_ids:
-                store.mark_outbound(
-                    con, oid, "SENT" if result.ok else "FAILED",
-                    error=None if result.ok else result.category,
-                    mode=result.mode,
-                )
-            con.commit()
-        finally:
-            con.close()
-
-    async def _record_attempt(self, outbound_id, mode, result):
-        def _write():
-            con = self.db()
-            try:
-                store.record_attempt(
-                    con, outbound_id, mode=mode,
-                    outcome="ok" if result.ok else "error",
-                    status_code=result.status, error_category=result.category,
-                )
-                con.commit()
-            finally:
-                con.close()
-        await asyncio.to_thread(_write)
-
-    async def deliver_discord(self, row, message: CanonicalMessage, text: str):
+    async def deliver_discord(self, row, message: CanonicalMessage, text: str | None):
         if self.discord_bot is None:
             return False, "discord_not_configured", ""
+        chunks = self.discord_bot.prepare(text) if text is not None else None
+        status, _ = await self._in_thread(
+            store.prepare_discord_reply,
+            request_id=row["gateway_request_id"],
+            conversation_id=row["conversation_id"],
+            owner_id=self.cfg.owner_discord_user_id, chunks=chunks)
+        if status != "ready":
+            return status == "already_delivered", status, "dm"
 
-        chunks = self.discord_bot.prepare(text)
-        if not chunks:
-            return False, "empty_answer", ""
-
-        channel_id = str(row["conversation_id"]).split(":", 1)[1]
-        con = self.db()
-        try:
-            reserved = []
-            for i, chunk in enumerate(chunks):
-                oid, _ = store.reserve_outbound(
-                    con, request_id=row["gateway_request_id"],
-                    platform=PLATFORM_DISCORD,
-                    conversation_id=row["conversation_id"],
-                    target_user_id=self.cfg.owner_discord_user_id,
-                    body=chunk, chunk_index=i, chunk_total=len(chunks),
-                    delivery_mode="dm",
-                )
-                reserved.append(oid)
-            already = store.already_delivered(con, row["gateway_request_id"])
-            con.commit()
-        finally:
-            con.close()
-
-        if already:
-            return True, "already_delivered", "none"
-
-        sent, error = await self.discord_bot.send_chunks(channel_id, chunks)
-
-        def _write():
-            con = self.db()
+        while True:
+            status, chunk = await self._in_thread(
+                store.claim_discord_chunk, row["gateway_request_id"])
+            if status != "send":
+                return status == "already_delivered", status, "dm"
+            # The committed SENDING row precedes the only send call. One
+            # chunk at a time makes each confirmed prefix durable immediately.
+            channel_id = chunk["conversation_id"].split(":", 1)[1]
             try:
-                for i, oid in enumerate(reserved):
-                    ok = i < sent
-                    store.mark_outbound(con, oid, "SENT" if ok else "FAILED",
-                                        error=None if ok else error, mode="dm")
-                    store.record_attempt(con, oid, mode="dm",
-                                         outcome="ok" if ok else "error",
-                                         error_category=error)
-                con.commit()
-            finally:
-                con.close()
-        await asyncio.to_thread(_write)
-        return (error is None and sent == len(chunks)), error or "ok", "dm"
+                sent, error = await self.discord_bot.send_chunks(channel_id, [chunk["body"]])
+            except Exception as exc:
+                sent, error = 0, type(exc).__name__
+            # CancelledError intentionally leaves SENDING for stale recovery.
+            if sent == 1 and error is None:
+                state = "SENT"
+            elif sent == 0 and discord_definitely_not_sent(error):
+                state = "NOT_SENT"
+            else:
+                state = "UNKNOWN"
+            recorded = await self._in_thread(
+                store.record_discord_receipt, chunk["outbound_id"],
+                state=state, error=error)
+            if not recorded or state == "UNKNOWN":
+                return False, "delivery_outcome_unknown", "dm"
+            if state == "NOT_SENT":
+                return False, error, "dm"
 
     # -- housekeeping -------------------------------------------------
 

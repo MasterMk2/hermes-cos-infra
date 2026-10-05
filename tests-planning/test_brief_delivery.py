@@ -263,9 +263,9 @@ def test_content_mismatch_stops_immediately(tmp_path, state):
                                         http_status=409))
     outcome = run(base_config(tmp_path), state, client)
     assert len(client.calls) == 1
-    assert outcome["status"] == brief_service.ST_SUPPRESSED
-    assert outcome["failure_reason"] == brief_service.FR_DUPLICATE
-    assert state.get("2026-09-08")["delivery_status"] == brief_state.SUPPRESSED
+    assert outcome["status"] == brief_service.ST_OUTCOME_UNKNOWN
+    assert outcome["failure_reason"] == brief_service.FR_DELIVERY_UNKNOWN
+    assert state.get("2026-09-08")["delivery_status"] == brief_state.UNKNOWN
 
 
 def test_in_flight_stops_immediately(tmp_path, state):
@@ -274,7 +274,7 @@ def test_in_flight_stops_immediately(tmp_path, state):
                                         http_status=409))
     outcome = run(base_config(tmp_path), state, client)
     assert len(client.calls) == 1
-    assert outcome["status"] == brief_service.ST_SUPPRESSED
+    assert outcome["status"] == brief_service.ST_OUTCOME_UNKNOWN
 
 
 def test_rejected_request_is_not_retried(tmp_path, state):
@@ -303,5 +303,5 @@ def test_status_and_failure_reason_vocabularies_are_closed(tmp_path, state):
             or outcome["failure_reason"] in brief_service.ALL_FAILURE_REASONS)
     assert brief_service.ALL_FAILURE_REASONS == {
         "planner_error", "renderer_error", "delivery_error", "stale_source",
-        "duplicate_suppressed",
+        "duplicate_suppressed", "delivery_outcome_unknown",
     }

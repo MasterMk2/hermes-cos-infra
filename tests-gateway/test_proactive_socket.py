@@ -61,7 +61,7 @@ class FakeLineClient:
             "to": owner_user_id, "messages": messages,
             "outbound_id": outbound_id, "retry_key": retry_key(outbound_id),
         })
-        return FakeLineResult(self.ok, self.category)
+        return FakeLineResult(self.ok, self.category, status=200 if self.ok else 429)
 
 
 class FakeDiscordBot:
@@ -177,21 +177,22 @@ class TestSocketLifecycle(SocketCase):
         self.assertEqual(body["status"], "ok")
 
     async def test_a_stale_socket_file_does_not_block_the_next_start(self):
-        # A CLEAN shutdown removes the file — measured, and the reason this
-        # test has to forge the stale one rather than produce it by stopping
-        # the server. The case that matters is SIGKILL or a power cut, which
-        # leaves the file with nothing behind it; `bind` then fails with
-        # EADDRINUSE and takes the whole gateway down over a dead file.
+        # Python 3.13 cleans up the socket on close; 3.12 can leave it behind.
+        # In either case test the same input: an abandoned, unlistened socket
+        # file such as a power cut leaves. Do not assume a runtime's cleanup
+        # behaviour is a gateway contract.
         import socket as socket_mod
+        import stat as stat_mod
 
         await self.client.close()
         await self.server.stop()
-        self.assertFalse(os.path.exists(self.sock))
-
-        abandoned = socket_mod.socket(socket_mod.AF_UNIX,
-                                      socket_mod.SOCK_STREAM)
-        abandoned.bind(self.sock)
-        abandoned.close()                      # file survives: no unlink
+        if os.path.exists(self.sock):
+            self.assertTrue(stat_mod.S_ISSOCK(os.stat(self.sock).st_mode))
+        else:
+            abandoned = socket_mod.socket(socket_mod.AF_UNIX,
+                                          socket_mod.SOCK_STREAM)
+            abandoned.bind(self.sock)
+            abandoned.close()                  # file survives: no unlink
         self.assertTrue(os.path.exists(self.sock))
 
         self.server = ProactiveServer(self.gw)
@@ -206,6 +207,12 @@ class TestSocketLifecycle(SocketCase):
         # destructive. Only a socket is ever removed.
         await self.client.close()
         await self.server.stop()
+        # 3.12 may leave the stopped fixture's socket; remove only that
+        # verified socket so the actual test input can be a regular file.
+        if os.path.exists(self.sock):
+            import stat as stat_mod
+            self.assertTrue(stat_mod.S_ISSOCK(os.stat(self.sock).st_mode))
+            os.unlink(self.sock)
         with open(self.sock, "w", encoding="utf-8") as fh:
             fh.write("not a socket")
         server2 = ProactiveServer(self.gw)
@@ -284,26 +291,20 @@ class TestDelivery(SocketCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.line.sends[0]["to"], OWNER_LINE)
 
-    async def test_a_line_retry_reuses_the_same_key(self):
-        # Section 122. Two attempts at the same logical delivery — the first
-        # fails, the second succeeds — must present LINE with one key, so the
-        # second is deduplicated rather than charged.
+    async def test_a_line_final_rejection_is_held_without_extending_retry_key_lifetime(self):
+        # The final 429 may follow an internal attempt whose answer was lost.
         self.line.ok = False
         self.line.category = "retryable"
         status, body = await self.post(
             self.notification(notification_id="ntf_retry",
                               preferred_channel="line"))
-        self.assertEqual(status, 502)
-        self.assertEqual(body["status"], "failed")
+        self.assertEqual((status, body["status"]), (409, "outcome_unknown"))
         self.line.ok = True
-        self.line.category = "ok"
         status, body = await self.post(
             self.notification(notification_id="ntf_retry",
                               preferred_channel="line"))
-        self.assertEqual(status, 200)
-        self.assertEqual(len(self.line.sends), 2)
-        self.assertEqual(self.line.sends[0]["retry_key"],
-                         self.line.sends[1]["retry_key"])
+        self.assertEqual((status, body["status"]), (409, "outcome_unknown"))
+        self.assertEqual(len(self.line.sends), 1)
 
     async def test_a_409_from_line_is_delivered_but_not_charged(self):
         self.line.ok = True
@@ -321,15 +322,15 @@ class TestDelivery(SocketCase):
         self.discord.ok = False
         status, body = await self.post(
             self.notification(notification_id="ntf_fail"))
-        self.assertEqual(status, 502)
-        self.assertEqual(body["status"], "failed")
+        self.assertEqual(status, 409)
+        self.assertEqual(body["status"], "outcome_unknown")
         con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
         row = con.execute(
             "SELECT state, last_error FROM proactive_deliveries"
             " WHERE notification_id = 'ntf_fail'").fetchone()
         con.close()
-        self.assertEqual(row["state"], "FAILED")
+        self.assertEqual(row["state"], "UNKNOWN")
         self.assertTrue(row["last_error"])
 
     async def test_an_unconfigured_channel_fails_loudly(self):

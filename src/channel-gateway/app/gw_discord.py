@@ -193,6 +193,8 @@ class InterfaceBot(discord.Client):
                 await self.fetch_channel(int(channel_id))
         except discord.HTTPException as exc:
             return 0, f"channel_unavailable:{exc.code}"
+        except Exception as exc:  # lookup failed before any channel.send
+            return 0, f"channel_unavailable:{type(exc).__name__}"
         return await self._send_to(channel, chunks)
 
     async def owner_dm_channel(self):
@@ -221,13 +223,11 @@ class InterfaceBot(discord.Client):
     async def send_owner_dm(self, chunks: list) -> tuple:
         """Deliver a proactive notification. Returns (sent_count, error).
 
-        Discord has no idempotency key, so unlike the LINE push this cannot
-        prove to the platform that a retry is a retry. The caller's
-        `proactive_deliveries` row is the only guard, and a crash in the
-        window between `channel.send` returning and that row being written
-        can duplicate a DM. That residual is real and is stated rather than
-        hidden; it is one message to one person on the cheap channel, which
-        is why the expensive channel is the one that got the retry key.
+        This adapter does not submit a provider-side idempotency key. The
+        caller must hold partial/ambiguous sends as UNKNOWN instead of
+        replaying them. Its durable SENDING row also survives a crash after
+        channel.send but before the receipt is recorded. This is an at-most
+        one automatic attempt on uncertain outcomes, not a delivery guarantee.
         """
         if not self.cfg.owner_discord_user_id:
             return 0, "owner_not_configured"
@@ -244,9 +244,9 @@ class InterfaceBot(discord.Client):
     async def _send_to(self, channel, chunks: list) -> tuple:
         """Send chunks in order. Returns (sent_count, error_or_None).
 
-        Stops at the first failure rather than pressing on: a partial answer
-        in order beats a scrambled complete one, and the unsent chunks stay
-        PENDING for the retry.
+        Stops at the first failure. The caller owns the durable receipt and
+        must distinguish a negative response from an ambiguous/partial send.
+        Ordinary replies call this with one write-ahead claimed chunk.
         """
         sent = 0
         for chunk in chunks:

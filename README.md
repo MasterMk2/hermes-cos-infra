@@ -55,7 +55,26 @@ COMPLETED
   旧前提「--ignore-rules gives personal-context isolation」は訂正)
 - repository allowlist / test command allowlist / secret scan / no push / no merge
 
-## Current Status and Evidence
+## 現行コードと検証（2026-10-05）
+
+GitHub の実装基準は [`0445c7c8`](https://github.com/MasterMk2/hermes-cos-infra/commit/0445c7c8b7da7b52553eccf3f156b0882e6a8438)。
+以下はコードの main 反映と合成テストの結果であり、現在の Pi への配備・実配信は未確認。
+
+- [PR #3](https://github.com/MasterMk2/hermes-cos-infra/pull/3): proactive 通知、Attention、Planning の送信結果不明を永続化し、自動再送・誤成功を抑止。既存の状態管理を拡張した
+- [PR #4](https://github.com/MasterMk2/hermes-cos-infra/pull/4): 通常 Discord 返信の本文・宛先・chunk を固定し、確認済み先頭部分と確実な未送信 tail のみを継続。UNKNOWN があれば返信全体を保留。Morning Brief の予約中・本文不一致を配信成功にしない
+- [PR #5](https://github.com/MasterMk2/hermes-cos-infra/pull/5): 通常 LINE の固定 batch（最大5件、UTF-16上限）と reply/push mode を保存。reply 開始後に結果不明なら自動 push しない。409 は有効期間内の固定 push intent と provider 受理IDが確認できる場合だけ受理として扱う
+- [main の offline CI](https://github.com/MasterMk2/hermes-cos-infra/actions/runs/37247078869): Ubuntu 24.04、Python 3.12.14 / 3.13.15 の各環境で Gateway 344 + Attention 158 + Planning 607 = **1,109 passed**、別に **1,188 subtests passed / 3 skipped**。3件は外部 private denylist がなく未検証。全サービスの回帰・実機・実サービスの検証ではない
+- 送信開始後の曖昧な失敗やクラッシュ窓は `UNKNOWN` のまま保持する。手動 reconcile / UI は未実装。`SENT` は provider の受理を表し、端末到達・既読を保証しない。SDK 内部 retry を含む exactly-once は保証しない
+- 旧版へ戻す前に状態DB互換を確認する。新しい UNKNOWN を旧版が再送可能へ読み替える rollback は安全ではない。実機DBの変更・移行は今回行っていない
+
+再現方法と制約は [OFFLINE-TESTS.md](docs/OFFLINE-TESTS.md)、
+[proactive](docs/RESTART-SAFETY.md)、[Discord](docs/REPLY-RESTART-SAFETY.md)、
+[LINE](docs/LINE-RESTART-SAFETY.md) を参照。
+既存 events / commitments / jobs / Attention / Planning は存在する。
+出典・時刻・確信度・訂正を統一した記憶、Reflection、成長ログの完成証明にはならない。
+9月10日記録の後続ローカル変更回収、自然配信、I/O・起動順序の運用残件は引き続き未確認。
+
+## 初回照合の記録（2026-10-04）
 
 2026-10-04 に GitHub main `640d9db1044a68612e2b9fdf0204a68ebef9ea0f` を照合した。
 H.3.2 / I.1 に加え、I.2 の planner・renderer・MCP・朝ブリーフ配信と
@@ -63,7 +82,7 @@ H.3.2 / I.1 に加え、I.2 の planner・renderer・MCP・朝ブリーフ配信
 
 [hermes-pi-setup の9月10日進捗記録](https://github.com/MasterMk2/hermes-pi-setup/blob/f3b378eb6a39e721ef6e1d585ec7e76e35b313b6/PROGRESS.md)
 は I.2 完了、担当者判定・広告除外、プレミアムCLI経路まで報告するが、
-その後続コード・最終レポートは今回の GitHub main には含まれない。
+その後続コード・最終レポートは初回照合時の GitHub main には含まれない。
 現在の Pi に接続して稼働状態を確認したわけではない。
 履歴上の PASS と今回の隔離テストを区別した
 [照合結果・残件](docs/STATUS-RECONCILIATION.md) を再開時の入口とする。
@@ -101,7 +120,7 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 
 ## Code Snapshot (`src/`)
 
-実機への配備を記録したコードの匿名化スナップショット。現在の実機との差分は未照合。
+過去の配備記録を基にした匿名化スナップショットと、その後の未配備コード修正。現在の実機との差分は未照合。
 パス中の `<PI_USER>` `<LAN_IP>` `<PI_HOSTNAME>` は環境ごとのプレースホルダ。
 
 ```text

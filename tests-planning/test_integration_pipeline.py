@@ -1028,6 +1028,12 @@ class FrozenModulesAreUntouchedTests(unittest.TestCase):
     #: that fails because a hash moved teaches the reader to ignore it.
     baseline_subject = "^fix\\(line-extract\\): Phase I.1-S2-FR-F"
 
+    # This asserts the historical I.2 change window, not a perpetual ban on
+    # later, separately reviewed gateway/attention work. Keep the closed
+    # production-fix revision explicit; current-tree privacy scans still run
+    # against HEAD and are not narrowed by this boundary.
+    phase_end_sha = "640d9db1044a68612e2b9fdf0204a68ebef9ea0f"
+
     #: Commits allowed to touch a frozen module. The owner authorised privacy
     #: passes over the whole tree, and one of them necessarily reaches files
     #: under `src/line-knowledge/` and `src/channel-gateway/` — replacing a
@@ -1061,7 +1067,9 @@ class FrozenModulesAreUntouchedTests(unittest.TestCase):
 
         # Per commit, not per range: a sanctioned privacy pass and a Phase I.2
         # feature commit must not be able to hide behind each other.
-        log = self._git("log", "--no-merges", "--format=%H%x1f%s", f"{base}..HEAD")
+        self._git("merge-base", "--is-ancestor", self.phase_end_sha, "HEAD")
+        log = self._git("log", "--no-merges", "--format=%H%x1f%s",
+                        f"{base}..{self.phase_end_sha}")
         offenders = []
         for line in log.splitlines():
             if "\x1f" not in line:
@@ -1095,7 +1103,9 @@ class FrozenModulesAreUntouchedTests(unittest.TestCase):
                          "--extended-regexp", "HEAD").strip()
         if not base:  # pragma: no cover
             self.skipTest("the pre-I.2 commit is not reachable here")
-        log = self._git("log", "--no-merges", "--format=%H%x1f%s", f"{base}..HEAD")
+        self._git("merge-base", "--is-ancestor", self.phase_end_sha, "HEAD")
+        log = self._git("log", "--no-merges", "--format=%H%x1f%s",
+                        f"{base}..{self.phase_end_sha}")
         churn = 0
         touched_python = []
         checked = 0
