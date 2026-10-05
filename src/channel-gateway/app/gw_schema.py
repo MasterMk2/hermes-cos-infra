@@ -55,7 +55,7 @@ INBOUND_STATES = (
 TERMINAL_INBOUND = frozenset({"RESPONDED", "FAILED", "CANCELLED", "UNKNOWN"})
 
 OUTBOUND_STATES = ("PENDING", "SENDING", "SENT", "FAILED", "ABANDONED", "NOT_SENT", "UNKNOWN")
-# Discord reply NOT_SENT is a new, proven-unsent reservation or rejection.
+# Reply NOT_SENT is a new, proven-unsent reservation or local preflight failure.
 # Old PENDING/FAILED rows predate write-ahead sending and cannot prove that.
 
 # Proactive lifecycle (G.2 spec section 45). SENDING is the dangerous one: it

@@ -47,8 +47,7 @@ import stat
 from aiohttp import web
 
 import gw_store as store
-from gw_format import prepare_outbound
-from gw_line import build_text_messages
+from gw_line import build_text_messages, prepare_line_outbound
 from gw_schema import PROACTIVE_CHANNELS, SEVERITIES, open_db
 
 log = logging.getLogger("gateway.proactive")
@@ -248,11 +247,10 @@ class ProactiveServer:
         client = self.gw.line
         if client is None or not self.gw.cfg.owner_line_user_id:
             return False, "", "line_not_configured", False
-        chunks = prepare_outbound(
+        chunks = prepare_line_outbound(
             row["body"],
             limit=int(self.gw.cfg.line["text_chunk_chars"]),
             max_chunks=int(self.gw.cfg.line["max_messages_per_request"]),
-            neutralize=False,
             soft_limit=int(self.gw.cfg.limits["response_soft_limit_chars"]),
             hard_limit=int(self.gw.cfg.limits["response_hard_limit_chars"]),
         )
