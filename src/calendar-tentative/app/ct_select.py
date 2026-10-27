@@ -306,7 +306,7 @@ class _IndexEvent:
     start: object  # date for all-day, aware datetime otherwise
 
 
-def _load_index(con, *, tz) -> dict:
+def _load_index(con, *, tz, own_prefix: str) -> dict:
     """title_key -> [_IndexEvent] for the snapshot's real events."""
     by_title: dict = {}
     cols = _table_columns(con, "calendar_events")
@@ -318,8 +318,9 @@ def _load_index(con, *, tz) -> dict:
         event_id, status, summary, start_at, all_day = row
         # Our own entry is never evidence that something is "already on a
         # calendar": that is how a tentative entry would withdraw itself. Its
-        # title would match, too — normalize_title drops the 【仮】 tag.
-        if is_own_event(event_id):
+        # title would match, too — normalize_title drops the 【仮】 tag. Once
+        # the owner has taken the tag off it is a real event like any other.
+        if is_own_event(event_id) and str(summary or "").lstrip().startswith(own_prefix):
             continue
         if str(status or "").lower() == "cancelled":
             continue
@@ -407,15 +408,15 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
     today = now_local.date()
     horizon_end = now_local + timedelta(days=int(sel_cfg["horizon_days"]))
 
+    own_prefix = cfg.calendar["summary_prefix"].strip()
     by_title: dict = {}
     selection = Selection()
     if index_con is not None:
-        by_title = _load_index(index_con, tz=tz)
+        by_title = _load_index(index_con, tz=tz, own_prefix=own_prefix)
         selection.index_available = True
 
     rows = _load_commitments(events_con)
     types_by_id, pairs_by_id, echoed = _load_evidence(events_con)
-    own_prefix = cfg.calendar["summary_prefix"].strip()
     raw_types = _load_raw_types(events_con)
 
     gmail_mode = sel_cfg["gmail_only"]

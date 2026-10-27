@@ -473,6 +473,25 @@ class EchoTests(EngineCase):
         self.assertEqual(self.state_of("c1"), store.WITHDRAWN)
         self.assertEqual(self.row("c1")["last_error"], sel.R_MATCHES_EXISTING)
 
+    def test_a_confirmed_entry_counts_as_a_real_event(self):
+        # Once 【仮】 is off, the same work arriving again from another
+        # message is already on the calendar.
+        self.ws.add_commitment("c2", "定例ミーティング", due_at="2026-10-03T18:00:00+09:00",
+                               due_precision="minute", raw_type="appointment_candidate")
+        self.run_once()
+        event = self.event_of("c2")
+        self.google.owner_edit(event["id"], summary="定例ミーティング")
+        self.run_once()
+        self.assertEqual(self.state_of("c2"), store.CONFIRMED)
+        self.ws.add_index_event(event["id"], "定例ミーティング", event["start"]["dateTime"],
+                                calendar_id=H1_PRIMARY_ID)
+        self.ws.add_commitment("c3", "定例ミーティング", due_at="2026-10-03T18:00:00+09:00",
+                               due_precision="minute", raw_type="appointment_candidate")
+        self.run_once()
+        self.assertIsNone(self.row("c3"))
+        self.assertEqual(self.state_of("c2"), store.CONFIRMED)
+        self.assertEqual(len(self.google.live()), 2)
+
     def test_the_owners_own_events_are_never_touched(self):
         self.google.owner_add("ownerevent1", "歯医者")
         before = dict(self.google.events["ownerevent1"])

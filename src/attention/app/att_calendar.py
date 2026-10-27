@@ -21,6 +21,18 @@ from att_time import parse_iso
 log = logging.getLogger("attention.calendar")
 JST = timezone(timedelta(hours=9))
 
+#: Event ids and title tag of calendar tentative registration
+#: (src/calendar-tentative, ct_select.OWN_EVENT_PREFIX / summary_prefix).
+TENTATIVE_EVENT_PREFIX = "hermesct"
+TENTATIVE_TITLE_TAG = "【仮】"
+
+
+def _tentative_entry(row) -> bool:
+    """A tentative-registration entry: moved and withdrawn by that service,
+    deleted or confirmed by the owner. None of its changes is news to the
+    owner, and until 【仮】 is taken off it is not an appointment either."""
+    return str(row["event_id"] or "").startswith(TENTATIVE_EVENT_PREFIX)
+
 
 def _connect(path):
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
@@ -81,6 +93,9 @@ def collect(cfg, clock, *, initialized_at=None) -> list:
     for row in rows:
         if row["status"] == "cancelled":
             continue
+        if _tentative_entry(row) and str(row["summary"] or "").lstrip().startswith(
+                TENTATIVE_TITLE_TAG):
+            continue
         start = _start(row["start_at"], row["all_day"])
         if start is None or not (now <= start <= horizon):
             continue
@@ -98,7 +113,7 @@ def collect(cfg, clock, *, initialized_at=None) -> list:
         ))
     for change in changes:
         row = by_id.get(change["source_id"])
-        if row is None or change["baseline"]:
+        if row is None or change["baseline"] or _tentative_entry(row):
             continue
         if change["change_type"] == "cancelled":
             start = _start(row["start_at"], row["all_day"])

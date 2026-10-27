@@ -162,11 +162,21 @@ Gmail インデックスが読めないときは、Gmail だけが根拠の行�
 そこから commitment を作る。仮予定がそのまま戻ってくるので、次の 3 か所で予定IDの接頭辞
 `hermesct` を見て自分のものを除く（`normalize_title` は先頭の【仮】を落とすため、件名だけでは区別できない）。
 
-- H.1 スナップショット: 自分の仮予定は「既にある予定」に数えない（数えると仮予定が自分を取り下げる）
+- H.1 スナップショット: 【仮】が付いたままの自分の仮予定は「既にある予定」に数えない
+  （数えると仮予定が自分を取り下げる）。【仮】を消して確定したものは普通の予定として数える
 - commitment の根拠: `gcal:<カレンダー>:hermesct…` の Calendar 根拠は根拠に数えない。
   その commitment に統合で移った `calendar_authority` も、他に Calendar の根拠がなければ無視する
 - 仮予定から作られた commitment そのもの（根拠がそれだけ、または件名が【仮】で始まる）は
   `own_tentative_entry` として提案しない（【仮】の上に【仮】を重ねない）
+
+H.1 を読む他の部品も、同じ予定IDの接頭辞で仮予定を見分ける。
+
+| 部品 | 扱い |
+|---|---|
+| commitments の backfill（`commitments/reconcile.py`） | 【仮】付き、または削除済みの仮予定から commitment を作らない（元の commitment と二重になるため。Google は削除済み予定の件名を返さないことがあるので、削除済みは件名を見ない）。確定したものは普通の予定として取り込む |
+| attention-engine（`att_calendar.py`） | 仮予定の変更・削除を「予定が変わった」通知にしない（このサービスの移動・取り下げ、本人の確定・削除のどれも本人には既知）。【仮】付きの間は「もうすぐの予定」にも数えない |
+| Hermes のカレンダーツール（H.1 MCP） | 何もしない。チャットからは「【仮】…」・`status: tentative` の予定として見える |
+| H.1 の `cal_reconcile` | 何もしない。件名の完全一致でしか Event Layer と結ばないので、【仮】付きの件名は結ばれない |
 
 ## 一度しか作らない仕組み
 
@@ -267,7 +277,7 @@ sudo systemctl enable --now hermes-calendar-tentative.timer
 
 ## 試験
 
-`tests-calendar-tentative/`（142 件、CI の `scripts/check_offline.py` に追加）。
+`tests-calendar-tentative/`（143 件、CI の `scripts/check_offline.py` に追加）。
 実スキーマ（commitments、H.1 index）で DB を作り、偽の Google（削除済み予定を保持、If-Match、
 重複IDの 409、応答喪失、本人の削除・編集・移動を再現）に対して実行する。主な固定点:
 
@@ -275,7 +285,10 @@ sudo systemctl enable --now hermes-calendar-tentative.timer
 - クラッシュで残った `INSERTING`、重複ID 409、明確な拒否と自分側の障害の区別
 - 本人の削除は二度と作らない、【仮】を消したら `CONFIRMED`、編集は以後触らない、色変更は追従を続ける
 - 自分の仮予定が H.1・backfill・統合を経て戻ってきても、取り下げも二重提案もしない
-  （`is_own_event` を無効にするとこれらの試験が落ちることを確認済み）。本人の他の予定には一切触らない
+  （`is_own_event` を無効にするとこれらの試験が落ちることを確認済み）。確定したものは本物の予定として数える。
+  本人の他の予定には一切触らない
+- backfill と attention の仮予定の除外は `tests-commitments` と `tests-attention/test_calendar.py` にある
+  （除外を外すと落ちることを確認済み）
 - PATCH/DELETE の 412 は本人の勝ち、応答喪失した PATCH/DELETE の正しい決着
 - 過去の仮予定は消さない、対象外になっただけでは消さない、件数上限
 - primary 以外の設定と、旧サブカレンダー用の状態DBの流用を拒否。OAuth 障害時は何も変えない、commitments を変更しない
@@ -290,10 +303,9 @@ sudo systemctl enable --now hermes-calendar-tentative.timer
   （`cal_normalize.py`）で確認した
 - `calendar.events.owned` は本人の予定を全部書き換えられるスコープ。触るのを自分の仮予定に限るのは
   コードの側（private 拡張プロパティでの一覧、状態DBの予定IDだけを PATCH/DELETE）
-- 仮予定の commitment を手で統合するとき、仮予定由来の commitment を残す側にしない。
-  そうすると元の commitment が置き換え済み（`superseded`）になって仮予定が取り下げられ、
-  【仮】を消して確定した予定由来なら、Discord などの根拠が移った残る側が改めて仮登録されうる。
-  仮予定由来の commitment は `commitments.admin backfill` を手で実行したときにしかできない
+- 確定した予定由来の commitment を手で統合するとき、それを残す側にしない。元の commitment が
+  置き換え済み（`superseded`）になり、仮予定のままのものがあれば取り下げられる
+- attention は、本人が【仮】を消して確定したことを通知しない（確定は Google カレンダー上の本人の操作）
 - Gmail だけが根拠の行は既定で「人からのメール」だけ。予約確認や大学からの一斉案内は
   `gmail_only: "people_and_notifications"` で入る
 - 実メールボックスで Gmail の分類ラベルが付いているか（スマート機能がオンか）は未確認。

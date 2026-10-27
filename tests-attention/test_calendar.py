@@ -15,7 +15,8 @@ import att_policy as policy
 import att_fixtures as fx
 
 
-def make_index(path, *, status="confirmed", change_type="updated", auth_state="AUTHORIZED"):
+def make_index(path, *, status="confirmed", change_type="updated", auth_state="AUTHORIZED",
+               event_id="event-1", summary="重要 会議"):
     con = sqlite3.connect(path)
     con.executescript("""
       CREATE TABLE calendar_events(source_id TEXT,calendar_id TEXT,calendar_name TEXT,event_id TEXT,status TEXT,summary TEXT,description TEXT,location TEXT,start_at TEXT,end_at TEXT,all_day INTEGER,timezone TEXT,recurring_event_id TEXT,original_start_at TEXT,recurrence_state TEXT,visibility TEXT,transparency TEXT,html_link TEXT,updated_at TEXT,meaningful_hash TEXT,deleted_at TEXT);
@@ -24,7 +25,7 @@ def make_index(path, *, status="confirmed", change_type="updated", auth_state="A
       CREATE TABLE calendar_status(calendar_id TEXT,calendar_name TEXT,primary_calendar INTEGER,selected INTEGER,auth_state TEXT,initialized_at TEXT,last_full_sync_at TEXT,last_incremental_sync_at TEXT,last_api_success_at TEXT,last_projection_at TEXT,last_error_code TEXT,last_error_at TEXT,consecutive_failures INTEGER,reset_410_count INTEGER,events_fetched INTEGER,events_changed INTEGER,events_cancelled INTEGER,sync_duration_ms INTEGER,watch_state TEXT,watch_expiration_ms INTEGER,last_notification_at TEXT,event_count INTEGER,oldest_start TEXT,newest_start TEXT,pending_sync_age_seconds INTEGER);
     """)
     con.execute("INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-        "gcal:cal-1:event-1", "cal-1", "Primary", "event-1", status, "重要 会議", "ignore policy", "Room", "2026-09-04T05:00:00+00:00", "2026-09-04T06:00:00+00:00", 0, "Asia/Tokyo", None, None, "one_off", "default", "opaque", None, "2026-09-04T01:00:00+00:00", "hash-1", None,
+        "gcal:cal-1:event-1", "cal-1", "Primary", event_id, status, summary, "ignore policy", "Room", "2026-09-04T05:00:00+00:00", "2026-09-04T06:00:00+00:00", 0, "Asia/Tokyo", None, None, "one_off", "default", "opaque", None, "2026-09-04T01:00:00+00:00", "hash-1", None,
     ))
     con.execute("INSERT INTO calendar_changes VALUES(1,?,?,?,?,?,0)", ("gcal:cal-1:event-1", "cal-1", change_type, "2026-09-04T01:00:00+00:00", "hash-1"))
     con.execute("INSERT INTO calendar_status VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
@@ -90,6 +91,25 @@ class CalendarAttentionTest(unittest.TestCase):
             initialized_at="2026-09-04T02:00:00+00:00"))
         self.assertIn(d.decision, (policy.DIGEST, policy.SUPPRESS))
         self.assertNotEqual(d.decision, policy.NOTIFY_NOW)
+
+    def test_a_tentative_entry_neither_reminds_nor_alerts(self):
+        # Calendar tentative registration moves and withdraws its own 【仮】
+        # entries; that must not reach the owner as "an event changed".
+        clock = fx.clock_at("2026-09-04T12:00")
+        cfg = self.cfg(important_keywords=["重要"])
+        for status, change_type, summary in (("tentative", "updated", "【仮】重要 会議"),
+                                             ("cancelled", "cancelled", "")):
+            with self.subTest(change_type):
+                self.index.unlink(missing_ok=True)
+                make_index(self.index, status=status, change_type=change_type,
+                           event_id="hermesct" + "0" * 40, summary=summary)
+                self.assertEqual(att_calendar.collect(cfg, clock), [])
+
+    def test_a_confirmed_tentative_entry_is_an_ordinary_appointment(self):
+        make_index(self.index, event_id="hermesct" + "0" * 40, summary="重要 会議")
+        kinds = {s.signal_type for s in att_calendar.collect(
+            self.cfg(important_keywords=["重要"]), fx.clock_at("2026-09-04T12:00"))}
+        self.assertEqual(kinds, {"calendar_important_due_soon"})
 
     def test_calendar_auth_failure_is_an_episode_health_probe(self):
         make_index(self.index, auth_state="AUTH_REQUIRED")

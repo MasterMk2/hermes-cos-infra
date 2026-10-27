@@ -345,6 +345,40 @@ class TestReconciliation(unittest.TestCase):
         self.assertEqual(cmt.work_state, WorkState.WAITING.value)
 
 
+class TestCalendarBackfill(unittest.TestCase):
+    """Calendar tentative registration's own 【仮】 entries are not backfilled."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        init_db(self.conn)
+        self.conn.execute("CREATE TABLE events (event_id TEXT PRIMARY KEY)")
+        self.cal = sqlite3.connect(":memory:")
+        self.cal.execute("""CREATE TABLE calendar_events (source_id TEXT, event_id TEXT,
+            status TEXT, summary TEXT, description TEXT, start_at TEXT, end_at TEXT,
+            updated_at TEXT)""")
+
+    def tearDown(self):
+        self.conn.close()
+        self.cal.close()
+
+    def add(self, event_id, status, summary):
+        self.cal.execute("INSERT INTO calendar_events VALUES (?, ?, ?, ?, '', ?, ?, ?)", (
+            f"gcal:owner:{event_id}", event_id, status, summary, "2026-10-05", "2026-10-06",
+            "2026-10-01T00:00:00+00:00"))
+
+    def test_only_real_and_confirmed_events_become_commitments(self):
+        own = "hermesct" + "0" * 40
+        self.add("real1", "confirmed", "【締切】レポート")
+        self.add(own + "a", "tentative", "【仮】〆 協賛ロゴの入稿")
+        self.add(own + "b", "cancelled", "")
+        self.add(own + "c", "tentative", "〆 見積書の送付")  # 【仮】 removed: confirmed
+        res = run_backfill(self.conn, self.cal)
+        self.assertEqual(res["calendar_events_added"], 2)
+        titles = {c.title for c in list_commitments(self.conn)}
+        self.assertEqual(titles, {"【締切】レポート", "〆 見積書の送付"})
+
+
 class TestAgendaProjection(unittest.TestCase):
     """Test Chief of Staff agenda generation across Today, Soon, Overdue, and Waiting."""
 
