@@ -144,7 +144,8 @@ CATS = [
     ('ratelimit', r'rate.?limit|\b429\b|quota|resource.?exhausted'),
     ('http5xx', r'\b50[0-4]\b|bad gateway|service unavailable'),
     ('error', r'\berror\b|exception|traceback'),
-    ('e2big', r'argument list too long|errno 7\b|e2big'),
+    ('e2big', r'argument list too long|errno 7\b|e2big|prompt too large'),
+    ('cli_call', r'cli call model='),
     ('cli_timeout', r'cli timed out after'),
     ('cli_failed', r'antigravity cli failed'),
     ('req', r'"post /v1/chat/completions'),
@@ -376,6 +377,35 @@ def cmd_gwparse(frm, to):
               f"{f(max(d['ans']) if d['ans'] else None):>8} {f(max(d['all']) if d['all'] else None):>8}  "
               + ' '.join(f"{c}={n}" for c, n in sorted(d['cls'].items())))
 
+BR_CALL = re.compile(r'cli call model=(\S+) status=(\d+) outcome=(\S+) duration=([\d.]+)s prompt_bytes=(\d+)')
+def cmd_bridgecalls(frm, to):
+    """Bridge per-call lines (logged only by the observability change)."""
+    win, days = [], {}
+    for line in sys.stdin:
+        ep, msg = parse_line(line.rstrip('\n'))
+        m = BR_CALL.search(msg) if ep is not None else None
+        if not m:
+            continue
+        model, status, outcome, dur, size = m.group(1), int(m.group(2)), m.group(3), float(m.group(4)), int(m.group(5))
+        d = days.setdefault(datetime.fromtimestamp(ep, JST).strftime('%Y-%m-%d'), {'dur': [], 'size': [], 'out': {}})
+        d['dur'].append(dur); d['size'].append(size); d['out'][outcome] = d['out'].get(outcome, 0) + 1
+        if frm <= ep <= to:
+            win.append((ep, model, status, outcome, dur, size))
+    if not days:
+        print("   (no 'cli call' lines: the deployed bridge predates the per-call log)")
+        return
+    f = lambda v: f"{v:.0f}" if v is not None else '-'
+    print(f"   {'day':<10} {'calls':>5} {'dur_p50':>7} {'dur_p90':>7} {'dur_max':>7} {'bytes_p50':>9} {'bytes_max':>9}  outcomes")
+    for k in sorted(days):
+        d = days[k]
+        print(f"   {k:<10} {len(d['dur']):>5} {f(pct(d['dur'], .5)):>7} {f(pct(d['dur'], .9)):>7} {f(max(d['dur'])):>7} "
+              f"{f(pct(d['size'], .5)):>9} {f(max(d['size'])):>9}  " + ' '.join(f"{o}={n}" for o, n in sorted(d['out'].items())))
+    print("   -- in window (several calls inside one Hermes turn = retries/fallback/tool rounds; sizes near 131072 = E2BIG risk)")
+    for ep, model, status, outcome, dur, size in win[:150]:
+        print(f"   {datetime.fromtimestamp(ep, JST):%H:%M:%S} {status} {outcome:<16} {dur:>6.1f}s {size:>8} B  {model}")
+    if not win:
+        print("   (none)")
+
 CLS_RE = re.compile(r'Classified \S+ in (\d+(?:\.\d+)?)s')
 def cmd_classifier(frm, to):
     win, days = [], {}
@@ -593,6 +623,8 @@ def main():
         cmd_counts(float(a[1]), float(a[2]), int(a[3]))
     elif c == 'gwparse':
         cmd_gwparse(float(a[1]), float(a[2]))
+    elif c == 'bridgecalls':
+        cmd_bridgecalls(float(a[1]), float(a[2]))
     elif c == 'classifier':
         cmd_classifier(float(a[1]), float(a[2]))
     elif c == 'filelog':
@@ -967,12 +999,15 @@ ps -u hermesantigravity -o pid,ppid,etimes,pcpu,rss,stat,wchan:20,comm 2>/dev/nu
 echo "   count by comm: $(ps -u hermesantigravity -o comm= 2>/dev/null | sort | uniq -c | tr -s ' ' | paste -sd',')"
 sub "established connections right now (8642 = Hermes API, 8765 = bridge)"
 echo "   :8642 $(ss -Htn state established '( sport = :8642 or dport = :8642 )' 2>/dev/null | wc -l)   :8765 $(ss -Htn state established '( sport = :8765 or dport = :8765 )' 2>/dev/null | wc -l)"
-BRKW='timed out|failed|exception|error|errno|argument list|parse|delegating|POST /|running on|stopping|traceback|started|stopped|exited|killed|code='
+BRKW='timed out|failed|exception|error|errno|argument list|too large|cli call|parse|delegating|POST /|running on|stopping|traceback|started|stopped|exited|killed|code='
 journalctl -u hermes-antigravity --since "$J_FROM" --until "$J_TO" -o short-unix --no-pager 2>/dev/null \
   | H tsv BR "$BRKW" > "$TMPD/br.tsv"
 cat "$TMPD/br.tsv" >> "$TL"
 sub "bridge category counts per 10 min in window (req=Hermes+broker calls; cli_timeout = 120s subprocess kill)"
 H counts "$FROM_EP" "$TO_EP" 600 < "$TMPD/br.tsv"
+sub "bridge CLI calls: duration and prompt size per call (content-free per-call log)"
+journalctl -u hermes-antigravity --since "$(date -d "@$((NOW_EP-14*86400))" '+%F %T')" -o short-unix --no-pager 2>/dev/null \
+  | H bridgecalls "$FROM_EP" "$TO_EP"
 sub "bridge daily counts, last 14 days"
 journalctl -u hermes-antigravity --since "$(date -d "@$((NOW_EP-14*86400))" '+%F %T')" -o short-unix --no-pager 2>/dev/null \
   | H tsv BR "$BRKW" | H counts "$((NOW_EP-14*86400))" "$NOW_EP" 86400
