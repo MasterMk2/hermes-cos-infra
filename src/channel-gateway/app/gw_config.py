@@ -88,11 +88,28 @@ DEFAULT_PROACTIVE = {
     "stuck_lease_seconds": 180,
 }
 
+# J.1. Off by default, and off means the coding route does not exist: the
+# gateway keeps sending every turn to Hermes exactly as it did before. Turning
+# it on is three decisions, not one — enable it, point it at a broker, and give
+# the broker a credential — because it is the only path in this service that
+# can cause a write outside the gateway.
+DEFAULT_CODING_HANDOFF = {
+    "enabled": False,
+    "endpoint": "http://127.0.0.1:18771",
+    "timeout_seconds": 20,
+    # How long a shown-but-unanswered proposal stays answerable.
+    "proposal_ttl_seconds": 1800,
+    # Registry lookups are cheap but not free, and the answer changes only when
+    # an operator edits the registry.
+    "projects_cache_seconds": 120,
+}
+
 SECRET_NAMES = (
     "line_channel_secret",
     "line_channel_access_token",
     "discord_interface_token",
     "hermes_api_key",
+    "coding_handoff_token",
 )
 
 
@@ -119,6 +136,7 @@ class Config:
     limits: dict
     retention: dict
     proactive: dict
+    coding_handoff: dict
     secrets: dict
     raw: dict = field(default_factory=dict, repr=False)
 
@@ -161,6 +179,16 @@ class Config:
         existing (G.2 sections 49, 83).
         """
         return bool(self.proactive.get("enabled")) and self.any_channel_ready
+
+    @property
+    def coding_handoff_ready(self) -> bool:
+        """Whether the coding route may engage at all.
+
+        A channel is required for the same reason the proactive socket needs
+        one: a route that can start a coding job but cannot tell the owner its
+        job id is worse than no route.
+        """
+        return bool(self.coding_handoff.get("enabled")) and self.any_channel_ready
 
 
 def _merge(section, defaults, what) -> dict:
@@ -236,6 +264,31 @@ def _validate_listen_host(value) -> str:
     return host
 
 
+def validate_handoff_endpoint(value) -> str:
+    """Loopback only, explicit port, no credentials, no path.
+
+    Stricter than `line.listen_host`, which has to be reachable from a proxy on
+    the LAN. This one is the opposite direction — the gateway calling out — and
+    the only correct destination is a service on this host. A typo that sent a
+    job-creation request to a LAN address would be a serious failure, so the
+    rule is written to make that impossible rather than unlikely.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(value or ""))
+    if parsed.scheme != "http":
+        raise ValueError("must be an http:// loopback origin")
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("must point at loopback (127.0.0.1, localhost or ::1)")
+    if parsed.username or parsed.password:
+        raise ValueError("must not embed credentials")
+    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError("must be a bare origin with no path, query or fragment")
+    if not parsed.port:
+        raise ValueError("requires an explicit port")
+    return str(value).rstrip("/")
+
+
 def parse_config(data: dict, path: str = "<memory>") -> Config:
     if not isinstance(data, dict):
         raise ConfigError("configuration root must be a mapping")
@@ -262,6 +315,25 @@ def parse_config(data: dict, path: str = "<memory>") -> Config:
     limits = _merge(data.get("limits"), DEFAULT_LIMITS, "limits")
     retention = _merge(data.get("retention"), DEFAULT_RETENTION, "retention")
     proactive = _merge(data.get("proactive"), DEFAULT_PROACTIVE, "proactive")
+    coding_handoff = _merge(data.get("coding_handoff"), DEFAULT_CODING_HANDOFF,
+                            "coding_handoff")
+
+    if coding_handoff["enabled"]:
+        # Validated only when the route is on, so an existing deployment that
+        # has never heard of this section keeps starting.
+        try:
+            coding_handoff["endpoint"] = validate_handoff_endpoint(
+                coding_handoff["endpoint"])
+        except ValueError as exc:
+            raise ConfigError(f"coding_handoff.endpoint: {exc}") from exc
+        if not (5 <= int(coding_handoff["timeout_seconds"]) <= 120):
+            raise ConfigError("coding_handoff.timeout_seconds must be 5..120")
+        if not (60 <= int(coding_handoff["proposal_ttl_seconds"]) <= 86400):
+            raise ConfigError(
+                "coding_handoff.proposal_ttl_seconds must be 60..86400")
+        if not (0 <= int(coding_handoff["projects_cache_seconds"]) <= 3600):
+            raise ConfigError(
+                "coding_handoff.projects_cache_seconds must be 0..3600")
 
     sock = str(proactive["socket_path"])
     if not sock.startswith("/"):
@@ -343,6 +415,7 @@ def parse_config(data: dict, path: str = "<memory>") -> Config:
         limits=limits,
         retention=retention,
         proactive=proactive,
+        coding_handoff=coding_handoff,
         secrets=secrets,
         raw=data,
     )

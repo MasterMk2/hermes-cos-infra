@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import sqlite3
 
-#: 2 adds the two G.2 tables. The bump is informational: every statement in
-#: SCHEMA is CREATE ... IF NOT EXISTS, so applying version 2 to a version 1
-#: database adds the new tables and touches nothing that exists (section 144).
-SCHEMA_VERSION = 2
+#: 2 adds the two G.2 tables, 3 adds the J.1 coding-handoff proposal table,
+#: 4 adds its pending-authorization columns. The
+#: bump is informational: every statement in SCHEMA is CREATE ... IF NOT
+#: EXISTS, so applying a later version to an earlier database adds the new
+#: tables and touches nothing that exists (section 144).
+SCHEMA_VERSION = 4
 
 # Inbound lifecycle (spec section 57). Terminal states are RESPONDED, FAILED
 # and CANCELLED; everything else is expected to move.
@@ -210,9 +212,48 @@ CREATE TABLE IF NOT EXISTS line_quota_cache (
   fetched_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 );
+
+-- J.1. At most one live coding-handoff proposal per conversation: the scope
+-- the gateway showed the owner and is willing to act on if they approve it.
+--
+-- `scope_digest` is what makes the approval specific. It covers the
+-- repository, agent, test command, write scope, acceptance criteria, declared
+-- toolchains and the exact bytes of the specification revision, so an
+-- authorization arriving after any of those changed is refused rather than
+-- applied to something the owner never read.
+--
+-- Consumed rows are kept rather than deleted. A redelivered webhook must be
+-- recognisable as the same authorization, and `consumed_by` is how the replay
+-- is told apart from a second, real approval.
+CREATE TABLE IF NOT EXISTS coding_handoff_proposals (
+  conversation_id   TEXT PRIMARY KEY,
+  project_key       TEXT NOT NULL,
+  token             TEXT NOT NULL,
+  scope_digest      TEXT NOT NULL,
+  spec_revision     INTEGER NOT NULL DEFAULT 0,
+  spec_sha256       TEXT,
+  origin_request_id TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  consumed_at       TEXT,
+  consumed_by       TEXT,
+  -- J.1: the authorization id of an attempt whose outcome this side never
+  -- learned. Set before the request leaves, cleared on a definite answer.
+  -- While it is set, a later turn in this conversation can ask about *that
+  -- authorization* — and a retry reuses its id rather than minting a new one,
+  -- which is what keeps one approval to one job across a lost reply.
+  pending_authorization_id TEXT,
+  pending_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_created
+  ON coding_handoff_proposals(created_at);
 """
 
 ADDITIVE = {
+    "coding_handoff_proposals": {
+        "pending_authorization_id": "TEXT",
+        "pending_at": "TEXT",
+    },
     "inbound_messages": {
         "platform_event_id": "TEXT",
         "hermes_run_id": "TEXT",

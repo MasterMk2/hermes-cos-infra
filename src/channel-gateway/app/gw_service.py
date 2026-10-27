@@ -63,6 +63,8 @@ from gw_config import (
     secret_status,
 )
 from gw_format import prepare_outbound, user_facing_error
+from gw_handoff import CodingHandoff
+from gw_handoff_client import HandoffClient
 from gw_hermes import HermesClient, HermesRejected, HermesUnavailable
 from gw_line import (
     SIGNATURE_HEADER,
@@ -180,6 +182,11 @@ class Gateway:
             model=cfg.hermes["model"],
             poll_interval=float(cfg.hermes["poll_interval_seconds"]),
             absolute_timeout=float(cfg.hermes["absolute_timeout_seconds"]),
+            # J.1: which capability sentence the envelope carries. Only true
+            # when the route is fully configured, so the assistant is never
+            # told coding can be started on a channel where it cannot.
+            coding_handoff=bool(cfg.coding_handoff_ready
+                                and secrets.get("coding_handoff_token")),
         )
         self.line = (
             LineClient(secrets["line_channel_access_token"])
@@ -198,6 +205,22 @@ class Gateway:
             else None
         )
         self.proactive = ProactiveServer(self) if cfg.proactive_ready else None
+        # J.1. `None` is the disabled state and is checked at the single call
+        # site, so a deployment that has not configured this route runs the
+        # same code path it ran before.
+        self.coding = None
+        if cfg.coding_handoff_ready and secrets.get("coding_handoff_token"):
+            self.coding = CodingHandoff(
+                client=HandoffClient(
+                    cfg.coding_handoff["endpoint"],
+                    secrets["coding_handoff_token"],
+                    timeout_seconds=float(cfg.coding_handoff["timeout_seconds"]),
+                ),
+                in_thread=self._in_thread,
+                ttl_seconds=int(cfg.coding_handoff["proposal_ttl_seconds"]),
+                projects_cache_seconds=int(
+                    cfg.coding_handoff["projects_cache_seconds"]),
+            )
         self.discord_bot = None       # set in run() when enabled
         self.session: aiohttp.ClientSession | None = None
 
@@ -371,6 +394,33 @@ class Gateway:
         session_id = await self._in_thread(
             store.session_id_for, message.conversation_id, message.platform
         )
+
+        # J.1. The coding route gets first refusal on the turn, and refuses
+        # nearly all of them: it answers only an owner's explicit request to
+        # start registered work, their explicit authorization of a scope it
+        # already showed them, or a question about a job it created. Everything
+        # else — planning, GitHub, health, the premium reasoning route — falls
+        # through to Hermes unchanged.
+        #
+        # It is deliberately not allowed to fail this turn. A broker outage
+        # produces an answer the owner can act on, and any unexpected error is
+        # logged and passed through to Hermes rather than costing them a reply.
+        if self.coding is not None:
+            try:
+                reply = await self.coding.handle(message)
+            except Exception:
+                log.exception("coding route failed for %s; falling through",
+                              request_id)
+                reply = None
+            if reply:
+                await self._in_thread(
+                    store.audit, "coding_handoff",
+                    request_id=request_id, platform=message.platform,
+                    authenticated=message.authenticated,
+                    capability_profile=message.capability_profile,
+                    detail="handled")
+                await self.deliver(row, message, reply)
+                return
 
         envelope = build_envelope(message)
         try:
@@ -751,6 +801,14 @@ def load_all_secrets(cfg) -> dict:
     if cfg.discord_ready:
         secrets["discord_interface_token"] = load_secret(
             cfg, "discord_interface_token"
+        )
+    if cfg.coding_handoff.get("enabled"):
+        # Not required: a gateway whose broker credential has not been
+        # provisioned yet must still start and keep answering. The route stays
+        # off until the credential is there, which is also what the envelope's
+        # capability sentence is keyed on.
+        secrets["coding_handoff_token"] = load_secret(
+            cfg, "coding_handoff_token", required=False
         )
     return secrets
 

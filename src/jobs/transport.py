@@ -34,8 +34,22 @@ BRIDGE_SOCK_CANDIDATES = [
     "/home/<PI_USER>/coding-worker/bridge-sock/bridge.sock",
 ]
 
+#: J.1: an explicit override, for a supervisor running outside the Hermes
+#: container. The host fallback above is an operator-specific literal and
+#: cannot be relied on; a process that knows where the socket is should say so
+#: rather than have this list guess. Unset — which is every existing
+#: deployment — changes nothing.
+BRIDGE_SOCK_ENV = "HERMES_CODING_BRIDGE_SOCK"
+
 
 def bridge_sock():
+    override = os.environ.get(BRIDGE_SOCK_ENV)
+    if override:
+        if not os.path.exists(override):
+            raise WorkerUnconfigured(
+                f"{BRIDGE_SOCK_ENV} points at {override!r}, which does not exist"
+            )
+        return override
     for p in BRIDGE_SOCK_CANDIDATES:
         if os.path.exists(p):
             return p

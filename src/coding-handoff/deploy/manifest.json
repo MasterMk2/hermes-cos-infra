@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "phase": "J.1",
+  "components": {
+    "gateway": {
+      "service": "channel-gateway.service",
+      "files": [
+        {
+          "source": "src/channel-gateway/app/gw_canonical.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_canonical.py",
+          "mode": "0644",
+          "payload_sha256": "15b54bd7afbebc6c9d2d6f1fc535c10a7fbebf0021f44572dde4e8a239341116",
+          "baseline_sha256": "65c208d40a4f7ff958855440a68c6eb17458cdf7ed9d831b919805547f6cfd30"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_coding.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_coding.py",
+          "mode": "0644",
+          "payload_sha256": "9b2f5f12fa7983cb7528d9551bc09cc809a96fff16972974123d0f9e704cbe2f",
+          "baseline_sha256": "72b6e3dfb6c8b190419ff5e2b31a6a9682224ce2ddf8a1bdac89b30165cb8c7a"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_config.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_config.py",
+          "mode": "0644",
+          "payload_sha256": "bae028fb52dcb27f3ebba6d76a36762f2e4af8c114f786ee99aabf1d4695bf17",
+          "baseline_sha256": "bae028fb52dcb27f3ebba6d76a36762f2e4af8c114f786ee99aabf1d4695bf17"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_handoff.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_handoff.py",
+          "mode": "0644",
+          "payload_sha256": "2521db2ca9efdf3384e14a5bd81f8b9eb2b65fe20689417916677eb889454374",
+          "baseline_sha256": "60f43eb5f3b459b4dd8a9ac61963695e9acfb7a821a723c120b880a755d9a126"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_handoff_client.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_handoff_client.py",
+          "mode": "0644",
+          "payload_sha256": "cfe7a4eb8c6da3f8724b499e3044c5f478e5134c1b35369a39fa6c0cb5303f45",
+          "baseline_sha256": "cfe7a4eb8c6da3f8724b499e3044c5f478e5134c1b35369a39fa6c0cb5303f45"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_hermes.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_hermes.py",
+          "mode": "0644",
+          "payload_sha256": "b43f1ba890792e1edfd6f46624ebb262ea86fbe059650e00c89e703ed0cb7306",
+          "baseline_sha256": "b43f1ba890792e1edfd6f46624ebb262ea86fbe059650e00c89e703ed0cb7306"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_schema.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_schema.py",
+          "mode": "0644",
+          "payload_sha256": "8618bacf5efd51f4a7bb8d4558091eb669f599a73e78f5d102b74d9b4ff01ac1",
+          "baseline_sha256": "8618bacf5efd51f4a7bb8d4558091eb669f599a73e78f5d102b74d9b4ff01ac1"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_service.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_service.py",
+          "mode": "0644",
+          "payload_sha256": "e61002a12a6a072d5111b4f5e3a5c2780b6ad5c162118d4c05a45e33605950f5",
+          "baseline_sha256": "e61002a12a6a072d5111b4f5e3a5c2780b6ad5c162118d4c05a45e33605950f5"
+        },
+        {
+          "source": "src/channel-gateway/app/gw_store.py",
+          "target": "/srv/hermes/channel-gateway/app/gw_store.py",
+          "mode": "0644",
+          "payload_sha256": "b837d71e208536f268112f5df66d7a3f825111ddccdad535896ecaf8923980dc",
+          "baseline_sha256": "1802fab638d388a0534a554909a51cc26a595f9f9f92597f4918e087d1d7ad66"
+        }
+      ]
+    },
+    "broker": {
+      "service": "hermes-coding-handoff.service",
+      "files": [
+        {
+          "source": "src/coding-handoff/app/handoff_core.py",
+          "target": "/opt/hermes-coding-handoff/app/handoff_core.py",
+          "mode": "0644",
+          "payload_sha256": "212ad5ba78c0aa390e6f396807422ca8b001a7a4500fbcb337612f0a84156c55",
+          "baseline_sha256": null
+        },
+        {
+          "source": "src/coding-handoff/app/handoff_ledger.py",
+          "target": "/opt/hermes-coding-handoff/app/handoff_ledger.py",
+          "mode": "0644",
+          "payload_sha256": "2976675aa9c80e40f2887314d2c9e5099d2addc761d1c72a80abd3ee56783a19",
+          "baseline_sha256": null
+        },
+        {
+          "source": "src/coding-handoff/app/handoff_registry.py",
+          "target": "/opt/hermes-coding-handoff/app/handoff_registry.py",
+          "mode": "0644",
+          "payload_sha256": "64b55adaf0b63eb6d1e4b0b52f92edaa9f885d09198e7fdfdc95216e0143d3ae",
+          "baseline_sha256": null
+        },
+        {
+          "source": "src/coding-handoff/app/handoff_server.py",
+          "target": "/opt/hermes-coding-handoff/app/handoff_server.py",
+          "mode": "0644",
+          "payload_sha256": "009392e0cc8016d02afd35d946315717cabc2146c3419bb92fabbf54bc21c15e",
+          "baseline_sha256": null
+        },
+        {
+          "source": "src/coding-handoff/app/handoff_spec.py",
+          "target": "/opt/hermes-coding-handoff/app/handoff_spec.py",
+          "mode": "0644",
+          "payload_sha256": "a2dec3131c0ed74b58cd10c6aff4aed052c60b1fa20d7eb652b98381074f0765",
+          "baseline_sha256": null
+        },
+        {
+          "source": "src/coding-handoff/config/projects.sample.json",
+          "target": "/opt/hermes-coding-handoff/config/projects.sample.json",
+          "mode": "0640",
+          "payload_sha256": "122c21e9a59b6a77cf44794af0031f9ac31f00ef4affcded4c8b16c77513cecf",
+          "baseline_sha256": null
+        },
+        {
+          "source": "src/coding-handoff/specs/fastrawphotoview/0001-nas-raw-browser-foundation.md",
+          "target": "/opt/hermes-coding-handoff/specs/fastrawphotoview/0001-nas-raw-browser-foundation.md",
+          "mode": "0640",
+          "payload_sha256": "7718058cbfb9b58d68893277935ea410218634c6f615826223ecd8185f53b0d8",
+          "baseline_sha256": null
+        },
+        {
+          "source": "src/coding-handoff/specs/handoff-protocol-check/0001-route-verification.md",
+          "target": "/opt/hermes-coding-handoff/specs/handoff-protocol-check/0001-route-verification.md",
+          "mode": "0640",
+          "payload_sha256": "9af2747d51a167ff82f4deb8749dee8dca6d6b83fbc82e9a91e3f7efdfcb8b15",
+          "baseline_sha256": null
+        }
+      ]
+    },
+    "units": {
+      "service": null,
+      "files": [
+        {
+          "source": "src/coding-handoff/systemd/channel-gateway-handoff.conf",
+          "target": "/etc/systemd/system/channel-gateway.service.d/10-coding-handoff.conf",
+          "mode": "0644",
+          "payload_sha256": "089768e0048433932a8c066588414fbd064916375240a7331d910e368769d73e",
+          "baseline_sha256": null
+        }
+      ]
+    }
+  },
+  "job_patches": [
+    {
+      "kind": "create-job-id",
+      "target": "/srv/hermes/hermes-data/jobs/jobs_db.py",
+      "live_sha256": "4597f1ece4665800cb9508bc46d0be12e07f87b5f3b8bb7b4a07c3c102c2d167",
+      "reference": "src/jobs/jobs_db.py",
+      "note": "adds the optional deterministic job_id; required for dispatch"
+    },
+    {
+      "kind": "bridge-sock-env",
+      "target": "/srv/hermes/hermes-data/jobs/transport.py",
+      "live_sha256": "6248cdda0d8eb9aad81a48f9668a6c062a81bdc429e0df748c93cd2a68dc31ed",
+      "reference": "src/jobs/transport.py",
+      "note": "adds HERMES_CODING_BRIDGE_SOCK; preserves the existing fallback"
+    }
+  ],
+  "unmodified_drift": [
+    {
+      "path": "/srv/hermes/antigravity/app/bridge_server.py",
+      "deployed_sha256": "7a2f740fbd3bd83c2d9a66f4f65189f67d30de84ba1a51eb85c20081a09aeb5d",
+      "note": "premium CLI routing release; not modified by J.1"
+    },
+    {
+      "path": "/srv/hermes/antigravity/app/bridge_config.py",
+      "deployed_sha256": "5c630c6cebd08120898ae403b2a7bf4de3ca5931b4448f5c86dee9369cf01a86",
+      "note": "premium CLI routing release; not modified by J.1"
+    },
+    {
+      "path": "/srv/hermes/antigravity/app/premium_routing.py",
+      "deployed_sha256": "1946c22e957f87b51e12d446e40e9bc03221e0e45c6c987cb570cd4206f18f9b",
+      "note": "premium CLI routing release; not modified by J.1"
+    }
+  ]
+}

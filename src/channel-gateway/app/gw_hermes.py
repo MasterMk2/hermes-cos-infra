@@ -83,15 +83,20 @@ def idempotency_key(gateway_request_id: str) -> str:
 
 
 def build_run_body(envelope: TrustedEnvelope, user_text: str, *,
-                   session_id: str, model: str) -> dict:
+                   session_id: str, model: str,
+                   coding_handoff: bool = False) -> dict:
     """The complete request. Every value is the gateway's own.
 
     Note the shape of the seam: `instructions` is rendered from the envelope
     dataclass, `input` is the raw user text, and there is no third field into
     which anything else could be merged.
+
+    `coding_handoff` selects which capability sentence the envelope carries. It
+    is a gateway configuration value, never anything derived from the message.
     """
     return {
-        "instructions": render_envelope_system_message(envelope),
+        "instructions": render_envelope_system_message(
+            envelope, coding_handoff=coding_handoff),
         "input": str(user_text or ""),
         "session_id": session_id,
         "model": model,
@@ -103,10 +108,14 @@ class HermesClient:
 
     def __init__(self, base_url: str, api_key: str, *, model: str = "hermes-agent",
                  poll_interval: float = 2.0, absolute_timeout: float = 240.0,
-                 connect_timeout: float = 30.0):
+                 connect_timeout: float = 30.0,
+                 coding_handoff: bool = False):
         self.base_url = base_url.rstrip("/")
         self._api_key = api_key
         self.model = model
+        # Which capability sentence every envelope carries (J.1). Set once from
+        # configuration; there is no per-request override, deliberately.
+        self.coding_handoff = bool(coding_handoff)
         self.poll_interval = poll_interval
         self.absolute_timeout = absolute_timeout
         self.connect_timeout = connect_timeout
@@ -147,7 +156,8 @@ class HermesClient:
         """Returns (run_id, replayed). Raises on a refusal that a retry
         cannot fix."""
         body = build_run_body(envelope, user_text, session_id=session_id,
-                              model=self.model)
+                              model=self.model,
+                              coding_handoff=self.coding_handoff)
         status, payload = self._request(
             "POST", "/v1/runs", body,
             {"Idempotency-Key": idempotency_key(request_id)},
