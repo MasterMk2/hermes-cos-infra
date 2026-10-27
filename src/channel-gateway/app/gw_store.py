@@ -224,7 +224,7 @@ def release_conversation(con: sqlite3.Connection, conversation_id: str) -> None:
 
 
 def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LEASE_SECONDS,
-                  max_attempts: int = 3) -> dict:
+                  max_attempts: int = 3, refund_resumable: bool = False) -> dict:
     """Return abandoned claims to the queue (section 118).
 
     Discord replies resume only a confirmed prefix plus a proven-unsent tail.
@@ -232,7 +232,9 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
     All confirmed chunks settle the request without regenerating or sending.
     LINE batches follow the same hold rule, but never resume a partial batch
     or change a started reply into a push. A request without uncertain
-    delivery is bounded by max_attempts.
+    delivery is bounded by max_attempts. With refund_resumable (startup
+    only), a row that already has a Hermes run gets back the attempt its
+    interrupted claim used: a restart is not a failed try.
     """
     # Select and recover under the same write lock as chunk claims. Otherwise
     # a live caller can refresh the lease between selection and invalidation.
@@ -244,7 +246,8 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
         con.execute("UPDATE inbound_messages SET updated_at=updated_at WHERE 0")
     cutoff = _iso_minus(lease_seconds)
     rows = con.execute(
-        "SELECT gateway_request_id, attempts, conversation_id, platform FROM inbound_messages"
+        "SELECT gateway_request_id, attempts, conversation_id, platform, hermes_run_id"
+        " FROM inbound_messages"
         " WHERE state = 'PROCESSING' AND (claimed_at IS NULL OR claimed_at < ?)",
         (cutoff,),
     ).fetchall()
@@ -267,7 +270,12 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
                 # Unknown is held even when the request exhausted its budget.
                 reply_unknown += 1
                 continue
-        if int(r["attempts"] or 0) >= max_attempts:
+        attempts = int(r["attempts"] or 0)
+        if refund_resumable and r["hermes_run_id"] and attempts > 0:
+            attempts -= 1
+            con.execute("UPDATE inbound_messages SET attempts = ? WHERE gateway_request_id = ?",
+                        (attempts, r["gateway_request_id"]))
+        if attempts >= max_attempts:
             set_state(con, r["gateway_request_id"], "FAILED", error="max_attempts")
             failed += 1
         else:

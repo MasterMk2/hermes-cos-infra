@@ -709,7 +709,11 @@ if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/src/channel-gateway/app/gw_service.py
   REPO_OWNER=$(stat -c %U "$REPO_ROOT" 2>/dev/null)
   rgit() { timeout 30 sudo -u "${REPO_OWNER:-nobody}" git --no-optional-locks -C "$REPO_ROOT" "$@" 2>/dev/null; }
   REV=$(rgit rev-parse --short HEAD || echo '?')
-  DIRTY=$(rgit status --porcelain --untracked-files=no | wc -l)
+  if ST=$(rgit status --porcelain --untracked-files=no); then
+    DIRTY=$(printf '%s' "$ST" | grep -c .)
+  else
+    DIRTY="? (git status as $REPO_OWNER failed)"
+  fi
   sub "deployed vs this checkout ($REPO_ROOT @ $REV, $DIRTY locally modified tracked files)"
   for f in "$REPO_ROOT"/src/channel-gateway/app/*.py; do
     printf '%s %s\n' "$f" "$GW/app/$(basename "$f")"

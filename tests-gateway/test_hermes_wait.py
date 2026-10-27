@@ -274,6 +274,71 @@ def test_a_run_still_going_after_its_deadline_is_read_once_then_timed_out(tmp_pa
     assert replies(restarted) == [USER_FACING_TIMEOUT]
 
 
+def test_restarts_during_one_wait_do_not_use_up_its_attempts(tmp_path):
+    # Second review: every startup requeue cost an attempt, so three restarts
+    # during one long wait failed the request with no reply at all.
+    db = tmp_path / "gw.db"
+    gw = stop_mid_wait(db)
+    for _ in range(4):
+        restarted = make_gateway(db)
+        run(restarted.recover_previous_process())
+        assert inbound(restarted)["state"] == "QUEUED"
+        assert claim(restarted)["gateway_request_id"] == "req-1"
+    assert inbound(gw)["attempts"] <= 2
+    final = make_gateway(db, hermes_steps=[{"status": "completed", "output": "最後に届く答え"}])
+    run(final.recover_previous_process())
+    run(final.process(claim(final)))
+    assert final.hermes.started == []
+    assert replies(final) == ["最後に届く答え"]
+
+
+def test_a_request_that_never_reached_hermes_still_counts_its_attempts(tmp_path):
+    # The poison-message bound stays for rows with no run: claimed, then the
+    # process died before Hermes was asked.
+    db = tmp_path / "gw.db"
+    gw = make_gateway(db)
+    seed(gw)                                    # attempts 1, no run id
+    for _ in range(2):
+        restarted = make_gateway(db)
+        run(restarted.recover_previous_process())
+        claim(restarted)
+    run(make_gateway(db).recover_previous_process())
+    current = inbound(gw)
+    assert (current["state"], current["last_error"]) == ("FAILED", "max_attempts")
+
+
+def test_the_worker_claims_nothing_until_startup_has_finished(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db")
+    seed(gw, claim=False)
+
+    async def scenario():
+        gw.started = asyncio.Event()
+        worker = asyncio.create_task(gw.worker())
+        await asyncio.sleep(0.2)
+        assert inbound(gw)["state"] == "QUEUED"     # a failing start takes nothing
+        gw.stop.set()
+        gw.wake.set()
+        await asyncio.wait_for(worker, 10)
+
+    run(scenario())
+    assert inbound(gw)["state"] == "QUEUED"
+
+
+def test_a_forgotten_run_past_its_deadline_is_not_started_again(tmp_path):
+    db = tmp_path / "gw.db"
+    gw = stop_mid_wait(db)
+    con = gw.db()
+    late = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    con.execute("UPDATE inbound_messages SET run_started_at = ?", (late,))
+    con.commit()
+    con.close()
+    restarted = make_gateway(db, hermes_steps=[HermesRejected("run_not_found")])
+    run(restarted.recover_previous_process())
+    run(restarted.process(claim(restarted)))
+    assert restarted.hermes.started == []
+    assert replies(restarted) == [USER_FACING_TIMEOUT]
+
+
 def test_requests_left_by_a_stopped_process_do_not_hold_every_slot(tmp_path):
     db = tmp_path / "gw.db"
     gw = make_gateway(db)

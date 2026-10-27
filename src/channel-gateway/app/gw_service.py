@@ -203,6 +203,11 @@ class Gateway:
         self.secrets = secrets
         self.wake = asyncio.Event()
         self.stop = asyncio.Event()
+        # run() sets this once every listener has started. Until then the
+        # worker claims nothing, so a start that fails (a port in use, a
+        # missing socket dir) cannot take a request with it: each claim
+        # costs one of its max_attempts.
+        self.started: asyncio.Event | None = None
         self.hermes = HermesClient(
             cfg.hermes["base_url"],
             secrets["hermes_api_key"],
@@ -374,6 +379,12 @@ class Gateway:
         """
         max_active = int(self.cfg.limits["max_active_requests"])
         tasks: set = set()
+        if self.started is not None:
+            gate = asyncio.ensure_future(self.started.wait())
+            halt = asyncio.ensure_future(self.stop.wait())
+            await asyncio.wait({gate, halt}, return_when=asyncio.FIRST_COMPLETED)
+            for f in (gate, halt):
+                f.cancel()
         try:
             while not self.stop.is_set():
                 if len(tasks) >= max_active:
@@ -585,6 +596,15 @@ class Gateway:
                     result.elapsed = int(now - started.timestamp())
                     return result
             except HermesRejected as exc:
+                if str(exc) == "run_not_found" and now >= deadline:
+                    # Past the deadline a fresh run's answer would only be
+                    # thrown away, after doing all of its work (tool calls,
+                    # session history) in the conversation's session.
+                    log.warning("hermes no longer knew the run for %s and its time is up",
+                                request_id)
+                    result = HermesResult("timeout", "", run_id)
+                    result.elapsed = int(now - started.timestamp())
+                    return result
                 if str(exc) == "run_not_found" and not restarted:
                     restarted = True
                     try:
@@ -877,10 +897,13 @@ class Gateway:
         ten minutes, by which time a resumed wait is past its deadline. They
         go back to the queue now with their run id and start; uncertain
         replies are held exactly as recover_stale holds them after a lease
-        expires.
+        expires. A row with a stored run was only interrupted, not tried and
+        failed, so it gets its attempt back: three restarts during one long
+        wait must not fail the request without a reply.
         """
         try:
-            recovered = await self._in_thread(store.recover_stale, lease_seconds=0)
+            recovered = await self._in_thread(store.recover_stale, lease_seconds=0,
+                                              refund_resumable=True)
         except Exception:
             log.exception("startup recovery failed; the lease will recover them")
             return None
@@ -891,6 +914,7 @@ class Gateway:
     async def run(self):
         self.session = aiohttp.ClientSession()
         self._seed_quota_cache()
+        self.started = asyncio.Event()
         await self.recover_previous_process()
         tasks = [asyncio.create_task(self.worker(), name="worker"),
                  asyncio.create_task(self.maintenance(), name="maintenance")]
@@ -929,6 +953,7 @@ class Gateway:
             # worker and the channels that will carry it.
             await self.proactive.start(self.cfg.proactive["socket_path"])
 
+        self.started.set()
         await self.stop.wait()
         log.info("shutting down")
 

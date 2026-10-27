@@ -183,6 +183,27 @@ class TestOwnerDmIsQueued(DiscordAdapterTestCase):
             con.close()
         self.assertEqual(row["text"], "一通目")
 
+    async def test_a_dm_queued_at_shutdown_is_still_recorded(self):
+        # Second review: DMs parked behind an intake lock were cancelled at
+        # shutdown before they were written, and Discord does not redeliver.
+        import asyncio
+        import time
+        original = self.bot._record
+
+        def slow(canonical):
+            time.sleep(0.2)
+            return original(canonical)
+
+        self.bot._record = slow
+        tasks = [asyncio.create_task(self.bot._handle(
+            fake_message(content=f"{i}通目", message_id=10 + i))) for i in range(3)]
+        await asyncio.sleep(0.05)
+        for t in tasks:
+            t.cancel()      # what asyncio.run does to leftover tasks on exit
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(self.bot._intake.shutdown, wait=True)
+        self.assertEqual(self.counts().get("QUEUED"), 3)
+
     async def test_typing_pulse_is_best_effort(self):
         class Channel:
             def __init__(self, error=None):

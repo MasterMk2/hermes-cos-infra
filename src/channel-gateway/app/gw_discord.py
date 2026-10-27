@@ -31,6 +31,7 @@ the rest. That is the whole of section 12's "the gateway is not an agent".
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 
 import discord
@@ -94,11 +95,15 @@ class InterfaceBot(discord.Client):
         # Resolved lazily by `owner_dm_channel`, cleared whenever opening it
         # fails so a transient error cannot pin a broken handle forever.
         self._owner_dm = None
-        # Orders intake commits. Each DM is its own task; with the SQLite work
-        # in a thread, two DMs sent back to back could commit (and be claimed)
-        # in either order. asyncio.Lock wakes waiters first in, first out, and
-        # nothing awaits before it in _handle, so commits follow dispatch.
-        self._record_lock = asyncio.Lock()
+        # Intake commits, in dispatch order. Each DM is its own task; with the
+        # SQLite work on the shared pool, two DMs sent back to back could
+        # commit (and be claimed) in either order. One worker thread runs jobs
+        # in submission order, and nothing awaits before the submission in
+        # _handle. A job is queued at dispatch, not parked behind a lock, so a
+        # shutdown that cancels the DM's task still lets it commit: queued
+        # jobs run before the interpreter exits.
+        self._intake = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="discord-intake")
 
     # -- lifecycle -----------------------------------------------------
 
@@ -159,8 +164,10 @@ class InterfaceBot(discord.Client):
         # SQLite work runs in a thread. On the event loop it shares the thread
         # with discord.py's gateway heartbeat, and a slow USB write once held
         # that heartbeat long enough to risk a shard reconnect.
-        async with self._record_lock:
-            outcome = await asyncio.to_thread(self._record, canonical)
+        job = asyncio.get_running_loop().run_in_executor(self._intake, self._record,
+                                                         canonical)
+        # Shielded: cancelling this task must not withdraw a queued commit.
+        outcome = await asyncio.shield(job)
         if outcome == "not_owner":
             log.info("dropped non-owner DM from %s", message.author.id)
         elif outcome == "queued":

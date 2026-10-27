@@ -127,12 +127,32 @@ class TestEpisodes(unittest.TestCase):
         back = run(con, [held], cfg, fx.clock_at("2026-10-27T05:45"))
         self.assertEqual([(s.signal_type, s.metadata["reason"]) for s in back],
                          [("health_recovered", "unreachable")])
+        # Not 「gateway は復旧しました」: the Hermes failure is still open.
+        self.assertNotIn("gateway は復旧しました", back[0].summary)
+        self.assertIn("継続中", back[0].summary)
+        self.assertEqual(back[0].metadata["still_open"], ["hermes_failing"])
         self.assertEqual([e["reason"] for e in store.open_episodes(con, "gateway")],
                          ["hermes_failing"])
         # The next outage is a new episode and is announced once it lasts.
         run(con, [down], cfg, fx.clock_at("2026-10-28T02:00"))
         again = run(con, [down], cfg, fx.clock_at("2026-10-28T02:20"))
         self.assertEqual([s.signal_type for s in again], ["health_degraded"])
+
+    def test_an_unannounced_held_failure_does_not_age_into_an_instant_alert(self):
+        # Second review: a hermes_failing seen once, then pre-empted by another
+        # reason until it aged out, was held forever; a single failure days
+        # later inherited its age and went out as URGENT at once.
+        cfg, con = self.cfg, self.con
+        run(con, [probe("gateway", False, "hermes_failing")], cfg,
+            fx.clock_at("2026-10-27T10:00"))
+        held = health.Probe("gateway", True, hold_reasons=("hermes_failing",))
+        self.assertEqual(run(con, [held], cfg, fx.clock_at("2026-10-27T11:05")), [])
+        self.assertEqual(store.open_episodes(con, "gateway"), [])
+        later = probe("gateway", False, "hermes_failing")
+        self.assertEqual(run(con, [later], cfg, fx.clock_at("2026-10-30T14:00")), [])
+        out = run(con, [later], cfg, fx.clock_at("2026-10-30T14:20"))
+        self.assertEqual([s.signal_type for s in out], ["health_degraded"])
+        self.assertLess(out[0].metadata["degraded_seconds"], 3600)
 
     def test_recovery_from_a_failure_nobody_heard_about_is_silent(self):
         # Section 38. Announcing the end of a problem that was never announced
