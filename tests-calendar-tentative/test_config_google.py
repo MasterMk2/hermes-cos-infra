@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import socket
 import unittest
 import urllib.error
 import urllib.parse
 from unittest import mock
 
-from ct_fixtures import CALENDAR_ID
+from ct_fixtures import CALENDAR_ID, ROOT
 
 import ct_google as gg
-from ct_config import ConfigError, parse_config
+from ct_config import ConfigError, load_config, parse_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -37,6 +38,13 @@ class ConfigTests(unittest.TestCase):
                      {"selection": {"horizon": 3}}, {"extra": {}}):
             with self.subTest(data=data), self.assertRaises(ConfigError):
                 parse_config(data)
+
+    def test_the_shipped_sample_parses_as_documented(self):
+        path = os.path.join(ROOT, "src", "calendar-tentative", "config", "config.sample.yaml")
+        cfg = load_config(path)
+        self.assertEqual(cfg.selection["gmail_only"], "people")
+        self.assertEqual(cfg.calendar_id, "")
+        self.assertTrue(cfg.notify["enabled"])
 
     def test_values_are_range_checked(self):
         for data in ({"selection": {"horizon_days": 0}},

@@ -82,6 +82,7 @@ class Workspace:
         self.gmail = sqlite3.connect(self.gmail_path)
         self.gmail.executescript(GMAIL_INDEX_SCHEMA)
         self._n = 0
+        self._mail_clock = 1_790_000_000_000
 
     def close(self):
         self.events.close()
@@ -92,9 +93,16 @@ class Workspace:
     # -- gmail index -----------------------------------------------------
 
     def add_mail(self, source_id, *, sender="Someone <someone@example.org>",
-                 to=OWNER_ADDRESS, cc="", labels=("INBOX",), thread_id=None,
-                 is_sent=False, deleted=False, subject="件名", body="本文"):
-        """One row of H.2's published index. `source_id` is `gmail:<id>`."""
+                 to=OWNER_ADDRESS, cc="", labels=("INBOX", "CATEGORY_PERSONAL"),
+                 thread_id=None, is_sent=False, deleted=False, subject="件名", body="本文",
+                 at=None):
+        """One row of H.2's published index. `source_id` is `gmail:<id>`.
+
+        The default labels are a person's mail filed under Primary. `at` is
+        internal_date_ms; by default each mail is a minute after the last.
+        """
+        self._mail_clock += 60_000
+        at = self._mail_clock if at is None else at
         labels = list(labels) + (["SENT"] if is_sent and "SENT" not in labels else [])
         message_id = source_id.split(":", 1)[-1]
         self.gmail.execute(
@@ -103,13 +111,18 @@ class Workspace:
                  routine_excluded, snippet, body_text, commitment_text, content_state, mime_json,
                  attachments_json, is_sent, deleted_at, indexed_at, revision, baseline,
                  content_hash)
-               VALUES (?, ?, ?, '2026-09-30T00:00:00+00:00', 0, ?, ?, ?, ?, ?, 0, '', ?, ?,
+               VALUES (?, ?, ?, '2026-09-30T00:00:00+00:00', ?, ?, ?, ?, ?, ?, 0, '', ?, ?,
                        'available', '{}', '[]', ?, ?, '2026-09-30T00:00:00+00:00', 0, 0, 'h')""",
-            (source_id, message_id, thread_id or f"t-{message_id}",
+            (source_id, message_id, thread_id or f"t-{message_id}", at,
              OWNER_ADDRESS if is_sent else sender, to, cc, subject,
              json.dumps(labels), body, body, 1 if is_sent else 0,
              "2026-09-30T00:00:00+00:00" if deleted else None),
         )
+        self.gmail.commit()
+
+    def relabel_mail(self, source_id, labels):
+        self.gmail.execute("UPDATE gmail_messages SET labels_json = ? WHERE source_id = ?",
+                           (json.dumps(list(labels)), source_id))
         self.gmail.commit()
 
     # -- commitments -----------------------------------------------------
