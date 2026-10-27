@@ -897,19 +897,31 @@ class Gateway:
         ten minutes, by which time a resumed wait is past its deadline. They
         go back to the queue now with their run id and start; uncertain
         replies are held exactly as recover_stale holds them after a lease
-        expires. A row with a stored run was only interrupted, not tried and
-        failed, so it gets its attempt back: three restarts during one long
-        wait must not fail the request without a reply.
+        expires. After a clean shutdown a row with a stored run was only
+        interrupted, not tried and failed, so it gets its attempt back: three
+        restarts during one long wait must not fail the request without a
+        reply. After a crash it does not, so a request that kills the process
+        whenever it is resumed still ends at max_attempts.
         """
+        def _recover(con):
+            clean = store.take_clean_shutdown(con)
+            return store.recover_stale(con, lease_seconds=0, refund_resumable=clean)
+
         try:
-            recovered = await self._in_thread(store.recover_stale, lease_seconds=0,
-                                              refund_resumable=True)
+            recovered = await self._in_thread(_recover)
         except Exception:
             log.exception("startup recovery failed; the lease will recover them")
             return None
         if any(recovered.values()):
             log.warning("recovered the previous process's requests: %s", recovered)
         return recovered
+
+    async def note_clean_shutdown(self):
+        """Last act of a deliberate stop: see recover_previous_process."""
+        try:
+            await self._in_thread(store.note_clean_shutdown)
+        except Exception:
+            log.exception("could not record the clean shutdown")
 
     async def run(self):
         self.session = aiohttp.ClientSession()
@@ -967,6 +979,8 @@ class Gateway:
         if runner is not None:
             await runner.cleanup()
         await self.session.close()
+        # Only now: every wait has stopped and left its row PROCESSING.
+        await self.note_clean_shutdown()
 
 
 # ------------------------------------------------------------------- main

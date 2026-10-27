@@ -66,7 +66,9 @@ sudo bash src/channel-gateway/bin/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
   deploy.sh は config.yaml を書き換えない。240 のままだと、遅れた回答を待つ時間は以前と同じ
 - 起動時に、前のプロセスが PROCESSING のまま残した行をすぐ queue に戻す（同じ DB を使う Gateway は 1 つだけ、という前提。
   2 つ同時に動かさないこと）。送信中だった返信は lease 切れのときと同じく UNKNOWN で保留し、再送しない。
-  run を保存済みの行は再起動で試行回数（max_attempts）を減らさない。起動が全部終わるまで worker は何も取らない
+  正常停止（SIGTERM）の後なら、run を保存済みの行は再起動で試行回数（max_attempts）を減らさない。
+  クラッシュや OOM kill の後は減らすので、毎回プロセスを落とす依頼も 3 回で FAILED になり、会話が詰まり続けない。
+  起動が全部終わるまで worker は何も取らない
 - 配備は `src/channel-gateway/bin/deploy.sh`（コピーして差分を表示するだけ。再起動は別手順）
 - 旧版へ戻すと、PROCESSING のまま残った行を旧コードが新しい run で処理し直すことがある。
   戻すなら受信を止め、PROCESSING 行が無いことを確かめてから

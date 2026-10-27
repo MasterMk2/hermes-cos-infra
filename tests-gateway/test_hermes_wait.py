@@ -279,17 +279,45 @@ def test_restarts_during_one_wait_do_not_use_up_its_attempts(tmp_path):
     # during one long wait failed the request with no reply at all.
     db = tmp_path / "gw.db"
     gw = stop_mid_wait(db)
+    run(gw.note_clean_shutdown())
     for _ in range(4):
         restarted = make_gateway(db)
         run(restarted.recover_previous_process())
         assert inbound(restarted)["state"] == "QUEUED"
         assert claim(restarted)["gateway_request_id"] == "req-1"
+        run(restarted.note_clean_shutdown())   # systemctl restart: SIGTERM, clean stop
     assert inbound(gw)["attempts"] <= 2
     final = make_gateway(db, hermes_steps=[{"status": "completed", "output": "最後に届く答え"}])
     run(final.recover_previous_process())
     run(final.process(claim(final)))
     assert final.hermes.started == []
     assert replies(final) == ["最後に届く答え"]
+
+
+def test_a_request_that_keeps_killing_the_process_still_ends(tmp_path):
+    # Third review: refunding every resumed row let a request that crashes the
+    # process (an OOM kill while handling its answer) loop forever, blocking
+    # its conversation until systemd gave up on the whole gateway. A crash
+    # writes no clean-shutdown marker, so each one counts.
+    db = tmp_path / "gw.db"
+    gw = stop_mid_wait(db)                      # run stored, attempts 1, then killed
+    for _ in range(2):
+        restarted = make_gateway(db)
+        run(restarted.recover_previous_process())
+        claim(restarted)                        # resumed ... and killed again
+    run(make_gateway(db).recover_previous_process())
+    current = inbound(gw)
+    assert (current["state"], current["last_error"]) == ("FAILED", "max_attempts")
+
+
+def test_the_clean_shutdown_marker_is_used_once(tmp_path):
+    db = tmp_path / "gw.db"
+    gw = stop_mid_wait(db)
+    run(gw.note_clean_shutdown())
+    restarted = make_gateway(db)
+    run(restarted.recover_previous_process())
+    assert metric(restarted, "clean_shutdown_at") is None
+    assert inbound(restarted)["attempts"] == 0
 
 
 def test_a_request_that_never_reached_hermes_still_counts_its_attempts(tmp_path):

@@ -223,6 +223,27 @@ def release_conversation(con: sqlite3.Connection, conversation_id: str) -> None:
     )
 
 
+CLEAN_SHUTDOWN_KEY = "clean_shutdown_at"
+
+
+def note_clean_shutdown(con: sqlite3.Connection) -> None:
+    """The process stopped on purpose, its waits left PROCESSING with their runs."""
+    stamp(con, CLEAN_SHUTDOWN_KEY)
+
+
+def take_clean_shutdown(con: sqlite3.Connection) -> bool:
+    """Whether the previous process stopped cleanly. Consumes the marker.
+
+    A process that was killed (OOM, SIGKILL, a crash) never writes it, so
+    whatever it was doing counts as a failed attempt: a request that kills
+    the gateway every time it is resumed still ends at max_attempts.
+    """
+    row = con.execute("SELECT value FROM metrics WHERE key = ?",
+                      (CLEAN_SHUTDOWN_KEY,)).fetchone()
+    con.execute("DELETE FROM metrics WHERE key = ?", (CLEAN_SHUTDOWN_KEY,))
+    return row is not None
+
+
 def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LEASE_SECONDS,
                   max_attempts: int = 3, refund_resumable: bool = False) -> dict:
     """Return abandoned claims to the queue (section 118).
@@ -232,9 +253,10 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
     All confirmed chunks settle the request without regenerating or sending.
     LINE batches follow the same hold rule, but never resume a partial batch
     or change a started reply into a push. A request without uncertain
-    delivery is bounded by max_attempts. With refund_resumable (startup
-    only), a row that already has a Hermes run gets back the attempt its
-    interrupted claim used: a restart is not a failed try.
+    delivery is bounded by max_attempts. With refund_resumable (startup,
+    after a clean shutdown only), a row that already has a Hermes run gets
+    back the attempt its interrupted claim used: a deliberate restart is not
+    a failed try.
     """
     # Select and recover under the same write lock as chunk claims. Otherwise
     # a live caller can refresh the lease between selection and invalidation.
