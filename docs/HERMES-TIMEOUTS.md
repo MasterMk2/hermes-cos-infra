@@ -131,3 +131,24 @@ session の切り替え、有料ルーティング、image digest。いずれも
 bridge の `timeout_seconds` については、2026-10-27 に根拠が得られた: 1 行の質問でもツール付き呼び出しに 162 s かかり、
 120 s では一度も成功しない。120 → 240 の手順は [HANDOFF-HERMES-TIMEOUTS.md](HANDOFF-HERMES-TIMEOUTS.md) にある。
 変えたら、ここに変更日と値を書き足す。
+
+## 2026-10-28 の確認と変更（Pi）
+
+- **bridge の `timeout_seconds` を 120 → 240 に変更した**（2026-10-28 01:47 JST、オーナー了承済み）。
+  - 元の設定は `bridge.yaml.bak-20261028` として同じディレクトリに控えてある。戻すときはこの控えを戻して `hermes-antigravity` を再起動する。
+  - 再起動後の `/health` は healthy。120 s を超える呼び出しが実際に成功するかは、まだ観測していない。
+- 変更前の確認:
+  - bridge・gateway とも timeout の値に上限を設けていない。
+  - 10-27 は premium 経路が一度も動いておらず、120 s をすべて Antigravity が使っていた。
+  - Hermes（0.20.6）は provider の timeout を設定しておらず、既定の 1800 s。config の 180 / 120 / 300 は terminal / browser / code_execution のもの。
+  - 10-27 の agent.log では、主経路は 1 run あたり 3 回（attempt 1/3〜3/3）。どれも bridge の 120 s で 504 になり、Hermes が先に切った跡は無い。
+  - 240 s では、固まったときの最悪値は 3 × 240 s ≈ 12 分。`agent.api_max_retries` は 0.20.6 にもある。
+- 162 s を計測したコマンドを、続けて 2 回実行した:
+  - 1 回目: 301 s で打ち切り（timeout 300）。2 回目: 218 s で成功。user+sys は 2 回とも約 36 s。
+  - /srv/hermes のディスクは使用率 90% 以上のサンプルが約 25%、D 状態（jbd2、kworker、python、usb-storage）が約 3〜4 割のサンプルで出た。
+  - ディスクが原因という見方と矛盾しないが、確定はしていない。
+  - 218 s と Hermes の準備（約 40 s）を足すと、本番の gateway の 240 s を超える。bridge の変更だけでは、DM の時間切れは減らない見込み。
+- 本番のコードの照合（sha256）:
+  - gateway: 640d9db に 9 月 10 日の coding handoff（Phase J.1）を足したもの。10-05 の gateway 修正は入っていない。
+  - bridge・attention（engine / events / schema）・premium-cli: 9 月 10 日の owner-task-routing の作業。GitHub には未回収。
+  - したがって、PR #9 の attention を配備すると、gateway・bridge と同じく本番だけの変更が巻き戻る。回収の対象に attention も含める。
