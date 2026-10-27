@@ -54,6 +54,7 @@ class RunReport:
     notification: str | None = None
     index_available: bool = False
     gmail_screen_available: bool = False
+    gmail_categorized: tuple | None = None
 
     def bump(self, key: str, n: int = 1) -> None:
         self.counts[key] = self.counts.get(key, 0) + n
@@ -63,7 +64,10 @@ class RunReport:
                 "skipped": self.skipped, "plan": self.plan,
                 "notification": self.notification,
                 "index_available": self.index_available,
-                "gmail_screen_available": self.gmail_screen_available}
+                "gmail_screen_available": self.gmail_screen_available,
+                "gmail_categorized": (None if self.gmail_categorized is None else
+                                      {"received": self.gmail_categorized[0],
+                                       "categorized": self.gmail_categorized[1]})}
 
 
 # ------------------------------------------------------------------ helpers
@@ -141,7 +145,8 @@ def plan(state_con, selection, *, cfg, now: datetime) -> RunReport:
     """What a run would do, from local state only. No Google call."""
     report = RunReport(mode="plan", skipped=selection.counts(),
                        index_available=selection.index_available,
-                       gmail_screen_available=selection.gmail_screen_available)
+                       gmail_screen_available=selection.gmail_screen_available,
+                       gmail_categorized=selection.gmail_categorized)
     items = _items(selection, cfg)
     rows = store.all_proposals(state_con)
     limits, beh = cfg.limits, cfg.behaviour
@@ -192,7 +197,8 @@ def run(*, cfg, state_con, selection, client, now: datetime, notifier=None) -> R
 
     report = RunReport(mode="apply", skipped=selection.counts(),
                        index_available=selection.index_available,
-                       gmail_screen_available=selection.gmail_screen_available)
+                       gmail_screen_available=selection.gmail_screen_available,
+                       gmail_categorized=selection.gmail_categorized)
     items = _items(selection, cfg)
 
     client.authenticate()

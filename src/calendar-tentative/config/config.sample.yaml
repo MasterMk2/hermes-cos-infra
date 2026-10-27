@@ -39,17 +39,22 @@ selection:
   min_confidence: 0.7
   # SHARED work is included when Discord/LINE/Calendar also carries it.
   include_shared: true
-  # Rows whose only evidence is Gmail (I.1: 95% were newsletters/campaigns):
-  #   off                       never
-  #   people                    mail from people only: mail you sent, threads
-  #                             you replied in, senders you have written to,
-  #                             and other personal mail. Never promotions,
-  #                             social, mailing lists or automated senders.
-  #   people_and_notifications  also automated notices (Gmail "Updates",
-  #                             no-reply senders): reservations, confirmations
-  #   all                       no screening
+  # Rows whose only evidence is Gmail (I.1: 95% were newsletters/campaigns).
+  # Quote the value.
+  #   "off"                       never
+  #   "people"                    mail you sent, replies in threads you wrote
+  #                               in, mail from people (or lists) you have
+  #                               written to, and mail Gmail filed under
+  #                               Primary. Never promotions/social, automated
+  #                               senders or blind-copy blasts.
+  #   "people_and_notifications"  also automated notices (Gmail "Updates",
+  #                               no-reply senders) and blind-copy blasts:
+  #                               reservations, confirmations, announcements
+  #   "all"                       no screening
+  # Gmail's categories exist only with its smart features on (off by default
+  # in Japan); without them only mail you took part in can pass.
   # A row Discord, LINE or Calendar also mentions is included regardless.
-  gmail_only: people
+  gmail_only: "people"
   # A real event with the same normalized title this close in time (or on
   # the same day, for all-day entries) counts as "already on the calendar".
   match_tolerance_minutes: 5

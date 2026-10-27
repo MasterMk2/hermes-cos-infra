@@ -69,10 +69,14 @@ R_NOT_OWNER_TASK = "not_owner_task"
 R_SHARED_EXCLUDED = "shared_excluded"
 R_SHARED_WITHOUT_CHAT = "shared_without_chat_evidence"
 R_GMAIL_ONLY = "gmail_only"
+R_GMAIL_BROADCAST = ct_mail.R_GMAIL_BROADCAST
 R_GMAIL_NOTIFICATION = ct_mail.R_GMAIL_NOTIFICATION
+R_GMAIL_UNCATEGORIZED = ct_mail.R_GMAIL_UNCATEGORIZED
+R_GMAIL_LIST = ct_mail.R_GMAIL_LIST
 R_GMAIL_BULK = ct_mail.R_GMAIL_BULK
-R_GMAIL_DISCARDED = ct_mail.R_GMAIL_DISCARDED
 R_GMAIL_UNSCREENED = ct_mail.R_GMAIL_UNSCREENED
+R_GMAIL_DISCARDED = ct_mail.R_GMAIL_DISCARDED
+R_GMAIL_DRAFT = ct_mail.R_GMAIL_DRAFT
 R_ALREADY_ON_CALENDAR = "already_on_calendar"
 R_MATCHES_EXISTING = "matches_existing_event"
 R_LOW_CONFIDENCE = "low_confidence"
@@ -85,9 +89,11 @@ R_DUPLICATE_SOURCE = "duplicate_source"
 
 #: Reasons that mean "a tentative entry for this is now wrong", as opposed to
 #: "it is no longer worth proposing" (past, beyond the horizon, reclassified).
-#: Only these let the engine remove an entry it created.
+#: Only these let the engine remove an entry it created. A draft is never
+#: evidence of anything, so an entry built on one is wrong, not out of scope.
 WITHDRAW_REASONS = frozenset({
     R_RESOLVED, R_SUPERSEDED, R_MISSING, R_ALREADY_ON_CALENDAR, R_MATCHES_EXISTING,
+    R_GMAIL_DRAFT,
 })
 
 SOURCE_LABELS = {"discord": "Discord", "line": "LINE", "gmail": "Gmail",
@@ -97,6 +103,8 @@ WEEKDAYS_JA = "月火水木金土日"
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f​-‏ -‮⁦-⁩]")
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: LINE's internal user ids. Never shown, as in the planning renderer.
+_OPAQUE_ID = re.compile(r"^[uU][0-9a-fA-F]{20,}$")
 _LEADING_TAG = re.compile(r"^\s*(?:【[^】]{0,20}】|\[[^\]]{0,20}\]|［[^］]{0,20}］|〔[^〕]{0,20}〕)\s*")
 
 TITLE_LIMIT = 120
@@ -108,6 +116,20 @@ def clean_text(value, limit: int) -> str:
     text = _CONTROL.sub("", str(value or ""))
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def shown_counterparty(value) -> str | None:
+    """The counterparty as the owner may see it on a calendar, or None.
+
+    Gmail rows carry the raw From header (`名前 <address>`). A calendar entry
+    the owner may move onto a shared calendar is no place for a third party's
+    address, and guessing a display name out of a header is not done either,
+    so anything with an address or an opaque platform id is left out.
+    """
+    text = clean_text(value, COUNTERPARTY_LIMIT)
+    if not text or "@" in text or _OPAQUE_ID.match(text):
+        return None
+    return text
 
 
 def normalize_title(value) -> str:
@@ -188,6 +210,9 @@ class Selection:
     event_ids_elsewhere: frozenset = frozenset()
     index_available: bool = False
     gmail_screen_available: bool = False
+    #: (received, categorised) message counts; (n, 0) means Gmail's smart
+    #: features are off and only what the owner did can admit mail.
+    gmail_categorized: tuple | None = None
 
     def reason_for(self, commitment_id: str) -> str | None:
         """None when desired; R_MISSING when the commitment is gone."""
@@ -378,6 +403,7 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
             and gmail_con is not None and ct_mail.index_usable(gmail_con):
         mail_facts = ct_mail.load_facts(gmail_con, _gmail_only_ids(rows, types_by_id, pairs_by_id))
         selection.gmail_screen_available = True
+        selection.gmail_categorized = (mail_facts.received_total, mail_facts.received_categorized)
 
     candidates: list = []
     for row in rows:
@@ -456,7 +482,7 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
             commitment_id=cid, kind=kind, title=title, all_day=all_day,
             start=start, end=end, deadline_time=clock,
             source_types=tuple(sorted(t for t in source_types if t)),
-            counterparty=clean_text(row.get("counterparty"), COUNTERPARTY_LIMIT) or None,
+            counterparty=shown_counterparty(row.get("counterparty")),
             source_count=int(row.get("source_count") or 1),
             mail_basis=mail_basis,
         )

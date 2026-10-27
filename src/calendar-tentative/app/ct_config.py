@@ -50,15 +50,15 @@ DEFAULT_PATHS = {
     "gmail_index_db": "/srv/hermes/gmail/index/index.db",
 }
 
-#: Which commitments whose only evidence is Gmail may be proposed.
+#: Which commitments whose only evidence is Gmail may be proposed (ct_mail).
 #:   off                       none
-#:   people                    mail the owner sent, mail in a thread the owner
-#:                             wrote in, mail from someone the owner has
-#:                             written to, and other personal mail from a
-#:                             human-looking sender. Never promotions, social
-#:                             or mailing-list mail, never automated senders.
+#:   people                    mail the owner sent, replies in threads the
+#:                             owner wrote in, mail from people (or lists) the
+#:                             owner has written to, and mail Gmail filed under
+#:                             Primary. Never promotions/social, never
+#:                             automated senders or blind-copy blasts.
 #:   people_and_notifications  also automated notices (Gmail "Updates",
-#:                             no-reply senders): reservations, confirmations.
+#:                             no-reply senders) and blind-copy blasts.
 #:   all                       no screening at all.
 GMAIL_ONLY_MODES = ("off", "people", "people_and_notifications", "all")
 DEFAULT_OAUTH = {
@@ -240,6 +240,13 @@ def parse_config(data, *, path: str = "<memory>") -> Config:
     if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0.0 <= conf <= 1.0:
         raise ConfigError("selection.min_confidence must be 0.0..1.0")
     _bool(sel["include_shared"], "selection.include_shared")
+    # YAML 1.1 reads a bare `off` (or `no`/`false`) as False. That can only
+    # mean the narrowest mode; True could mean either wider one, so it is
+    # refused rather than guessed.
+    if sel["gmail_only"] is False:
+        sel["gmail_only"] = "off"
+    if sel["gmail_only"] is True:
+        raise ConfigError('selection.gmail_only: write the mode as a quoted string, e.g. "people"')
     if sel["gmail_only"] not in GMAIL_ONLY_MODES:
         raise ConfigError(f"selection.gmail_only must be one of {', '.join(GMAIL_ONLY_MODES)}")
     _int(sel["match_tolerance_minutes"], "selection.match_tolerance_minutes", 0, 1440)

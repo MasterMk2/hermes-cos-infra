@@ -260,8 +260,18 @@ def cmd_check(cfg) -> int:
         if gmail is None:
             log.warning("gmail screen: index unavailable; Gmail-only rows will be held back")
         else:
-            gmail.close()
-            log.info("gmail screen: readable (gmail_only=%s)", mode)
+            try:
+                total, categorized = gmail.execute(ct_mail._CATEGORY_SQL).fetchone()
+            finally:
+                gmail.close()
+            log.info("gmail screen: readable (gmail_only=%s, %d received, %d with a Gmail "
+                     "category)", mode, total or 0, categorized or 0)
+            if total and not categorized:
+                # Google turns smart features off by default in Japan. Then no
+                # mail has a category and only mail tied to something the
+                # owner did (sent, replied, wrote to the sender) can pass.
+                log.warning("gmail screen: no received mail carries a Gmail category; Gmail "
+                            "smart features look off, so mail from strangers will not pass")
 
     state_dir = Path(cfg.paths["state_db"]).parent
     writable = state_dir.is_dir() and os.access(state_dir, os.W_OK)
