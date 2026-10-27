@@ -131,6 +131,43 @@ class TestOwnerDmIsQueued(DiscordAdapterTestCase):
         await self.bot.on_message(fake_message(content="ping"))
         self.assertEqual(self.counts().get("QUEUED"), 1)
 
+    async def test_the_database_work_runs_off_the_event_loop(self):
+        # On the loop it would stall discord.py's gateway heartbeat whenever
+        # the USB disk is slow.
+        import threading
+        loop_thread = threading.get_ident()
+        seen = []
+        original = gw_discord.store.record_inbound
+
+        def spy(con, canonical):
+            seen.append(threading.get_ident())
+            return original(con, canonical)
+
+        gw_discord.store.record_inbound = spy
+        try:
+            await self.bot._handle(fake_message(content="テストです"))
+        finally:
+            gw_discord.store.record_inbound = original
+        self.assertEqual(len(seen), 1)
+        self.assertNotEqual(seen[0], loop_thread)
+        self.assertEqual(self.counts().get("QUEUED"), 1)
+
+    async def test_typing_pulse_is_best_effort(self):
+        class Channel:
+            def __init__(self, error=None):
+                self.error, self.calls = error, 0
+
+            async def typing(self):
+                self.calls += 1
+                if self.error:
+                    raise self.error
+
+        ok, broken = Channel(), Channel(RuntimeError("synthetic"))
+        self.bot.get_channel = lambda cid: ok if cid == 1 else broken
+        self.assertTrue(await self.bot.typing_once("1"))
+        self.assertFalse(await self.bot.typing_once("2"))
+        self.assertEqual((ok.calls, broken.calls), (1, 1))
+
     async def test_the_text_survives(self):
         await self.bot._handle(fake_message(content="明日の予定は？"))
         con = open_db(self.db_path)

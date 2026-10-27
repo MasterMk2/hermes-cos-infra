@@ -93,6 +93,22 @@ class TestEpisodes(unittest.TestCase):
                     fx.clock_at("2026-09-04T12:45"))
         self.assertEqual(again, [])
 
+    def test_hermes_failing_recovers_only_when_hermes_answers_again(self):
+        cfg, con = self.cfg, self.con
+        failing = probe("gateway", False, "hermes_failing")
+        run(con, [failing], cfg, fx.clock_at("2026-10-27T04:19"))
+        out = run(con, [failing], cfg, fx.clock_at("2026-10-27T04:35"))
+        store.mark_episode_notified(con, out[0].metadata["episode_id"])
+        con.commit()
+        # An hour on, nothing has succeeded: inconclusive, so no 「復旧」.
+        quiet = health.Probe("gateway", True, inconclusive=True)
+        self.assertEqual(run(con, [quiet], cfg, fx.clock_at("2026-10-27T05:20")), [])
+        self.assertEqual(len(store.open_episodes(con, "gateway")), 1)
+        # The next real answer closes it, with one truthful recovery.
+        recovered = run(con, [probe("gateway", True)], cfg,
+                        fx.clock_at("2026-10-27T06:00"))
+        self.assertEqual([s.signal_type for s in recovered], ["health_recovered"])
+
     def test_recovery_from_a_failure_nobody_heard_about_is_silent(self):
         # Section 38. Announcing the end of a problem that was never announced
         # is how a quiet system becomes a chatty one.
@@ -182,6 +198,20 @@ class TestGatewayProbe(unittest.TestCase):
             hermes_failure_count=12, responded_count=12))
         self.assertFalse(p.ok)
         self.assertEqual(p.reason, "hermes_failing")
+
+    def test_an_aged_failure_without_a_success_is_not_a_recovery(self):
+        # 2026-10-27: an hour after the last failure the probe fell through to
+        # "ok" and announced 「gateway は復旧しました」 while Hermes still had
+        # not answered anything.
+        p = health.probe_gateway(self.cfg, self.clock, self.gw(
+            last_hermes_failure_at=fx.ago(self.clock, hours=2),
+            last_hermes_success_at=fx.ago(self.clock, hours=6)))
+        self.assertTrue(p.inconclusive)
+
+    def test_a_failure_with_no_success_ever_recorded_is_not_a_recovery(self):
+        p = health.probe_gateway(self.cfg, self.clock, self.gw(
+            last_hermes_failure_at=fx.ago(self.clock, hours=2)))
+        self.assertTrue(p.inconclusive)
 
     def test_a_success_after_the_last_failure_is_healthy_again(self):
         p = health.probe_gateway(self.cfg, self.clock, self.gw(

@@ -121,6 +121,43 @@ def enqueue(con: sqlite3.Connection, request_id: str) -> None:
     set_state(con, request_id, "QUEUED")
 
 
+def note_run_started(con: sqlite3.Connection, request_id: str, run_id: str) -> bool:
+    """Record the Hermes run this request is waiting on, before waiting.
+
+    Committed before the first poll, so a restart resumes the same run rather
+    than starting another or losing the answer. `run_started_at` keeps its
+    first value: the deadline belongs to the run, not to whichever process is
+    watching it. Refreshes the claim too. False means this worker no longer
+    owns the request (recovered or settled elsewhere) and must not deliver.
+    """
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    now = _now()
+    cur = con.execute(
+        "UPDATE inbound_messages SET hermes_run_id = ?, run_started_at ="
+        " COALESCE(run_started_at, ?), claimed_at = ?, updated_at = ?"
+        " WHERE gateway_request_id = ? AND state = 'PROCESSING'",
+        (str(run_id), now, now, now, request_id),
+    )
+    return cur.rowcount == 1
+
+
+def touch_claim(con: sqlite3.Connection, request_id: str) -> bool:
+    """Heartbeat for a live wait. Keeps `recover_stale` from reclaiming it.
+
+    A wait on Hermes can outlast PROCESSING_LEASE_SECONDS; a worker that is
+    still watching its run renews the lease instead. False means the claim
+    is gone and the caller must stop without delivering anything.
+    """
+    now = _now()
+    cur = con.execute(
+        "UPDATE inbound_messages SET claimed_at = ?, updated_at = ?"
+        " WHERE gateway_request_id = ? AND state = 'PROCESSING'",
+        (now, now, request_id),
+    )
+    return cur.rowcount == 1
+
+
 def claim_next(con: sqlite3.Connection, *, max_active: int) -> sqlite3.Row | None:
     """Take the next message that may be worked on, or None.
 
@@ -129,6 +166,10 @@ def claim_next(con: sqlite3.Connection, *, max_active: int) -> sqlite3.Row | Non
     keeps a conversation's answers in order — a second message from the same
     chat waits rather than racing the first (sections 61, 62, 119).
     """
+    # Count, choose and claim under one write lock. With more than one worker
+    # a deferred transaction would let two of them read the same QUEUED row.
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
     active = con.execute(
         "SELECT COUNT(*) FROM inbound_messages WHERE state = 'PROCESSING'"
     ).fetchone()[0]
@@ -147,13 +188,16 @@ def claim_next(con: sqlite3.Connection, *, max_active: int) -> sqlite3.Row | Non
         return None
 
     now = _now()
-    con.execute(
+    cur = con.execute(
         "UPDATE inbound_messages SET state='PROCESSING', claimed_at=?, "
         "attempts = attempts + 1, updated_at=? WHERE gateway_request_id=? "
         "AND state='QUEUED'",
         (now, now, row["gateway_request_id"]),
     )
-    if con.total_changes == 0:
+    # `con.total_changes` counts every change on this connection since it
+    # opened — including open_db's own meta write — so it was never 0 here
+    # and could not detect a lost race. The statement's own count can.
+    if cur.rowcount != 1:
         return None
     con.execute(
         "INSERT INTO conversation_state (conversation_id, platform, active_request_id,"

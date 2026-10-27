@@ -117,6 +117,10 @@ def test_confirmed_prefix_only_resumes_frozen_unsent_tail(tmp_path):
     async def no_regeneration(*a, **kw):
         raise AssertionError('the frozen answer must be resumed without another Hermes call')
     restarted.hermes.ask_async = no_regeneration
+    def no_new_run(*a, **kw):
+        raise AssertionError('the frozen answer must be resumed without another Hermes call')
+    restarted.hermes.start_run = no_new_run
+    restarted.hermes.get_run = no_new_run
     run(restarted.process(current))
     assert [c[1] for c in restarted.discord_bot.calls] == [['b'], ['c']]
     with restarted.db() as con:

@@ -225,6 +225,10 @@ ADDITIVE = {
         "platform_event_id": "TEXT",
         "hermes_run_id": "TEXT",
         "reply_token_expires_at": "TEXT",
+        # When the Hermes run for this request was first started. The wait's
+        # hard deadline is measured from here, so a restart that resumes the
+        # same run does not hand it a fresh allowance.
+        "run_started_at": "TEXT",
     },
     "outbound_messages": {
         "delivery_mode": "TEXT",

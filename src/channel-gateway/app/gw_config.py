@@ -57,8 +57,21 @@ DEFAULT_HERMES = {
     "base_url": "http://127.0.0.1:8642",
     "model": "hermes-agent",
     "soft_timeout_seconds": 45,
-    "absolute_timeout_seconds": 240,
+    # The whole wait for one answer, measured from the run's recorded start
+    # and surviving restarts. 480 = four bridge timeouts (120 s): a primary
+    # timeout, one retry and the measured fallback maximum, with headroom.
+    # At most 840 so a message queued behind it stays under the attention
+    # engine's 900 s queue_stuck threshold.
+    "absolute_timeout_seconds": 480,
     "poll_interval_seconds": 2,
+    # One status GET may take this long before it counts as a failed read.
+    "poll_request_timeout_seconds": 10,
+    # A waiting worker renews its claim this often, so recover_stale (lease
+    # 300 s) never reclaims a wait that is still alive.
+    "heartbeat_seconds": 60,
+    # Status reads failing back to back for this long end the wait with the
+    # "unavailable" text; a shorter blip is waited through.
+    "unavailable_grace_seconds": 90,
     "session_prefix": "gw",
 }
 
@@ -280,6 +293,18 @@ def parse_config(data: dict, path: str = "<memory>") -> Config:
             "suggests 15-60 minutes)"
         )
 
+    for key, low, high in (("absolute_timeout_seconds", 30, 840),
+                           ("poll_request_timeout_seconds", 1, 60),
+                           ("heartbeat_seconds", 1, 100),
+                           ("unavailable_grace_seconds", 1, 840)):
+        value = hermes[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ConfigError(f"hermes.{key} must be {low}..{high}")
+    poll = hermes["poll_interval_seconds"]
+    if isinstance(poll, bool) or not isinstance(poll, (int, float)) or not 0.01 <= poll <= 30:
+        raise ConfigError("hermes.poll_interval_seconds must be 0.01..30")
+    if hermes["unavailable_grace_seconds"] > hermes["absolute_timeout_seconds"]:
+        raise ConfigError("hermes.unavailable_grace_seconds must not exceed absolute_timeout_seconds")
     if not (1 <= int(limits["max_active_requests"]) <= 8):
         raise ConfigError("limits.max_active_requests must be 1..8 on this host")
     line["listen_host"] = _validate_listen_host(line["listen_host"])

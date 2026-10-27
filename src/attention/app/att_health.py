@@ -179,6 +179,15 @@ def probe_gateway(cfg, clock, gateway) -> Probe:
             return Probe(SVC_GATEWAY, False, "hermes_failing",
                          f"last success {live.get('last_hermes_success_at')}",
                          facts=facts)
+        # The failure has aged out of the window, but Hermes has still not
+        # answered anything since. That is "nobody asked", not "it works":
+        # falling through to ok here announced 「gateway は復旧しました」 on
+        # 2026-10-27 exactly one hour after the last failure, with Hermes
+        # still failing. Inconclusive keeps the episode open and silent until
+        # a real success closes it with a truthful recovery.
+        return Probe(SVC_GATEWAY, True, inconclusive=True,
+                     detail="no hermes success since the last failure",
+                     facts=facts)
 
     return Probe(SVC_GATEWAY, True, facts=facts)
 

@@ -57,7 +57,7 @@ class HermesRejected(Exception):
 
 
 class HermesResult:
-    __slots__ = ("status", "text", "run_id", "usage", "replayed")
+    __slots__ = ("status", "text", "run_id", "usage", "replayed", "elapsed")
 
     def __init__(self, status, text, run_id, usage=None, replayed=False):
         self.status = status
@@ -65,6 +65,8 @@ class HermesResult:
         self.run_id = run_id
         self.usage = usage or {}
         self.replayed = replayed
+        # Seconds from the run's recorded start to its end; logged, not shown.
+        self.elapsed = None
 
     @property
     def ok(self) -> bool:
@@ -113,7 +115,8 @@ class HermesClient:
 
     # -- transport -----------------------------------------------------
 
-    def _request(self, method: str, path: str, body=None, headers=None):
+    def _request(self, method: str, path: str, body=None, headers=None, *,
+                 timeout: float | None = None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(self.base_url + path, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self._api_key}")
@@ -122,7 +125,7 @@ class HermesClient:
         for k, v in (headers or {}).items():
             req.add_header(k, v)
         try:
-            with urllib.request.urlopen(req, timeout=self.connect_timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout or self.connect_timeout) as r:
                 raw = r.read().decode("utf-8") or "{}"
                 return r.status, json.loads(raw)
         except urllib.error.HTTPError as exc:
@@ -168,8 +171,10 @@ class HermesClient:
             raise HermesUnavailable(f"http {status}")
         raise HermesRejected(f"http {status}")
 
-    def get_run(self, run_id: str) -> dict:
-        status, payload = self._request("GET", f"/v1/runs/{run_id}")
+    def get_run(self, run_id: str, *, timeout: float | None = None) -> dict:
+        """One status read. `timeout` bounds this GET alone, so a wedged API
+        cannot hold a waiting worker past its own deadline checks."""
+        status, payload = self._request("GET", f"/v1/runs/{run_id}", timeout=timeout)
         if status == 200:
             return payload
         if status == 404:
@@ -181,9 +186,10 @@ class HermesClient:
     def poll(self, run_id: str, *, deadline: float | None = None) -> HermesResult:
         """Block until the run settles or the absolute deadline passes.
 
-        A timeout leaves the run alone: it may still be running, and the
-        answer can be collected on a later attempt because the run id is
-        recorded against the request.
+        A synchronous helper for tools and tests. The gateway's worker does
+        not use it: it waits in `Gateway._await_run`, which persists the run
+        id first, renews its claim, survives a restart by resuming the same
+        run, and measures the deadline from the run's recorded start.
         """
         deadline = deadline or (time.monotonic() + self.absolute_timeout)
         last = {}

@@ -1,0 +1,529 @@
+"""The durable wait on Hermes: late answers, restarts, heartbeats, concurrency.
+
+2026-10-27: two owner DMs needing calendar and mail lookups ran past the old
+240 s limit. Each got "応答に時間がかかりすぎたため中断しました" while its
+Hermes run carried on and its finished answer was thrown away. These tests pin
+the replacement: the run id is stored before the first poll, the deadline is
+the run's own, a late answer is the one reply, and the at-most-once reply
+ledger is untouched.
+
+Everything is synthetic: a fake Hermes, a fake Discord bot and a fake clock
+that the fake Hermes advances, so an eight-minute wait runs in milliseconds.
+"""
+
+import asyncio
+import threading
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import gw_fixtures as fx
+import gw_store as store
+from gw_canonical import CanonicalMessage
+from gw_config import ConfigError, parse_config
+from gw_format import USER_FACING_TIMEOUT, USER_FACING_UNAVAILABLE
+from gw_hermes import HermesRejected, HermesUnavailable
+from gw_schema import open_db
+from gw_service import Gateway
+
+CONV = "discord:" + fx.DM_CHANNEL_ID
+
+
+class Clock:
+    def __init__(self):
+        self.now = datetime.now(timezone.utc)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += timedelta(seconds=seconds)
+
+
+class FakeHermes:
+    """Scripted Hermes. Each get_run consumes one step and advances the clock."""
+
+    def __init__(self, clock, steps, *, step_seconds=30, run_ids=("run-1", "run-2")):
+        self.clock = clock
+        self.steps = list(steps)
+        self.step_seconds = step_seconds
+        self.run_ids = list(run_ids)
+        self.started = []
+        self.polled = []
+        self.on_poll = None
+
+    def start_run(self, envelope, text, *, session_id, request_id):
+        self.started.append(request_id)
+        return self.run_ids[min(len(self.started) - 1, len(self.run_ids) - 1)], False
+
+    def get_run(self, run_id, *, timeout=None):
+        self.polled.append(run_id)
+        if self.on_poll:
+            self.on_poll(len(self.polled))
+        self.clock.advance(self.step_seconds)
+        step = self.steps.pop(0) if self.steps else {"status": "running"}
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+
+class Bot:
+    def __init__(self):
+        self.calls = []
+        self.typing = []
+        self.typing_error = None
+
+    def prepare(self, text):
+        return [text] if text else []
+
+    async def send_chunks(self, channel, chunks):
+        self.calls.append((channel, list(chunks)))
+        return 1, None
+
+    async def typing_once(self, channel_id):
+        self.typing.append(channel_id)
+        if self.typing_error:
+            raise self.typing_error
+        return True
+
+
+def make_gateway(path, *, hermes_steps=(), step_seconds=30, clock=None, **hermes_cfg):
+    cfg = parse_config(fx.config_dict(
+        paths={"state_db": str(path)},
+        hermes={"base_url": "http://127.0.0.1:8642", "poll_interval_seconds": 0.01,
+                **hermes_cfg}))
+    gw = Gateway(cfg, {"hermes_api_key": "synthetic-test-key"})
+    gw.clock = clock or Clock()
+    gw.hermes = FakeHermes(gw.clock, hermes_steps, step_seconds=step_seconds)
+    gw.discord_bot = Bot()
+    return gw
+
+
+def seed(gw, request_id="req-1", conversation_id=CONV, platform="discord", claim=True):
+    msg = CanonicalMessage(
+        message_id=request_id, platform=platform, platform_message_id=request_id,
+        platform_user_id=fx.OWNER_DISCORD if platform == "discord" else fx.OWNER_LINE,
+        conversation_id=conversation_id, timestamp="2026-10-27T04:11:00+00:00",
+        text="明日の撮影ってどういうスケジュール感だっけ", authz_subject="owner",
+        capability_profile="personal-chat", gateway_request_id=request_id,
+        received_at=datetime.now(timezone.utc).isoformat())
+    con = gw.db()
+    try:
+        store.record_inbound(con, msg)
+        store.enqueue(con, request_id)
+        con.commit()
+        row = store.claim_next(con, max_active=8) if claim else None
+        con.commit()
+        return row
+    finally:
+        con.close()
+
+
+def inbound(gw, request_id="req-1"):
+    con = gw.db()
+    try:
+        return store.get_inbound(con, request_id)
+    finally:
+        con.close()
+
+
+def replies(gw, request_id="req-1"):
+    con = gw.db()
+    try:
+        return [r["body"] for r in store.outbound_for_request(con, request_id)]
+    finally:
+        con.close()
+
+
+def metric(gw, key):
+    con = gw.db()
+    try:
+        row = con.execute("SELECT value FROM metrics WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+    finally:
+        con.close()
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+# ------------------------------------------------------------ late answers
+
+
+def test_an_answer_after_four_minutes_is_delivered_not_thrown_away(tmp_path):
+    # Nine polls of 30 s: the answer lands at 270 s, past the old 240 s limit.
+    steps = [{"status": "running"}] * 8 + [{"status": "completed", "output": "明日は10時集合です"}]
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=steps)
+    row = seed(gw)
+    run(gw.process(row))
+    assert replies(gw) == ["明日は10時集合です"]
+    assert gw.discord_bot.calls == [(fx.DM_CHANNEL_ID, ["明日は10時集合です"])]
+    current = inbound(gw)
+    assert current["state"] == "RESPONDED"
+    assert current["hermes_run_id"] == "run-1"
+    assert metric(gw, "last_hermes_success_at") is not None
+    assert gw.hermes.started == ["req-1"]
+
+
+def test_the_run_is_recorded_before_the_first_status_read(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=[{"status": "completed", "output": "ok"}])
+    row = seed(gw)
+    seen = {}
+
+    def check(n):
+        current = inbound(gw)
+        seen["run"] = current["hermes_run_id"]
+        seen["started"] = current["run_started_at"]
+
+    gw.hermes.on_poll = check
+    run(gw.process(row))
+    assert seen["run"] == "run-1" and seen["started"]
+
+
+def test_the_deadline_ends_the_wait_with_one_timeout_reply(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=[{"status": "running"}] * 40)
+    row = seed(gw)
+    run(gw.process(row))
+    assert replies(gw) == [USER_FACING_TIMEOUT]
+    assert "分けて" not in USER_FACING_TIMEOUT
+    # 30 s per read: the wait used the whole 480 s allowance and no more
+    # (one extra read is clock skew between the test clock and the row).
+    assert 480 <= len(gw.hermes.polled) * 30 <= 510
+    assert metric(gw, "last_hermes_failure_at") is not None
+
+
+def test_a_terminal_failure_and_an_empty_answer_are_internal_errors(tmp_path):
+    for i, step in enumerate(({"status": "failed"}, {"status": "completed", "output": "  "},
+                              {"status": "waiting_for_approval"})):
+        gw = make_gateway(tmp_path / f"gw{i}.db", hermes_steps=[step])
+        run(gw.process(seed(gw)))
+        assert replies(gw) == ["処理中に内部エラーが発生しました。もう一度お試しください。"]
+
+
+# ----------------------------------------------------------------- restarts
+
+
+def test_a_restart_resumes_the_same_run_without_asking_again(tmp_path):
+    db = tmp_path / "gw.db"
+    gw = make_gateway(db, hermes_steps=[{"status": "running"}] * 3)
+    row = seed(gw)
+    gw.hermes.on_poll = lambda n: gw.stop.set() if n == 3 else None
+    run(gw.process(row))
+    assert replies(gw) == []
+    assert inbound(gw)["state"] == "PROCESSING"
+
+    restarted = make_gateway(db, hermes_steps=[{"status": "completed", "output": "再開後の答え"}])
+    con = restarted.db()
+    con.execute("UPDATE inbound_messages SET claimed_at = '2000-01-01'")
+    con.commit()
+    assert store.recover_stale(con)["requeued"] == 1
+    con.commit()
+    row = store.claim_next(con, max_active=2)
+    con.commit()
+    con.close()
+    run(restarted.process(row))
+    assert restarted.hermes.started == []
+    assert restarted.hermes.polled == ["run-1"]
+    assert replies(restarted) == ["再開後の答え"]
+
+
+def test_the_deadline_is_the_runs_own_across_a_restart(tmp_path):
+    db = tmp_path / "gw.db"
+    gw = make_gateway(db, hermes_steps=[{"status": "running"}] * 30)
+    row = seed(gw)
+    con = gw.db()
+    store.note_run_started(con, "req-1", "run-1")
+    started = (datetime.now(timezone.utc) - timedelta(seconds=470)).isoformat()
+    con.execute("UPDATE inbound_messages SET run_started_at = ?", (started,))
+    con.commit()
+    con.close()
+    row = inbound(gw)
+    run(gw.process(row))
+    assert gw.hermes.started == []
+    # 10 s of allowance left: one 30 s read and the deadline is passed.
+    assert len(gw.hermes.polled) == 1
+    assert replies(gw) == [USER_FACING_TIMEOUT]
+
+
+def test_a_delivered_reply_is_never_regenerated(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=[{"status": "completed", "output": "a"}])
+    row = seed(gw)
+    run(gw.process(row))
+    gw.hermes.steps = [{"status": "completed", "output": "b"}]
+    run(gw.process(inbound(gw)))
+    assert gw.hermes.started == ["req-1"]
+    assert replies(gw) == ["a"]
+
+
+# --------------------------------------------------------------- heartbeat
+
+
+def test_the_heartbeat_keeps_a_live_wait_from_being_reclaimed(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db", step_seconds=61,
+                      hermes_steps=[{"status": "running"}] * 6 + [{"status": "completed", "output": "ok"}])
+    row = seed(gw)
+    claims = []
+    gw.hermes.on_poll = lambda n: claims.append(inbound(gw)["claimed_at"])
+    run(gw.process(row))
+    assert len(set(claims)) >= 5  # renewed as the wait went on
+    assert replies(gw) == ["ok"]
+
+
+def test_a_lost_claim_stops_the_wait_without_a_reply(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db", step_seconds=61,
+                      hermes_steps=[{"status": "running"}] * 10 + [{"status": "completed", "output": "late"}])
+    row = seed(gw)
+
+    def take_over(n):
+        if n == 2:
+            con = gw.db()
+            con.execute("UPDATE inbound_messages SET state = 'QUEUED'")
+            con.commit()
+            con.close()
+
+    gw.hermes.on_poll = take_over
+    run(gw.process(row))
+    assert replies(gw) == []
+    assert gw.discord_bot.calls == []
+
+
+# ------------------------------------------------------------ flaky status
+
+
+def test_a_short_status_outage_is_waited_through(tmp_path):
+    steps = [HermesUnavailable("URLError"), HermesUnavailable("URLError"),
+             {"status": "completed", "output": "復旧後の答え"}]
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=steps)
+    run(gw.process(seed(gw)))
+    assert replies(gw) == ["復旧後の答え"]
+
+
+def test_a_long_status_outage_ends_with_the_unavailable_text_once(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=[HermesUnavailable("URLError")] * 20)
+    run(gw.process(seed(gw)))
+    assert replies(gw) == [USER_FACING_UNAVAILABLE]
+    # 90 s of grace at 30 s per read: the first failure plus three more.
+    assert len(gw.hermes.polled) <= 5
+
+
+def test_a_forgotten_run_is_restarted_once_under_the_same_key(tmp_path):
+    steps = [HermesRejected("run_not_found"), {"status": "completed", "output": "二度目"}]
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=steps)
+    run(gw.process(seed(gw)))
+    assert gw.hermes.started == ["req-1", "req-1"]
+    assert gw.hermes.polled == ["run-1", "run-2"]
+    assert replies(gw) == ["二度目"]
+    assert inbound(gw)["hermes_run_id"] == "run-2"
+
+
+def test_a_run_forgotten_twice_is_a_failure(tmp_path):
+    steps = [HermesRejected("run_not_found"), HermesRejected("run_not_found")]
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=steps)
+    run(gw.process(seed(gw)))
+    assert len(gw.hermes.started) == 2
+    assert replies(gw) == ["処理中に内部エラーが発生しました。もう一度お試しください。"]
+
+
+# ------------------------------------------------------------------- typing
+
+
+def test_discord_shows_typing_while_waiting(tmp_path):
+    steps = [{"status": "running"}] * 5 + [{"status": "completed", "output": "ok"}]
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=steps)
+    run(gw.process(seed(gw)))
+    # One pulse per 30 s read (the pulse interval is 8 s).
+    assert gw.discord_bot.typing == [fx.DM_CHANNEL_ID] * 6
+
+
+def test_a_failing_typing_indicator_changes_nothing(tmp_path):
+    steps = [{"status": "running"}, {"status": "completed", "output": "ok"}]
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=steps)
+    gw.discord_bot.typing_error = RuntimeError("synthetic")
+    run(gw.process(seed(gw)))
+    assert replies(gw) == ["ok"]
+
+
+def test_typing_can_be_switched_off(tmp_path):
+    cfg = parse_config(fx.config_dict(paths={"state_db": str(tmp_path / "gw.db")},
+                                      discord={"enabled": True, "typing_indicator": False},
+                                      hermes={"poll_interval_seconds": 0.01}))
+    gw = Gateway(cfg, {"hermes_api_key": "synthetic-test-key"})
+    gw.clock = Clock()
+    gw.hermes = FakeHermes(gw.clock, [{"status": "completed", "output": "ok"}])
+    gw.discord_bot = Bot()
+    run(gw.process(seed(gw)))
+    assert gw.discord_bot.typing == []
+
+
+# -------------------------------------------------------------- concurrency
+
+
+def test_claim_next_is_atomic_across_connections(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db")
+    seed(gw, claim=False)
+    barrier = threading.Barrier(2)
+    results = []
+
+    def claim():
+        con = open_db(gw.cfg.state_db)
+        try:
+            barrier.wait()
+            row = store.claim_next(con, max_active=8)
+            con.commit()
+            results.append(row["gateway_request_id"] if row else None)
+        finally:
+            con.close()
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results, key=str) == [None, "req-1"]
+    assert inbound(gw)["attempts"] == 1
+
+
+def test_a_lost_race_is_reported_as_no_claim(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db")
+    seed(gw, claim=False)
+    con = gw.db()
+    try:
+        # Opening the database writes the meta row, which is why the old
+        # `total_changes == 0` guard could never fire.
+        assert con.total_changes >= 1
+        original = con.execute
+
+        class Raced:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def execute(self, sql, *args):
+                if sql.startswith("UPDATE inbound_messages SET state='PROCESSING'"):
+                    original("UPDATE inbound_messages SET state = 'CANCELLED'")
+                return original(sql, *args)
+
+        assert store.claim_next(Raced(con), max_active=8) is None
+    finally:
+        con.close()
+
+
+def test_two_conversations_wait_on_hermes_at_the_same_time(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db")
+    seed(gw, "dm-1", claim=False)
+    seed(gw, "line-1", conversation_id="line:" + fx.OWNER_LINE, platform="line", claim=False)
+    seed(gw, "dm-2", claim=False)  # same conversation as dm-1: must wait for it
+    in_flight, peak, order = set(), [0], []
+    release = threading.Event()
+
+    class Slow(FakeHermes):
+        def start_run(self, envelope, text, *, session_id, request_id):
+            return f"run-{request_id}", False
+
+        def get_run(self, run_id, *, timeout=None):
+            request_id = run_id[4:]
+            in_flight.add(request_id)
+            peak[0] = max(peak[0], len(in_flight))
+            if request_id != "dm-2":
+                release.wait(timeout=0.5)
+            in_flight.discard(request_id)
+            order.append(request_id)
+            return {"status": "completed", "output": f"answer {request_id}"}
+
+    gw.hermes = Slow(gw.clock, [])
+    gw.line = None  # LINE delivery is not under test; it settles as not configured
+
+    async def scenario():
+        worker = asyncio.create_task(gw.worker())
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if len(order) >= 3:
+                break
+        release.set()
+        gw.stop.set()
+        gw.wake.set()
+        await asyncio.wait_for(worker, 5)
+
+    run(scenario())
+    assert peak[0] == 2               # the DM and LINE waited concurrently
+    assert order.index("dm-2") > order.index("dm-1")   # one conversation stays in order
+    assert sorted(order) == ["dm-1", "dm-2", "line-1"]
+
+
+def test_max_active_one_restores_strictly_serial_work(tmp_path):
+    cfg = parse_config(fx.config_dict(paths={"state_db": str(tmp_path / "gw.db")},
+                                      limits={"max_active_requests": 1},
+                                      hermes={"poll_interval_seconds": 0.01}))
+    gw = Gateway(cfg, {"hermes_api_key": "synthetic-test-key"})
+    gw.clock = Clock()
+    gw.discord_bot = Bot()
+    seed(gw, "dm-1", claim=False)
+    seed(gw, "line-1", conversation_id="line:" + fx.OWNER_LINE, platform="line", claim=False)
+    in_flight, peak, done = set(), [0], []
+
+    class Counting(FakeHermes):
+        def start_run(self, envelope, text, *, session_id, request_id):
+            return f"run-{request_id}", False
+
+        def get_run(self, run_id, *, timeout=None):
+            in_flight.add(run_id)
+            peak[0] = max(peak[0], len(in_flight))
+            in_flight.discard(run_id)
+            done.append(run_id)
+            return {"status": "completed", "output": "x"}
+
+    gw.hermes = Counting(gw.clock, [])
+    gw.line = None
+
+    async def scenario():
+        worker = asyncio.create_task(gw.worker())
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if len(done) >= 2:
+                break
+        gw.stop.set()
+        gw.wake.set()
+        await asyncio.wait_for(worker, 5)
+
+    run(scenario())
+    assert peak[0] == 1 and len(done) == 2
+
+
+def test_shutdown_leaves_a_waiting_request_recoverable(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db", hermes_steps=[{"status": "running"}] * 1000,
+                      step_seconds=0.001)
+    seed(gw, claim=False)
+
+    async def scenario():
+        worker = asyncio.create_task(gw.worker())
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if gw.hermes.polled:
+                break
+        gw.stop.set()
+        gw.wake.set()
+        await asyncio.wait_for(worker, 5)
+
+    run(scenario())
+    current = inbound(gw)
+    assert current["state"] == "PROCESSING"
+    assert current["hermes_run_id"] == "run-1"
+    assert replies(gw) == []
+
+
+# ------------------------------------------------------------------- config
+
+
+def test_wait_settings_are_bounded():
+    good = parse_config(fx.config_dict())
+    assert good.hermes["absolute_timeout_seconds"] == 480
+    for hermes in ({"absolute_timeout_seconds": 900}, {"absolute_timeout_seconds": 10},
+                   {"heartbeat_seconds": 200}, {"poll_request_timeout_seconds": 0},
+                   {"poll_interval_seconds": 0}, {"unavailable_grace_seconds": 600,
+                                                  "absolute_timeout_seconds": 300},
+                   {"heartbeat_seconds": True}, {"unknown_key": 1}):
+        with pytest.raises(ConfigError):
+            parse_config(fx.config_dict(hermes={"base_url": "http://127.0.0.1:8642", **hermes}))

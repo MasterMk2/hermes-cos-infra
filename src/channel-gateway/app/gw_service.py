@@ -7,6 +7,8 @@ One process holds three things on one asyncio loop:
                writes one durable row, and answers. Nothing else.
     interface  a discord.py client for owner DMs (optional).
     worker     the only component that talks to Hermes or sends anything.
+               It runs up to `limits.max_active_requests` requests at once,
+               never two from the same conversation.
 
 The split is the design (spec sections 12, 29, 31). LINE gives the receiver
 about two seconds and switches a failing webhook off, so the handler must not
@@ -54,6 +56,7 @@ from gw_canonical import (
     PLATFORM_LINE,
     CanonicalMessage,
     build_envelope,
+    now_utc_iso,
 )
 from gw_config import (
     SECRET_MISSING,
@@ -64,7 +67,14 @@ from gw_config import (
     secret_status,
 )
 from gw_format import user_facing_error
-from gw_hermes import HermesClient, HermesRejected, HermesUnavailable
+from gw_hermes import (
+    STUCK_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
+    HermesClient,
+    HermesRejected,
+    HermesResult,
+    HermesUnavailable,
+)
 from gw_line import (
     SIGNATURE_HEADER,
     build_text_messages,
@@ -92,6 +102,9 @@ IDLE_POLL_SECONDS = 5
 
 # Housekeeping cadence: stale-lease recovery and retention purge.
 MAINTENANCE_INTERVAL_SECONDS = 300
+
+# Discord's typing indicator lasts about ten seconds per request.
+TYPING_PULSE_SECONDS = 8
 
 
 # ----------------------------------------------------------------- logging
@@ -140,6 +153,11 @@ def setup_logging(log_dir: str, level: str = "INFO") -> None:
 
 
 # ------------------------------------------------------------ row -> message
+
+
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def message_from_row(row) -> CanonicalMessage:
@@ -211,6 +229,9 @@ class Gateway:
         self.proactive = ProactiveServer(self) if cfg.proactive_ready else None
         self.discord_bot = None       # set in run() when enabled
         self.session: aiohttp.ClientSession | None = None
+        # Wall clock for the Hermes wait. A seam for tests, which run a
+        # 480-second wait in milliseconds by advancing it.
+        self.clock = lambda: datetime.now(timezone.utc)
 
     def db(self):
         return open_db(self.cfg.state_db)
@@ -342,29 +363,66 @@ class Gateway:
     # -- the worker ---------------------------------------------------
 
     async def worker(self):
+        """Claim and run requests, up to `max_active_requests` at a time.
+
+        It used to await each request before claiming the next, so one slow
+        DM held every other conversation — LINE included, whose free reply
+        token lives 60 s — however the limit was set. `claim_next` still
+        enforces the global bound and one request per conversation; this
+        loop only stops serialising unrelated conversations behind each other.
+        Setting the limit to 1 restores the old behaviour exactly.
+        """
         max_active = int(self.cfg.limits["max_active_requests"])
-        while not self.stop.is_set():
-            row = None
-            try:
-                row = await self._in_thread(store.claim_next,
-                                            max_active=max_active)
-            except Exception:
-                log.exception("worker: claim failed")
-
-            if row is None:
-                self.wake.clear()
+        tasks: set = set()
+        try:
+            while not self.stop.is_set():
+                if len(tasks) >= max_active:
+                    # Every slot is busy: wait for one to finish (or for the
+                    # idle poll, so a stop is still noticed).
+                    await asyncio.wait(set(tasks), timeout=IDLE_POLL_SECONDS,
+                                       return_when=asyncio.FIRST_COMPLETED)
+                    for done in [t for t in tasks if t.done()]:
+                        tasks.discard(done)
+                    continue
+                row = None
                 try:
-                    await asyncio.wait_for(self.wake.wait(), IDLE_POLL_SECONDS)
-                except asyncio.TimeoutError:
-                    pass
-                continue
+                    row = await self._in_thread(store.claim_next,
+                                                max_active=max_active)
+                except Exception:
+                    log.exception("worker: claim failed")
 
-            try:
-                await self.process(row)
-            except Exception:
-                log.exception("worker: processing failed request_id=%s",
-                              row["gateway_request_id"])
-                await asyncio.to_thread(self._fail, row, "internal")
+                if row is None:
+                    self.wake.clear()
+                    try:
+                        await asyncio.wait_for(self.wake.wait(), IDLE_POLL_SECONDS)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+
+                task = asyncio.create_task(self._process_guarded(row),
+                                           name=f"request:{row['gateway_request_id']}")
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+        finally:
+            # Shutdown. A cancelled request keeps its durable PROCESSING row
+            # (and its run id); recover_stale hands it to the next process.
+            for task in list(tasks):
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _process_guarded(self, row):
+        try:
+            await self.process(row)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("worker: processing failed request_id=%s",
+                          row["gateway_request_id"])
+            await asyncio.to_thread(self._fail, row, "internal")
+        finally:
+            # A slot is free: let the worker claim the next request now.
+            self.wake.set()
 
     async def process(self, row):
         request_id = row["gateway_request_id"]
@@ -392,22 +450,50 @@ class Gateway:
         )
 
         envelope = build_envelope(message)
-        try:
-            result = await self.hermes.ask_async(
-                envelope, message.text,
-                session_id=session_id, request_id=request_id,
-            )
-        except HermesUnavailable as exc:
-            log.warning("hermes unavailable for %s: %s", request_id, exc)
-            await self._note_hermes(False)
-            await self.deliver(row, message, user_facing_error("unavailable"))
+        run_id = row["hermes_run_id"] if "hermes_run_id" in row.keys() else None
+        resumed = bool(run_id)
+        if not run_id:
+            try:
+                run_id, replayed = await asyncio.to_thread(
+                    self.hermes.start_run, envelope, message.text,
+                    session_id=session_id, request_id=request_id,
+                )
+            except HermesUnavailable as exc:
+                log.warning("hermes unavailable for %s: %s", request_id, exc)
+                await self._note_hermes(False)
+                await self.deliver(row, message, user_facing_error("unavailable"))
+                return
+            except HermesRejected as exc:
+                log.error("hermes rejected %s: %s", request_id, exc)
+                await self._note_hermes(False)
+                await self.deliver(row, message, user_facing_error("internal"))
+                return
+            if replayed:
+                log.info("hermes replayed run %s for %s", run_id, request_id)
+        # Durable before the first poll: a restart resumes this exact run.
+        if not await self._in_thread(store.note_run_started, request_id, run_id):
+            log.warning("claim lost before waiting on %s; not delivering", request_id)
             return
-        except HermesRejected as exc:
-            log.error("hermes rejected %s: %s", request_id, exc)
-            await self._note_hermes(False)
-            await self.deliver(row, message, user_facing_error("internal"))
-            return
+        log.info("waiting on hermes run %s for %s (%s)", run_id, request_id,
+                 "resumed" if resumed else "started")
 
+        result = await self._await_run(row, message, run_id, envelope=envelope,
+                                       session_id=session_id)
+        if result is None:
+            # Shutdown, or the claim was taken over. The row keeps its run id;
+            # whoever owns it next resumes the same run.
+            return
+        usage = result.usage or {}
+        log.info("hermes run %s for %s ended status=%s elapsed=%ss in=%s out=%s",
+                 result.run_id, request_id, result.status,
+                 getattr(result, "elapsed", "?"), usage.get("input_tokens", "?"),
+                 usage.get("output_tokens", "?"))
+
+        if result.status == "unavailable":
+            await self._note_hermes(False)
+            await self.deliver(row, message, user_facing_error("unavailable"),
+                               run_id=result.run_id)
+            return
         if result.status == "timeout":
             await self._note_hermes(False)
             await self.deliver(row, message, user_facing_error("timeout"),
@@ -421,6 +507,113 @@ class Gateway:
 
         await self._note_hermes(True)
         await self.deliver(row, message, result.text, run_id=result.run_id)
+
+    async def _await_run(self, row, message: CanonicalMessage, run_id: str, *,
+                         envelope, session_id: str) -> HermesResult | None:
+        """Wait for one Hermes run to settle. None means: stop, deliver nothing.
+
+        The wait is the request's, not the process's:
+
+        * the deadline is the run's recorded start plus absolute_timeout,
+          read back from the row, so a restart does not reset it;
+        * the claim is renewed every heartbeat; if it cannot be (recovered,
+          settled elsewhere), the wait ends without a reply;
+        * a failed status read is retried until `unavailable_grace_seconds`
+          of consecutive failures — a blip no longer ends the request;
+        * a run Hermes no longer knows is restarted once under the same
+          Idempotency-Key, which replays it if Hermes still has it;
+        * shutdown leaves the row PROCESSING with its run id.
+
+        Discord shows "typing…" while it waits.
+        """
+        h = self.cfg.hermes
+        request_id = row["gateway_request_id"]
+        current = await self._in_thread(store.get_inbound, request_id)
+        started = _parse_utc((current["run_started_at"] if current is not None else None)
+                             or now_utc_iso())
+        deadline = started.timestamp() + float(h["absolute_timeout_seconds"])
+        heartbeat = float(h["heartbeat_seconds"])
+        grace = float(h["unavailable_grace_seconds"])
+        per_read = float(h["poll_request_timeout_seconds"])
+        interval = float(h["poll_interval_seconds"])
+        typing = (message.platform == PLATFORM_DISCORD and self.discord_bot is not None
+                  and bool(self.cfg.discord.get("typing_indicator")))
+        channel_id = message.conversation_id.split(":", 1)[-1]
+
+        last_touch = self.clock().timestamp()
+        last_typing = 0.0
+        failing_since = None
+        restarted = False
+        payload: dict = {}
+        while True:
+            if self.stop.is_set():
+                return None
+            now = self.clock().timestamp()
+            if now >= deadline:
+                result = HermesResult("timeout", "", run_id, payload.get("usage"))
+                result.elapsed = int(now - started.timestamp())
+                log.warning("hermes run %s for %s still %s at the deadline", run_id,
+                            request_id, payload.get("status") or "unread")
+                return result
+            if now - last_touch >= heartbeat:
+                if not await self._in_thread(store.touch_claim, request_id):
+                    log.warning("claim on %s lost while waiting; not delivering", request_id)
+                    return None
+                last_touch = now
+            if typing and now - last_typing >= TYPING_PULSE_SECONDS:
+                last_typing = now
+                try:
+                    await asyncio.wait_for(self.discord_bot.typing_once(channel_id), 5)
+                except Exception:
+                    pass  # cosmetic; never a reason to stop waiting
+
+            try:
+                payload = await asyncio.to_thread(self.hermes.get_run, run_id,
+                                                  timeout=per_read)
+            except HermesUnavailable as exc:
+                failing_since = failing_since if failing_since is not None else now
+                if now - failing_since >= grace:
+                    log.warning("hermes status unreadable for %ss on %s: %s",
+                                int(now - failing_since), request_id, exc)
+                    result = HermesResult("unavailable", "", run_id)
+                    result.elapsed = int(now - started.timestamp())
+                    return result
+            except HermesRejected as exc:
+                if str(exc) == "run_not_found" and not restarted:
+                    restarted = True
+                    try:
+                        run_id, replayed = await asyncio.to_thread(
+                            self.hermes.start_run, envelope, message.text,
+                            session_id=session_id, request_id=request_id)
+                    except (HermesUnavailable, HermesRejected) as again:
+                        log.error("hermes lost run for %s and refused a restart: %s",
+                                  request_id, again)
+                        result = HermesResult("failed", "", run_id)
+                        result.elapsed = int(now - started.timestamp())
+                        return result
+                    if not await self._in_thread(store.note_run_started, request_id, run_id):
+                        return None
+                    log.warning("hermes no longer knew the run for %s; %s run %s",
+                                request_id, "replayed" if replayed else "restarted", run_id)
+                    continue
+                log.error("hermes refused status for %s: %s", request_id, exc)
+                result = HermesResult("failed", "", run_id)
+                result.elapsed = int(now - started.timestamp())
+                return result
+            else:
+                failing_since = None
+                status = str(payload.get("status") or "")
+                if status in TERMINAL_RUN_STATUSES or status in STUCK_RUN_STATUSES:
+                    final = status if status in TERMINAL_RUN_STATUSES else "failed"
+                    result = HermesResult(final, payload.get("output"), run_id,
+                                          payload.get("usage"))
+                    result.elapsed = int(now - started.timestamp())
+                    return result
+
+            try:
+                await asyncio.wait_for(self.stop.wait(), interval)
+            except asyncio.TimeoutError:
+                pass
 
     async def _note_hermes(self, ok: bool):
         """Record whether the assistant itself answered (G.2 sections 39, 40).
