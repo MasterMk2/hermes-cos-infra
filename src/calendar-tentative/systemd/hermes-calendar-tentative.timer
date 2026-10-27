@@ -1,0 +1,20 @@
+# Hermes calendar tentative registration — every 15 minutes.
+#
+# Commitments change when the Discord/LINE/Gmail extractors run (minutes),
+# so a quarter-hour keeps new tentative entries prompt while costing one
+# Google list call per tick when nothing changed. install-root.sh installs
+# this timer but does NOT enable it: enable it after `ct_service.py plan`
+# shows what the first run would create.
+
+[Unit]
+Description=Schedule Hermes calendar tentative registration
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+RandomizedDelaySec=60
+Unit=hermes-calendar-tentative.service
+
+[Install]
+WantedBy=timers.target

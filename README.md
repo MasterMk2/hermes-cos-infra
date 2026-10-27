@@ -55,6 +55,21 @@ COMPLETED
   旧前提「--ignore-rules gives personal-context isolation」は訂正)
 - repository allowlist / test command allowlist / secret scan / no push / no merge
 
+## カレンダー自動仮登録（2026-10-27、未配備）
+
+既存の commitments（Discord / LINE / Gmail / Calendar の統合結果）から、本人の日付付きの
+締切・予定で、まだカレンダーにないものを専用サブカレンダー「Hermes 仮登録」へ
+**仮（tentative）予定**として自動登録する。自分のカレンダーへ移動すれば確定、削除すれば却下
+（再登録しない）。追加時は Discord に一通報告する（任意）。
+
+- OAuth スコープは `calendar.app.created` のみ。本人の既存カレンダーは読めず書けない
+- 判断は決定論的な規則のみ（I.2 planner と同じ適格条件）。LLM は使わない
+- insert 前の書き込み先行記録、決定論的な予定ID、応答喪失時の GET 確認で二重登録しない。
+  更新・取り下げは If-Match 付きで、本人の変更を上書きしない
+- オフライン試験 `tests-calendar-tentative/` を CI に追加。実機・実 Google は未検証
+
+設計・導入・運用: [docs/CALENDAR-TENTATIVE.md](docs/CALENDAR-TENTATIVE.md)
+
 ## 現行コードと検証（2026-10-05）
 
 GitHub の実装基準は [`0445c7c8`](https://github.com/MasterMk2/hermes-cos-infra/commit/0445c7c8b7da7b52553eccf3f156b0882e6a8438)。
@@ -116,6 +131,7 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 | 12 | [docs/16-phase-h32-constrained-antigravity-backend.md](docs/16-phase-h32-constrained-antigravity-backend.md) / [security closeout](docs/17-phase-h32s-antigravity-security-closeout.md) | H.3.2 / H.3.2-S（当時の完了記録） |
 | 13 | [docs/18-phase-i1-production-event-profiling.md](docs/18-phase-i1-production-event-profiling.md) / [production closeout](docs/19-phase-i1s-unified-commitments-production-closeout.md) | I.1 / I.1-S（当時の完了記録） |
 | - | [docs/STATUS-RECONCILIATION.md](docs/STATUS-RECONCILIATION.md) | I.2実装・後続作業記録・現在未確認の運用状態を分離した照合 |
+| - | [docs/CALENDAR-TENTATIVE.md](docs/CALENDAR-TENTATIVE.md) | commitments → 専用サブカレンダーへの自動仮登録（未配備） |
 | - | [docs/lessons-learned.md](docs/lessons-learned.md) | 実測で見つかった落とし穴と修正 |
 
 ## Code Snapshot (`src/`)
@@ -156,6 +172,9 @@ src/
 │   ├── app/                    syncToken sync / OAuth transport / webhook / index
 │   ├── mcp/calendar_mcp.py     calendar_search / calendar_get / calendar_status
 │   └── systemd/ + install-root.sh + bin/  dedicated identity / credential boundary
+├── calendar-tentative/         commitments → 仮予定 (calendar.app.created のみ)
+│   ├── app/                    select / engine / store / google / notify / oauth / service
+│   └── systemd/ + install-root.sh  hermestentative / 15分 timer (未有効化で配置)
 └── docker-compose.hermes.yaml  実機 deploy 対象 (digest pin)
 
 tests/                          F.2 回帰テスト (repo root、src/ の外。unittest 129 tests)

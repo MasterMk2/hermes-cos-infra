@@ -1,0 +1,72 @@
+# Hermes calendar tentative registration -- no credential belongs here.
+#
+# Every commitment Hermes already tracks (Discord / LINE / Gmail / Calendar,
+# unified in events.db) that is the owner's own dated work and is not yet on
+# a calendar becomes a TENTATIVE event on a dedicated secondary calendar.
+# Accept one by moving it to your own calendar; reject one by deleting it.
+# A deleted entry is never re-created.
+
+paths:
+  state_db: /srv/hermes/calendar-tentative/state/tentative.db
+  events_db: /srv/hermes/hermes-data/events/events.db
+  # H.1's read-only snapshot: avoids duplicating real events and notices a
+  # tentative entry you moved to a real calendar. Empty disables both.
+  calendar_index_db: /srv/hermes/calendar/index/index.db
+
+oauth:
+  # Empty means systemd's CREDENTIALS_DIRECTORY.
+  credential_dir: ""
+
+calendar:
+  # Printed by: ct_oauth.py --create-calendar "Hermes 仮登録"
+  # Must end in @group.calendar.google.com. Never your primary calendar, and
+  # never add this id to H.1's calendars.selected_ids.
+  calendar_id: ""
+  time_zone: Asia/Tokyo
+  summary_prefix: "[仮] "
+  # Length of a timed entry when the source gave only a start time.
+  default_duration_minutes: 60
+  # Google event colour 1..11, or "" for the calendar's own colour.
+  color_id: ""
+
+selection:
+  # Only entries starting within this many days are created.
+  horizon_days: 60
+  min_confidence: 0.7
+  # SHARED work is included when Discord/LINE/Calendar also carries it.
+  include_shared: true
+  # Gmail-only rows were 95% newsletters/campaigns when measured (I.1).
+  # A row Discord, LINE or Calendar also mentions is included regardless.
+  include_gmail_only: false
+  # A real event with the same normalized title this close in time (or on
+  # the same day, for all-day entries) counts as "already on the calendar".
+  match_tolerance_minutes: 5
+
+limits:
+  max_creates_per_run: 10
+  max_updates_per_run: 10
+  max_withdrawals_per_run: 10
+  # Never more than this many tentative entries alive at once.
+  max_active: 100
+  # Google refusing an insert this many times makes the entry FAILED.
+  max_attempts: 5
+
+behaviour:
+  # apply | dry_run. In dry_run the timer only counts what it would do.
+  mode: apply
+  # Move an untouched tentative entry when its commitment's date changes.
+  update_on_change: true
+  # Remove an untouched future entry when its commitment is done/cancelled
+  # or the real event appears on your calendar.
+  withdraw_on_resolution: true
+
+notify:
+  # One Discord DM through the channel gateway when entries are added.
+  # Requires the service account in the gateway's socket group
+  # (install-root.sh does this when the group exists).
+  enabled: true
+  socket_path: /srv/hermes/channel-gateway/run/proactive.sock
+  quiet_hours_start: "23:00"
+  quiet_hours_end: "08:00"
+  max_lines: 8
+  timeout_seconds: 30
