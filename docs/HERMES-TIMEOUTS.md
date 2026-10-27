@@ -83,6 +83,7 @@ Pi に checkout が無い（またはこのファイルを含まない）とき�
 checkout を書き換えずに済む:
 
 ```
+# PR #9 の merge 前は main を claude/charming-thompson-3eaanv に読み替える
 curl -fsSL -o /tmp/hermes-timeout-diag.sh \
   https://raw.githubusercontent.com/MasterMk2/hermes-cos-infra/main/src/channel-gateway/bin/hermes-timeout-diag.sh
 sudo bash /tmp/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
@@ -127,3 +128,6 @@ sudo bash /tmp/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
 bridge の `timeout_seconds`（120）、Hermes 側の provider retry / fallback / timeout / 圧縮設定、
 session の切り替え、有料ルーティング、image digest。いずれも分類 broker や planning にも効く。
 変えるときは診断スクリプトの S7/S9 で段階別の所要時間を確かめてから。
+bridge の `timeout_seconds` については、2026-10-27 に根拠が得られた: 1 行の質問でもツール付き呼び出しに 162 s かかり、
+120 s では一度も成功しない。120 → 240 の手順は [HANDOFF-HERMES-TIMEOUTS.md](HANDOFF-HERMES-TIMEOUTS.md) にある。
+変えたら、ここに変更日と値を書き足す。
