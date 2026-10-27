@@ -102,7 +102,7 @@ sudo bash /tmp/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
 
 - **このブランチをそのまま本番へ `deploy.sh` しない。** 本番の gateway と bridge には GitHub に無いローカル変更
   （coding handoff、premium routing）が入っていて、上書きするとそれらが消える。先に Pi 上のローカル作業を
-  GitHub に回収し、その上にこの修正を載せ直してから配備する
+  GitHub に回収し、その上にこの修正を載せ直してから配備する（2026-10-28 に回収・統合済み）
 - `gw_schema` は追加列だけで、既存 DB は起動時に `run_started_at` が足される
 - **`config.yaml` の `hermes.absolute_timeout_seconds` は手で 480 に上げる。** 旧 sample は 240 を明示していて、
   deploy.sh は config.yaml を書き換えない。240 のままだと、遅れた回答を待つ時間は以前と同じ
@@ -119,9 +119,10 @@ sudo bash /tmp/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
 ## 次に直すもの（診断結果から）
 
 1. fallback を使える状態に戻す: `commandcode` の API キーの更新、`opencode-free` の終了したモデルの差し替え
-2. 主経路の 504（timeout）を 3 回 retry しない設定にできるか、Hermes の設定を確認する（3 × 120 s が無駄になっている）
+2. ~~主経路の 504（timeout）を 3 回 retry しない設定にできるか、Hermes の設定を確認する~~
+   → 2026-10-28 に `agent.api_max_retries: 1` にした（下の「2026-10-28 の配備」）
 3. /srv/hermes を USB メモリから SSD（UAS 対応の USB-SATA など）へ移すことを検討する
-4. 上の「配備するときに」の回収を済ませてから、この PR の修正を配備する
+4. ~~上の「配備するときに」の回収を済ませてから、この PR の修正を配備する~~ → 2026-10-28 に回収・統合・配備した
 
 ## 証拠なしに変えないもの
 
@@ -131,6 +132,8 @@ session の切り替え、有料ルーティング、image digest。いずれも
 bridge の `timeout_seconds` については、2026-10-27 に根拠が得られた: 1 行の質問でもツール付き呼び出しに 162 s かかり、
 120 s では一度も成功しない。120 → 240 の手順は [HANDOFF-HERMES-TIMEOUTS.md](HANDOFF-HERMES-TIMEOUTS.md) にある。
 変えたら、ここに変更日と値を書き足す。
+- 2026-10-28 01:47 JST: 120 → 240
+- 2026-10-28 05:39 JST: 240 → 600（PR #9 の配備と同時。Hermes の `agent.api_max_retries: 1` と組み合わせる）
 
 ## 2026-10-28 の確認と変更（Pi）
 
@@ -152,3 +155,41 @@ bridge の `timeout_seconds` については、2026-10-27 に根拠が得られ�
   - gateway: 640d9db に 9 月 10 日の coding handoff（Phase J.1）を足したもの。10-05 の gateway 修正は入っていない。
   - bridge・attention（engine / events / schema）・premium-cli: 9 月 10 日の owner-task-routing の作業。GitHub には未回収。
   - したがって、PR #9 の attention を配備すると、gateway・bridge と同じく本番だけの変更が巻き戻る。回収の対象に attention も含める。
+
+## 2026-10-28 の配備（PR #9、a1ba3eb）
+
+オーナーの了承を段ごとに取り、次の順に入れた: 状態確認 → 退避 → Hermes → bridge → gateway → attention。
+
+| 対象 | 変更 | 時刻（JST） |
+|---|---|---|
+| Hermes | `agent.api_max_retries: 1` を追加し、コンテナを再起動（health 200 まで 153 s） | 05:35 頃 |
+| bridge | `bridge_server.py` を a1ba3eb に、`timeout_seconds` を 240 → 600。再起動 | 05:39 |
+| gateway | `deploy.sh`（更新 10、新規 1）、`absolute_timeout_seconds` を 240 → 840、`--check` の後に起動 | 05:45 |
+| attention | `deploy.sh`（更新 6）、attention-engine を再起動 | 05:45 |
+
+値の根拠:
+- gateway 840: 検証範囲の上限。attention の queue_stuck（900 s）より短い
+- bridge 600: 計測した 218 s / 300 s 超が収まり、840 より短い。呼び出しが固まっても gateway の期限より前に失敗として返る。
+  premium CLI（最大 60 s）を使う場合は、その時間も 600 s に含まれる（`bridge_server.py`）
+- Hermes `api_max_retries: 1`: 0.20.6 ではこの値は試行回数で、0 は 1 に丸められる（1 = 再試行なし）。
+  600 s で打ち切られた呼び出しをやり直しても 840 s に収まらない。代わりに、一時的な失敗も再試行されない
+- 1 回の呼び出しを打ち切るのは bridge の値。Hermes の上限は 1800 s（`HERMES_API_TIMEOUT` 未設定）で、
+  90 s の stale 検出は接続先がローカル扱いのため無効
+
+配備前の確認:
+- 本番と a1ba3eb の差は、gateway app 10 と診断スクリプト（新規）、attention 6、bridge は `bridge_server.py` だけ。
+  回収した内容と本番が一致していることを、もう一度確かめた
+- 本番の 3 つの venv（Python 3.13.5）で、新しいコードの py_compile と起動モジュールの import が通った
+- gateway の DB に処理中・送信中の行が無いことを確かめてから、Hermes・bridge・gateway を再起動した
+- 退避: コードと設定（gateway / attention / bridge）、Hermes の config.yaml、gateway の DB（`state/gateway.db.bak-pr9`）
+
+配備後の観察:
+- gateway は USB の I/O 待ちで、起動から受け付け開始まで約 4 分かかった。その間に届いた DM は取りこぼした可能性がある
+- 実際の DM 1 件: bridge の per-call ログ `status=200 outcome=ok duration=233.5s`、Hermes の run は 246 s で completed、
+  回答は DM に届いた（`ok=True`。`detail=already_delivered` は全 chunk 送信済みの意味）。旧 gateway の 240 s なら捨てられていた
+- 1 行の質問でも約 4 分かかる状態は変わっていない。ツールを多く使う依頼は 600 / 840 s に届きうる。fallback は壊れたまま
+
+戻すとき:
+- 各段を退避から戻して、そのサービスを再起動する。gateway は受信を止め、PROCESSING 行が無いことを確かめてから戻す。
+  DB は戻さなくてよい（追加列は旧コードが無視する）
+- 失敗した proactive の行は、同じ通知 id で再要求されると、新しいコードでは再送せず UNKNOWN で保留する
