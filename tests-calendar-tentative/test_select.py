@@ -136,21 +136,24 @@ class EligibilityTests(SelectionCase):
                          {sel.R_RESOLVED})
         self.assertEqual(s.skipped["sup"], sel.R_SUPERSEDED)
 
-    def test_gmail_only_rows_need_an_explicit_opt_in(self):
+    def test_gmail_only_rows_pass_the_mail_screen_first(self):
         self.ws.add_commitment("mail", "メール由来", sources=[("gmail", "m-1")], **self.DUE)
         self.ws.add_commitment("both", "両方", sources=[("gmail", "m-2"), ("line", "l-2")],
                                **self.DUE)
+        # No Gmail index given: mail-only rows are held back, mixed ones are not.
         s = self.select()
         self.assertEqual(set(s.desired), {"both"})
+        self.assertEqual(s.skipped["mail"], sel.R_GMAIL_UNSCREENED)
+        s = self.select(make_cfg(selection={"gmail_only": "off"}))
         self.assertEqual(s.skipped["mail"], sel.R_GMAIL_ONLY)
-        s = self.select(make_cfg(selection={"include_gmail_only": True}))
+        s = self.select(make_cfg(selection={"gmail_only": "all"}))
         self.assertEqual(set(s.desired), {"mail", "both"})
 
     def test_shared_needs_chat_evidence_even_when_gmail_is_allowed(self):
         self.ws.add_commitment("sh", "サークル合宿の準備", responsibility="SHARED", **self.DUE)
         self.ws.add_commitment("shm", "キャンペーン", responsibility="SHARED",
                                sources=[("gmail", "m-9")], **self.DUE)
-        s = self.select(make_cfg(selection={"include_gmail_only": True}))
+        s = self.select(make_cfg(selection={"gmail_only": "all"}))
         self.assertIn("sh", s.desired)
         self.assertEqual(s.skipped["shm"], sel.R_SHARED_WITHOUT_CHAT)
         s = self.select(make_cfg(selection={"include_shared": False}))

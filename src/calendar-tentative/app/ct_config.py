@@ -44,7 +44,23 @@ DEFAULT_PATHS = {
     # already on a real calendar and to notice a tentative entry the owner
     # moved onto one. Optional: an empty value disables both checks.
     "calendar_index_db": "/srv/hermes/calendar/index/index.db",
+    # H.2's published read-only snapshot. Only headers, labels, thread ids
+    # and the sent flag are read, to tell mail from people apart from
+    # newsletters. Without it, Gmail-only rows are not proposed (fail closed).
+    "gmail_index_db": "/srv/hermes/gmail/index/index.db",
 }
+
+#: Which commitments whose only evidence is Gmail may be proposed.
+#:   off                       none
+#:   people                    mail the owner sent, mail in a thread the owner
+#:                             wrote in, mail from someone the owner has
+#:                             written to, and other personal mail from a
+#:                             human-looking sender. Never promotions, social
+#:                             or mailing-list mail, never automated senders.
+#:   people_and_notifications  also automated notices (Gmail "Updates",
+#:                             no-reply senders): reservations, confirmations.
+#:   all                       no screening at all.
+GMAIL_ONLY_MODES = ("off", "people", "people_and_notifications", "all")
 DEFAULT_OAUTH = {
     # Empty means systemd's CREDENTIALS_DIRECTORY. A directory path only.
     "credential_dir": "",
@@ -61,10 +77,10 @@ DEFAULT_SELECTION = {
     "horizon_days": 60,
     "min_confidence": 0.7,
     "include_shared": True,
-    # I.1 measured 95% of Gmail-derived rows as newsletters and campaigns, and
-    # the I.2 planner excludes Gmail-only rows for the same reason. A row that
-    # Discord, LINE or Calendar also mentions is unaffected by this switch.
-    "include_gmail_only": False,
+    # I.1 measured 95% of Gmail-derived rows as newsletters and campaigns, so
+    # Gmail-only rows pass a mail screen first (GMAIL_ONLY_MODES). A row that
+    # Discord, LINE or Calendar also mentions is unaffected by this setting.
+    "gmail_only": "people",
     "match_tolerance_minutes": 5,
 }
 DEFAULT_LIMITS = {
@@ -200,7 +216,8 @@ def parse_config(data, *, path: str = "<memory>") -> Config:
     for key in ("state_db", "events_db"):
         if not str(merged["paths"][key] or "").strip():
             raise ConfigError(f"paths.{key} must be set")
-    merged["paths"]["calendar_index_db"] = str(merged["paths"]["calendar_index_db"] or "")
+    for key in ("calendar_index_db", "gmail_index_db"):
+        merged["paths"][key] = str(merged["paths"][key] or "")
 
     cal = merged["calendar"]
     cal["calendar_id"] = validate_calendar_id(cal["calendar_id"])
@@ -223,7 +240,8 @@ def parse_config(data, *, path: str = "<memory>") -> Config:
     if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0.0 <= conf <= 1.0:
         raise ConfigError("selection.min_confidence must be 0.0..1.0")
     _bool(sel["include_shared"], "selection.include_shared")
-    _bool(sel["include_gmail_only"], "selection.include_gmail_only")
+    if sel["gmail_only"] not in GMAIL_ONLY_MODES:
+        raise ConfigError(f"selection.gmail_only must be one of {', '.join(GMAIL_ONLY_MODES)}")
     _int(sel["match_tolerance_minutes"], "selection.match_tolerance_minutes", 0, 1440)
 
     lim = merged["limits"]

@@ -20,7 +20,7 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_are_conservative(self):
         cfg = parse_config({})
         self.assertEqual(cfg.calendar_id, "")
-        self.assertFalse(cfg.selection["include_gmail_only"])
+        self.assertEqual(cfg.selection["gmail_only"], "people")
         self.assertFalse(cfg.notify["enabled"])
         self.assertEqual(cfg.limits["max_creates_per_run"], 10)
 
@@ -41,7 +41,8 @@ class ConfigTests(unittest.TestCase):
     def test_values_are_range_checked(self):
         for data in ({"selection": {"horizon_days": 0}},
                      {"selection": {"min_confidence": 1.5}},
-                     {"selection": {"include_gmail_only": "yes"}},
+                     {"selection": {"gmail_only": "yes"}},
+                     {"selection": {"include_gmail_only": True}},
                      {"behaviour": {"mode": "fire"}},
                      {"notify": {"quiet_hours_start": "25:00"}},
                      {"calendar": {"color_id": "12"}},

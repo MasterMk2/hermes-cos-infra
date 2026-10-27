@@ -12,6 +12,10 @@ paths:
   # H.1's read-only snapshot: avoids duplicating real events and notices a
   # tentative entry you moved to a real calendar. Empty disables both.
   calendar_index_db: /srv/hermes/calendar/index/index.db
+  # H.2's read-only snapshot, used only by the Gmail screen below (headers,
+  # labels, threads and the sent flag; never bodies). Without it, rows whose
+  # only evidence is Gmail are held back.
+  gmail_index_db: /srv/hermes/gmail/index/index.db
 
 oauth:
   # Empty means systemd's CREDENTIALS_DIRECTORY.
@@ -35,9 +39,17 @@ selection:
   min_confidence: 0.7
   # SHARED work is included when Discord/LINE/Calendar also carries it.
   include_shared: true
-  # Gmail-only rows were 95% newsletters/campaigns when measured (I.1).
+  # Rows whose only evidence is Gmail (I.1: 95% were newsletters/campaigns):
+  #   off                       never
+  #   people                    mail from people only: mail you sent, threads
+  #                             you replied in, senders you have written to,
+  #                             and other personal mail. Never promotions,
+  #                             social, mailing lists or automated senders.
+  #   people_and_notifications  also automated notices (Gmail "Updates",
+  #                             no-reply senders): reservations, confirmations
+  #   all                       no screening
   # A row Discord, LINE or Calendar also mentions is included regardless.
-  include_gmail_only: false
+  gmail_only: people
   # A real event with the same normalized title this close in time (or on
   # the same day, for all-day entries) counts as "already on the calendar".
   match_tolerance_minutes: 5

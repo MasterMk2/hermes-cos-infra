@@ -34,7 +34,8 @@ class ServiceCase(unittest.TestCase):
     def config(self, **extra):
         data = {
             "paths": {"state_db": self.ws.state_path, "events_db": self.ws.events_path,
-                      "calendar_index_db": self.ws.index_path},
+                      "calendar_index_db": self.ws.index_path,
+                      "gmail_index_db": self.ws.gmail_path},
             "calendar": {"calendar_id": CALENDAR_ID},
             "selection": {"horizon_days": 366},
         }
@@ -91,6 +92,29 @@ class ServiceTests(ServiceCase):
         self.ws.add_index_event("e1", "[仮] x", "2026-10-05", all_day=True, calendar_id=CALENDAR_ID)
         code, _ = self.cli("--config", self.config(), "check")
         self.assertEqual(code, ct_service.EXIT_CONFIG)
+
+    def test_plan_screens_gmail_only_rows_through_the_index(self):
+        self.ws.add_mail("gmail:sent", is_sent=True, to="client@example.org")
+        self.ws.add_mail("gmail:promo", labels=("INBOX", "CATEGORY_PROMOTIONS"))
+        self.ws.add_commitment("mine", "請求書を送る", due_at=_days_from_now(10), due_precision="day",
+                               sources=[("gmail", "gmail:sent")])
+        self.ws.add_commitment("ad", "セール最終日", due_at=_days_from_now(10), due_precision="day",
+                               sources=[("gmail", "gmail:promo")])
+        code, data = self.cli("--config", self.config(), "plan")
+        self.assertEqual(code, 0)
+        self.assertTrue(data["gmail_screen_available"])
+        self.assertEqual(data["skipped"].get("gmail_bulk"), 1)
+        self.assertTrue(any("請求書を送る" in line for line in data["plan"]["create"]))
+        self.assertFalse(any("セール" in line for line in data["plan"]["create"]))
+
+    def test_without_the_gmail_index_mail_only_rows_are_held_back(self):
+        self.ws.add_commitment("mine", "請求書を送る", due_at=_days_from_now(10), due_precision="day",
+                               sources=[("gmail", "gmail:sent")])
+        missing = os.path.join(self.ws.dir, "absent.db")
+        code, data = self.cli("--config", self.config(paths={"gmail_index_db": missing}), "plan")
+        self.assertEqual(code, 0)
+        self.assertFalse(data["gmail_screen_available"])
+        self.assertEqual(data["skipped"].get("gmail_unscreened"), 1)
 
     def test_status_without_state_is_not_an_error(self):
         code, data = self.cli("--config", self.config(), "status")

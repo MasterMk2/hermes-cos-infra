@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ct_engine
+import ct_mail
 import ct_select
 import ct_store as store
 from ct_config import ConfigError, load_config
@@ -85,15 +86,34 @@ def run_lock(state_db: str):
         handle.close()
 
 
+def open_gmail_index(cfg):
+    path = cfg.paths["gmail_index_db"]
+    if not path or cfg.selection["gmail_only"] in ("off", "all"):
+        return None
+    try:
+        con = open_readonly(path)
+        if ct_mail.index_usable(con):
+            return con
+        con.close()
+        log.warning("gmail index has an unexpected shape; Gmail-only rows are held back")
+    except sqlite3.Error as exc:
+        # Fail closed: without the screen, mail-only rows are not proposed.
+        log.warning("gmail index unavailable (%s); Gmail-only rows are held back",
+                    type(exc).__name__)
+    return None
+
+
 def _select(cfg, now):
     events = open_readonly(cfg.paths["events_db"])
     index = open_index(cfg)
+    gmail = open_gmail_index(cfg)
     try:
-        return ct_select.select(events, cfg=cfg, now=now, index_con=index)
+        return ct_select.select(events, cfg=cfg, now=now, index_con=index, gmail_con=gmail)
     finally:
         events.close()
-        if index is not None:
-            index.close()
+        for con in (index, gmail):
+            if con is not None:
+                con.close()
 
 
 def _print(data) -> None:
@@ -231,6 +251,17 @@ def cmd_check(cfg) -> int:
             log.error("calendar idx: the tentative calendar is selected in H.1 "
                       "(calendars.selected_ids); remove it there")
             ok = False
+
+    mode = cfg.selection["gmail_only"]
+    if mode in ("off", "all"):
+        log.info("gmail screen: not used (gmail_only=%s)", mode)
+    else:
+        gmail = open_gmail_index(cfg)
+        if gmail is None:
+            log.warning("gmail screen: index unavailable; Gmail-only rows will be held back")
+        else:
+            gmail.close()
+            log.info("gmail screen: readable (gmail_only=%s)", mode)
 
     state_dir = Path(cfg.paths["state_db"]).parent
     writable = state_dir.is_dir() and os.access(state_dir, os.W_OK)

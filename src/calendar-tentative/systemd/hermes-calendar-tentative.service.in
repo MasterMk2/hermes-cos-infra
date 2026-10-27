@@ -81,6 +81,9 @@ ReadWritePaths=-/srv/hermes/channel-gateway/run
 # even by accident (the code also opens them mode=ro + query_only).
 ReadOnlyPaths=/srv/hermes/hermes-data/events
 ReadOnlyPaths=-/srv/hermes/calendar/index
+# H.2's published snapshot, for the mail screen. The code selects headers,
+# labels, thread ids and the sent flag only; it never reads message bodies.
+ReadOnlyPaths=-/srv/hermes/gmail/index
 
 InaccessiblePaths=-/etc/hermes-secrets
 InaccessiblePaths=-/run/docker.sock

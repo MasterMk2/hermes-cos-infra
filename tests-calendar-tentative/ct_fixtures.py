@@ -2,8 +2,9 @@
 
 Every database here is created in a temporary directory with the REAL
 schemas: commitments from `commitments.store.SCHEMA_SQL`, the Calendar index
-from H.1's `cal_index.INDEX_SCHEMA`. A fixture that copied either schema
-would keep passing after the real one changed.
+from H.1's `cal_index.INDEX_SCHEMA`, the Gmail index from H.2's
+`gm_index.INDEX_SCHEMA`. A fixture that copied a schema would keep passing
+after the real one changed.
 
 `FakeCalendar` stands in for Google. It keeps deleted events (as Google
 does), enforces If-Match, refuses a duplicate id with 409, and can be told
@@ -17,6 +18,7 @@ All titles and names are invented.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import sqlite3
 import sys
@@ -26,13 +28,14 @@ from zoneinfo import ZoneInfo
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 for sub in ("src", os.path.join("src", "calendar-tentative", "app"),
-            os.path.join("src", "calendar", "app")):
+            os.path.join("src", "calendar", "app"), os.path.join("src", "gmail", "app")):
     path = os.path.join(ROOT, sub)
     if path not in sys.path:
         sys.path.insert(0, path)
 
 from cal_index import INDEX_SCHEMA  # noqa: E402
 from commitments.store import SCHEMA_SQL  # noqa: E402
+from gm_index import INDEX_SCHEMA as GMAIL_INDEX_SCHEMA  # noqa: E402
 from ct_config import parse_config  # noqa: E402
 from ct_google import ApiError  # noqa: E402
 
@@ -40,6 +43,7 @@ JST = ZoneInfo("Asia/Tokyo")
 NOW = datetime(2026, 10, 1, 9, 0, tzinfo=JST)
 CALENDAR_ID = "tentative-test@group.calendar.google.com"
 OWNER_CALENDAR_ID = "owner-main@group.calendar.google.com"
+OWNER_ADDRESS = "owner@example.com"
 
 RAW_EVENTS_SQL = """
 CREATE TABLE IF NOT EXISTS events (
@@ -74,12 +78,39 @@ class Workspace:
         self.index = sqlite3.connect(self.index_path)
         self.index.row_factory = sqlite3.Row
         self.index.executescript(INDEX_SCHEMA)
+        self.gmail_path = os.path.join(self.dir, "gmail-index.db")
+        self.gmail = sqlite3.connect(self.gmail_path)
+        self.gmail.executescript(GMAIL_INDEX_SCHEMA)
         self._n = 0
 
     def close(self):
         self.events.close()
         self.index.close()
+        self.gmail.close()
         self._tmp.cleanup()
+
+    # -- gmail index -----------------------------------------------------
+
+    def add_mail(self, source_id, *, sender="Someone <someone@example.org>",
+                 to=OWNER_ADDRESS, cc="", labels=("INBOX",), thread_id=None,
+                 is_sent=False, deleted=False, subject="件名", body="本文"):
+        """One row of H.2's published index. `source_id` is `gmail:<id>`."""
+        labels = list(labels) + (["SENT"] if is_sent and "SENT" not in labels else [])
+        message_id = source_id.split(":", 1)[-1]
+        self.gmail.execute(
+            """INSERT INTO gmail_messages (source_id, message_id, thread_id, received_at,
+                 internal_date_ms, from_header, to_header, cc_header, subject, labels_json,
+                 routine_excluded, snippet, body_text, commitment_text, content_state, mime_json,
+                 attachments_json, is_sent, deleted_at, indexed_at, revision, baseline,
+                 content_hash)
+               VALUES (?, ?, ?, '2026-09-30T00:00:00+00:00', 0, ?, ?, ?, ?, ?, 0, '', ?, ?,
+                       'available', '{}', '[]', ?, ?, '2026-09-30T00:00:00+00:00', 0, 0, 'h')""",
+            (source_id, message_id, thread_id or f"t-{message_id}",
+             OWNER_ADDRESS if is_sent else sender, to, cc, subject,
+             json.dumps(labels), body, body, 1 if is_sent else 0,
+             "2026-09-30T00:00:00+00:00" if deleted else None),
+        )
+        self.gmail.commit()
 
     # -- commitments -----------------------------------------------------
 

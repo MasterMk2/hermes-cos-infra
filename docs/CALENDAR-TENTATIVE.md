@@ -58,6 +58,7 @@ tests-calendar-tentative/   オフライン試験（scripts/check_offline.py の
 | 招待・通知 | 参加者なし、`sendUpdates=none`。他人に何も届かない |
 | 予定の性質 | `status: tentative`、`transparency: transparent`（空き時間を塞がない） |
 | commitments | `mode=ro` + `PRAGMA query_only` + systemd `ReadOnlyPaths`。このサービスは commitments を変更できない |
+| Gmail インデックス | H.2 の公開スナップショットを `mode=ro` で読む。参照する列はヘッダー・ラベル・スレッドID・送信済みフラグのみで、本文・スニペットは読まない（ファイル単位では本文も読める権限であることに注意） |
 | Hermes 本体 | 新しいツールも権限も渡さない。チャットから仮登録を作る経路はない |
 | Discord 通知 | gateway の既存 proactive ソケットのみ。受信者フィールドは存在せず、LINE は使わない |
 
@@ -71,13 +72,51 @@ I.2 planner の適格条件をそのまま使う（本番データで測定済�
 | `resolved` / `superseded` / `informational` | 完了・取消・却下済み、置き換え済み、お知らせ |
 | `not_owner_task` | `COUNTERPARTY`、または `WAITING` / `BLOCKED`（次の一手が相手側） |
 | `shared_without_chat_evidence` | `SHARED` だが Discord/LINE/Calendar の裏付けがない |
-| `gmail_only` | 根拠が Gmail だけ（I.1 で 95% がメルマガ等と測定）。`include_gmail_only: true` で対象にできる |
+| `gmail_only` | 根拠が Gmail だけで、`selection.gmail_only: off` |
+| `gmail_bulk` | Gmail がプロモーション／ソーシャル／フォーラム（メーリングリスト）に分類したメール |
+| `gmail_notification` | Gmail の「更新」、または `no-reply@` などの自動送信元。`people_and_notifications` なら対象 |
+| `gmail_discarded` | 削除済み、迷惑メール、ゴミ箱 |
+| `gmail_unscreened` | Gmail インデックスが読めない、または該当メールが見つからない（判定できないものは入れない） |
 | `already_on_calendar` | `calendar_authority`、または Calendar の根拠を持つ |
 | `matches_existing_event` | H.1 スナップショットに、正規化タイトルが**完全一致**し時刻も合う予定がある（類似度は使わない） |
 | `low_confidence` | `confidence < min_confidence`（既定 0.7） |
 | `no_date` / `imprecise_time` | 日付なし、または `week`/`month`/`daypart`/`approximate`/`unknown`。**時刻を推測しない** |
 | `past` / `beyond_horizon` | 過ぎた、または `horizon_days`（既定 60 日）より先 |
 | `duplicate_source` | 同じ元メッセージを指す別 commitment があり、そちらを残した |
+
+### Gmail だけが根拠の項目（メールの選別）
+
+I.1 では Gmail 由来の行の 95% がメルマガ・キャンペーンだった。そこで Gmail だけが根拠の行は、
+H.2 が公開している Gmail インデックスの**ヘッダー・ラベル・スレッド・送信済みフラグだけ**を見て
+（本文は読まない）、人からのメールに限って入れる。Discord / LINE / Calendar にも根拠がある行はこの選別を通らない。
+
+判定順（`app/ct_mail.py`）:
+
+| 順 | 条件 | 結果 |
+|---:|---|---|
+| 1 | インデックスにない | 入れない（`gmail_unscreened`） |
+| 2 | 削除済み・迷惑メール・ゴミ箱 | 入れない（`gmail_discarded`） |
+| 3 | 自分が送ったメール | **入れる** |
+| 4 | 自分が書き込んだスレッドのメール | **入れる** |
+| 5 | Gmail がプロモーション／ソーシャル／フォーラムに分類 | 入れない（`gmail_bulk`） |
+| 6 | 自分が過去にメールを送った相手から | **入れる** |
+| 7 | Gmail の「更新」、または `no-reply@`・`notifications@`・`newsletter@`・`news.` 送信ホストなど | 既定では入れない（`gmail_notification`） |
+| 8 | それ以外（人からの個人宛てメール） | **入れる** |
+
+5 が 6 より上なのは、一度問い合わせた店でも、Gmail がプロモーションに分類した次のメールは広告だから。
+3・4 が 5 より上なのは、自分が返信したスレッドは Gmail の分類に関係なく会話だから。
+仮予定の説明欄には「根拠: やり取りのある相手からのメール」のように、どの規則で入れたかを書く。
+
+`selection.gmail_only` で範囲を選べる:
+
+| 値 | 入るもの |
+|---|---|
+| `off` | Gmail だけが根拠の行は入れない |
+| `people`（既定） | 上の 3・4・6・8 |
+| `people_and_notifications` | さらに 7（予約確認・申込受付などの自動通知） |
+| `all` | 選別しない |
+
+Gmail インデックスが読めないときは、Gmail だけが根拠の行を入れない（`all` を除く）。
 
 ### 予定の形
 
@@ -191,7 +230,7 @@ sudo systemctl enable --now hermes-calendar-tentative.timer
 
 ## 試験
 
-`tests-calendar-tentative/`（92 件 + subtests 25 件、CI の `scripts/check_offline.py` に追加）。
+`tests-calendar-tentative/`（117 件 + subtests 47 件、CI の `scripts/check_offline.py` に追加）。
 実スキーマ（commitments、H.1 index）で DB を作り、偽の Google（削除済み予定を保持、If-Match、
 重複IDの 409、応答喪失、本人の削除・編集・移動を再現）に対して実行する。主な固定点:
 
@@ -210,7 +249,9 @@ sudo systemctl enable --now hermes-calendar-tentative.timer
   Google の公式リファレンスで確認したが、重複IDへの 409 応答と、UI で別カレンダーへ移動した予定が
   同じIDを保つことは実アカウントで未確認。後者が違っても「移動」が `REJECTED` と記録されるだけで、
   作り直しや削除は起きない
-- Gmail だけが根拠の行は既定で対象外。必要なら `include_gmail_only: true`
+- Gmail だけが根拠の行は既定で「人からのメール」だけ。予約確認などの自動通知は
+  `gmail_only: people_and_notifications` で入る。Gmail の分類ラベルと送信済みメールの取り込み状況は
+  実メールボックスで未確認
 - 予定（`appointment`）の判定は Discord/LINE 抽出器の `appointment_candidate` に依存する。
   それ以外の日時付き commitment は締切として終日で入る
 - commitments の分類精度（`commitments/reconcile.py` のキーワード規則）がそのまま選定精度になる

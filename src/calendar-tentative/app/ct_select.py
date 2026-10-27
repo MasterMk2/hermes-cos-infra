@@ -16,8 +16,9 @@ production data and this layer feeds the same owner the same facts:
 * The owner's work only: `SELF`, or `SHARED` when Discord/LINE/Calendar also
   carries it. `COUNTERPARTY` and `WAITING`/`BLOCKED` are someone else's next
   step, and a tentative slot on the owner's calendar would misstate that.
-* Gmail-only evidence is excluded unless `selection.include_gmail_only` is
-  set (I.1: 95% of Gmail-derived rows were newsletters and campaigns).
+* Gmail-only evidence passes the mail screen in `ct_mail` first (I.1: 95%
+  of Gmail-derived rows were newsletters and campaigns). By default only mail
+  from people qualifies; `selection.gmail_only` widens or closes that.
 * Anything Calendar already holds is not proposed again: `calendar_authority`
   rows, rows with Calendar evidence, and rows whose normalized title and time
   match an event in the published snapshot.
@@ -38,6 +39,8 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+
+import ct_mail
 
 TERMINAL_WORK_STATES = frozenset({"DONE", "CANCELLED", "DISMISSED"})
 NOT_OWNER_WORK_STATES = frozenset({"WAITING", "BLOCKED"})
@@ -66,6 +69,10 @@ R_NOT_OWNER_TASK = "not_owner_task"
 R_SHARED_EXCLUDED = "shared_excluded"
 R_SHARED_WITHOUT_CHAT = "shared_without_chat_evidence"
 R_GMAIL_ONLY = "gmail_only"
+R_GMAIL_NOTIFICATION = ct_mail.R_GMAIL_NOTIFICATION
+R_GMAIL_BULK = ct_mail.R_GMAIL_BULK
+R_GMAIL_DISCARDED = ct_mail.R_GMAIL_DISCARDED
+R_GMAIL_UNSCREENED = ct_mail.R_GMAIL_UNSCREENED
 R_ALREADY_ON_CALENDAR = "already_on_calendar"
 R_MATCHES_EXISTING = "matches_existing_event"
 R_LOW_CONFIDENCE = "low_confidence"
@@ -158,6 +165,8 @@ class Desired:
     source_types: tuple
     counterparty: str | None
     source_count: int
+    #: For a Gmail-only row: why the mail screen trusted it (ct_mail.BASIS_*).
+    mail_basis: str | None = None
 
     @property
     def sort_key(self) -> tuple:
@@ -178,6 +187,7 @@ class Selection:
     #: Event ids present on some OTHER selected calendar (H.1 snapshot).
     event_ids_elsewhere: frozenset = frozenset()
     index_available: bool = False
+    gmail_screen_available: bool = False
 
     def reason_for(self, commitment_id: str) -> str | None:
         """None when desired; R_MISSING when the commitment is gone."""
@@ -329,8 +339,20 @@ def _timing(row: dict, raw_types: set, tz, default_duration: timedelta):
     return KIND_DEADLINE, True, day, day + timedelta(days=1), clock
 
 
-def select(events_con, *, cfg, now: datetime, index_con=None) -> Selection:
-    """Decide the full desired set. Read-only on both connections."""
+def _gmail_only_ids(rows, types_by_id, pairs_by_id) -> set:
+    """Gmail evidence ids of the open rows the mail screen may have to judge."""
+    ids: set = set()
+    for row in rows:
+        cid = str(row["commitment_id"])
+        types = types_by_id.get(cid, set())
+        if (types and not types & NON_GMAIL_SOURCES and row.get("responsibility") == "SELF"
+                and row.get("work_state") not in TERMINAL_WORK_STATES):
+            ids |= {sid for stype, sid in pairs_by_id.get(cid, ()) if stype == "gmail"}
+    return ids
+
+
+def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) -> Selection:
+    """Decide the full desired set. Read-only on every connection."""
     tz = cfg.tz
     sel_cfg = cfg.selection
     default_duration = timedelta(minutes=int(cfg.calendar["default_duration_minutes"]))
@@ -349,6 +371,13 @@ def select(events_con, *, cfg, now: datetime, index_con=None) -> Selection:
     rows = _load_commitments(events_con)
     types_by_id, pairs_by_id = _load_evidence(events_con)
     raw_types = _load_raw_types(events_con)
+
+    gmail_mode = sel_cfg["gmail_only"]
+    mail_facts = None
+    if gmail_mode in (ct_mail.MODE_PEOPLE, ct_mail.MODE_PEOPLE_AND_NOTIFICATIONS) \
+            and gmail_con is not None and ct_mail.index_usable(gmail_con):
+        mail_facts = ct_mail.load_facts(gmail_con, _gmail_only_ids(rows, types_by_id, pairs_by_id))
+        selection.gmail_screen_available = True
 
     candidates: list = []
     for row in rows:
@@ -377,9 +406,17 @@ def select(events_con, *, cfg, now: datetime, index_con=None) -> Selection:
             if not has_chat:
                 selection.skipped[cid] = R_SHARED_WITHOUT_CHAT
                 continue
-        if gmail_only and not sel_cfg["include_gmail_only"]:
+        mail_basis = None
+        if gmail_only and gmail_mode == ct_mail.MODE_OFF:
             selection.skipped[cid] = R_GMAIL_ONLY
             continue
+        if gmail_only and gmail_mode != ct_mail.MODE_ALL:
+            gmail_ids = [sid for stype, sid in pairs_by_id.get(cid, ()) if stype == "gmail"]
+            passed, label = ct_mail.screen_commitment(gmail_ids, mail_facts, gmail_mode)
+            if not passed:
+                selection.skipped[cid] = label
+                continue
+            mail_basis = label
         if row.get("authority") == CALENDAR_AUTHORITY or "calendar" in source_types:
             selection.skipped[cid] = R_ALREADY_ON_CALENDAR
             continue
@@ -421,6 +458,7 @@ def select(events_con, *, cfg, now: datetime, index_con=None) -> Selection:
             source_types=tuple(sorted(t for t in source_types if t)),
             counterparty=clean_text(row.get("counterparty"), COUNTERPARTY_LIMIT) or None,
             source_count=int(row.get("source_count") or 1),
+            mail_basis=mail_basis,
         )
         if by_title and _matches_existing(desired, by_title, tolerance):
             selection.skipped[cid] = R_MATCHES_EXISTING
@@ -482,6 +520,8 @@ def description_for(desired: Desired) -> str:
                      else f"期限: {when}")
     if desired.counterparty:
         lines.append(f"相手: {desired.counterparty}")
+    if desired.mail_basis in ct_mail.BASIS_LABELS:
+        lines.append(f"根拠: {ct_mail.BASIS_LABELS[desired.mail_basis]}")
     lines.append("確定するなら自分のカレンダーへ移動、不要ならこの予定を削除してください。"
                  "削除した仮登録は再登録しません。")
     lines.append(f"ref: {desired.commitment_id}")
