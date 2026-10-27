@@ -43,8 +43,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "src" / "coding-handoff" / "deploy"
 
 #: The job layer as committed — the content a deployed host still holds,
-#: modulo line endings and its own resolved bridge path.
-BASE_REVISION = "cf7a647"
+#: modulo line endings and its own resolved bridge path. 640d9db carries the
+#: same src/jobs bytes as the local base (cf7a647) the package was built on,
+#: which is not part of the published history.
+BASE_REVISION = "640d9db"
 
 BASH = shutil.which("bash")
 POSIX = os.name == "posix"

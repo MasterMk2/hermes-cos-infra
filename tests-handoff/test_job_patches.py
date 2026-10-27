@@ -35,7 +35,9 @@ sys.path.insert(0, str(ROOT / "src" / "coding-handoff" / "deploy"))
 
 import deploy_tool  # noqa: E402
 
-BASE_REVISION = "cf7a647"
+# 640d9db carries the same src/jobs bytes as the local base (cf7a647) the
+# package was built on, which is not part of the published history.
+BASE_REVISION = "640d9db"
 
 # Invented, and shaped like the thing that must survive: a resolved absolute
 # path in the fallback list. Nothing here is anybody's real directory.
