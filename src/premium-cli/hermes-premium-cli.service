@@ -1,0 +1,28 @@
+[Unit]
+Description=Hermes native premium CLI reasoning
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermespremium
+Group=hermespremium
+WorkingDirectory=/opt/hermes-premium-cli/state
+Environment=HOME=/opt/hermes-premium-cli/state
+Environment=CODEX_HOME=/opt/hermes-premium-cli/state/.codex
+Environment=PATH=/opt/hermes-premium-cli/cli/bin:/opt/hermes-premium-cli/node-v22.23.2-linux-arm64/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /opt/hermes-premium-cli/app/premium_server.py --port 18767 --token-file /opt/hermes-premium-cli/state/bridge.token
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/hermes-premium-cli/state
+MemoryHigh=1G
+MemoryMax=1536M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
