@@ -239,6 +239,42 @@ def test_a_restart_resumes_the_same_run_without_asking_again(tmp_path):
     assert replies(restarted) == ["再開後の答え"]
 
 
+class DecliningCodingRoute:
+    """The J.1 coding route, declining every turn as it does for a plain question."""
+
+    def __init__(self):
+        self.offered = []
+
+    async def handle(self, message):
+        self.offered.append(message.gateway_request_id)
+        return None
+
+
+def test_a_resumed_run_is_not_offered_to_the_coding_route_again(tmp_path):
+    # Merging PR #9 with the recovered J.1 route: the route declined this turn
+    # before its run started, so a restart waits on that run instead of
+    # asking the route a second time.
+    db = tmp_path / "gw.db"
+    stop_mid_wait(db)
+    restarted = make_gateway(db, hermes_steps=[{"status": "completed", "output": "再開後の答え"}])
+    restarted.coding = DecliningCodingRoute()
+    run(restarted.recover_previous_process())
+    run(restarted.process(claim(restarted)))
+    assert restarted.coding.offered == []
+    assert restarted.hermes.started == []
+    assert replies(restarted) == ["再開後の答え"]
+
+
+def test_a_new_turn_is_offered_to_the_coding_route_first(tmp_path):
+    gw = make_gateway(tmp_path / "gw.db",
+                      hermes_steps=[{"status": "completed", "output": "答え"}])
+    gw.coding = DecliningCodingRoute()
+    run(gw.process(seed(gw)))
+    assert gw.coding.offered == ["req-1"]
+    assert gw.hermes.started == ["req-1"]
+    assert replies(gw) == ["答え"]
+
+
 def test_a_run_that_finished_during_a_long_restart_is_still_delivered(tmp_path):
     # Review of this change: a wait resumed past its deadline answered with
     # the timeout text without reading the run once, though Hermes had the
