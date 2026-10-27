@@ -46,8 +46,19 @@ Discord DM に「応答に時間がかかりすぎたため中断しました」
 
 ## 診断スクリプトの使い方
 
+hermes-cos-infra の checkout の最上位で:
+
 ```
 sudo bash src/channel-gateway/bin/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
+```
+
+Pi に checkout が無い（またはこのファイルを含まない）ときは、スクリプトだけ取得して実行する。
+checkout を書き換えずに済む:
+
+```
+curl -fsSL -o /tmp/hermes-timeout-diag.sh \
+  https://raw.githubusercontent.com/MasterMk2/hermes-cos-infra/main/src/channel-gateway/bin/hermes-timeout-diag.sh
+sudo bash /tmp/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
 ```
 
 - 引数は日付と JST の時間帯（省略時は今日の 12:50-15:40）
