@@ -237,6 +237,124 @@ class TestCliObservability(unittest.TestCase):
         self.assertFalse(alive(child), "the CLI's own child outlived the timeout")
 
 
+def _ok_proc():
+    proc = MagicMock()
+    proc.returncode = 0
+    proc.stdout = json.dumps({"response": "ok", "usage": {}})
+    proc.stderr = ""
+    return proc
+
+
+class TestCliConcurrencyLimit(unittest.TestCase):
+    """At most max_concurrent_cli CLI processes run at once on the Pi."""
+
+    def setUp(self):
+        from bridge_server import cli_slots
+        self.slots = cli_slots
+        self.assertEqual(self.slots.running, 0, "a previous test leaked a CLI slot")
+
+    def tearDown(self):
+        self.assertEqual(self.slots.running, 0, "this test leaked a CLI slot")
+
+    @patch("bridge_server.run_cli")
+    def test_a_call_with_no_free_slot_gets_503_and_starts_no_cli(self, mock_run):
+        cfg = BridgeConfig(timeout_seconds=10, max_concurrent_cli=1, cli_queue_wait_seconds=0)
+        self.assertTrue(self.slots.acquire(1, 0))
+        try:
+            with self.assertLogs("antigravity-bridge", level="INFO") as caught:
+                code, res = execute_antigravity("hi", cfg)
+        finally:
+            self.slots.release()
+        self.assertEqual(code, 503)            # Hermes falls back on a 503
+        self.assertEqual(res["error"]["type"], "service_unavailable")
+        mock_run.assert_not_called()
+        self.assertIn("outcome=service_unavailable", "\n".join(caught.output))
+
+    def test_calls_over_the_limit_wait_their_turn(self):
+        import threading
+        import time
+
+        cfg = BridgeConfig(timeout_seconds=20, max_concurrent_cli=1, cli_queue_wait_seconds=10)
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0}
+
+        def fake_run(cmd, timeout):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time.sleep(0.3)
+            with lock:
+                state["now"] -= 1
+            return _ok_proc()
+
+        codes = []
+        with patch("bridge_server.run_cli", fake_run):
+            threads = [threading.Thread(target=lambda: codes.append(execute_antigravity("hi", cfg)[0]))
+                       for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(15)
+        self.assertEqual(codes, [200, 200, 200])
+        self.assertEqual(state["peak"], 1)
+
+    def test_the_wait_comes_out_of_the_cli_timeout(self):
+        import threading
+
+        cfg = BridgeConfig(timeout_seconds=10, max_concurrent_cli=1, cli_queue_wait_seconds=5)
+        seen = []
+
+        def fake_run(cmd, timeout):
+            seen.append(timeout)
+            return _ok_proc()
+
+        self.assertTrue(self.slots.acquire(1, 0))
+        threading.Timer(1.5, self.slots.release).start()
+        with patch("bridge_server.run_cli", fake_run):
+            code, _ = execute_antigravity("hi", cfg)
+        self.assertEqual(code, 200)
+        self.assertEqual(len(seen), 1)
+        self.assertLessEqual(seen[0], 9)
+
+    def test_the_wait_is_capped_at_half_the_timeout(self):
+        import time
+
+        cfg = BridgeConfig(timeout_seconds=2, max_concurrent_cli=1, cli_queue_wait_seconds=90)
+        self.assertTrue(self.slots.acquire(1, 0))
+        try:
+            started = time.monotonic()
+            code, _ = execute_antigravity("hi", cfg)
+            elapsed = time.monotonic() - started
+        finally:
+            self.slots.release()
+        self.assertEqual(code, 503)
+        self.assertLess(elapsed, 3)
+
+    @patch("bridge_server.run_cli")
+    def test_a_failing_cli_frees_its_slot(self, mock_run):
+        cfg = BridgeConfig(timeout_seconds=5, max_concurrent_cli=1)
+        mock_run.side_effect = subprocess.TimeoutExpired(["antigravity"], 5, stderr="")
+        code, _ = execute_antigravity("hi", cfg)
+        self.assertEqual(code, 504)
+        mock_run.side_effect = RuntimeError("boom")
+        code, _ = execute_antigravity("hi", cfg)
+        self.assertEqual(code, 500)
+        # tearDown checks that no slot is still held.
+
+    def test_health_reports_running_calls_and_rejections(self):
+        from bridge_server import AntigravityRequestHandler
+
+        cfg = BridgeConfig()
+        handler = MagicMock()
+        handler.headers = {}
+        handler.path = "/health"
+        handler.config = cfg
+        AntigravityRequestHandler.do_GET(handler)
+        data = handler._send_json.call_args[0][1]
+        self.assertEqual(data["metrics"]["running_cli_calls"], 0)
+        self.assertIn("busy_rejections", data["metrics"])
+
+
 class TestRequestHandlerDelegation(unittest.TestCase):
     """Test HTTP handler tool delegation and fallback logic."""
 

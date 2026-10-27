@@ -12,8 +12,10 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from dataclasses import replace
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from typing import Any, Dict, List, Optional, Tuple
@@ -56,10 +58,46 @@ class BridgeMetrics:
         self.failed_requests = 0
         self.last_latency_seconds = 0.0
         self.last_error: Optional[str] = None
+        self.busy_rejections = 0
         self.start_time = time.time()
 
 
 metrics = BridgeMetrics()
+
+
+class CliSlots:
+    """Counts running CLI calls and makes extra callers wait for a free slot.
+
+    The limit is passed on every acquire rather than fixed at construction,
+    so it always follows the loaded config.
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._running = 0
+
+    @property
+    def running(self) -> int:
+        return self._running
+
+    def acquire(self, limit: int, timeout: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._cond:
+            while self._running >= limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            self._running += 1
+            return True
+
+    def release(self) -> None:
+        with self._cond:
+            self._running -= 1
+            self._cond.notify()
+
+
+cli_slots = CliSlots()
 
 # Linux MAX_ARG_STRLEN: a single argv string longer than this fails execve with
 # E2BIG. The prompt goes to the CLI as one argument (--print), so a long-lived
@@ -214,17 +252,46 @@ def execute_antigravity(
     """Execute Antigravity CLI non-interactively and return OpenAI-compatible result or error dict.
 
     Every call leaves one content-free log line (model, status, outcome,
-    duration, prompt size) so a slow Hermes turn can be split into bridge
-    calls afterwards; before this only failures were logged.
+    duration, prompt size, time spent waiting for a CLI slot) so a slow
+    Hermes turn can be split into bridge calls afterwards; before this only
+    failures were logged.
+
+    At most config.max_concurrent_cli calls run the CLI at once. A call that
+    finds no free slot within its wait budget gets a 503 without starting a
+    CLI, and Hermes moves on to its fallback provider.
     """
     start = time.monotonic()
-    status_code, body = _execute_antigravity(prompt, config, model, json_schema)
+    wait_budget = min(config.cli_queue_wait_seconds, config.timeout_seconds // 2)
+    if cli_slots.acquire(config.max_concurrent_cli, wait_budget):
+        waited = time.monotonic() - start
+        try:
+            # The wait is part of the request's budget, not added to it.
+            run_config = config
+            if waited >= 1:
+                run_config = replace(config, timeout_seconds=max(1, int(config.timeout_seconds - waited)))
+            status_code, body = _execute_antigravity(prompt, run_config, model, json_schema)
+        finally:
+            cli_slots.release()
+    else:
+        waited = time.monotonic() - start
+        metrics.failed_requests += 1
+        metrics.busy_rejections += 1
+        err_msg = (f"Bridge busy: {config.max_concurrent_cli} Antigravity CLI call(s) already"
+                   f" running; no slot freed within {wait_budget}s")
+        metrics.last_error = err_msg
+        status_code, body = 503, {
+            "error": {
+                "message": err_msg,
+                "type": "service_unavailable",
+                "code": 503,
+            }
+        }
     error = body.get("error") if isinstance(body, dict) else None
     logger.info(
-        "cli call model=%s status=%d outcome=%s duration=%.1fs prompt_bytes=%d",
+        "cli call model=%s status=%d outcome=%s duration=%.1fs prompt_bytes=%d wait=%.1fs",
         _MODEL_SAFE.sub("?", str(model or config.default_model))[:64], status_code,
         error.get("type", "error") if isinstance(error, dict) else "ok",
-        time.monotonic() - start, len(prompt.encode("utf-8", "replace")),
+        time.monotonic() - start, len(prompt.encode("utf-8", "replace")), waited,
     )
     return status_code, body
 
@@ -472,6 +539,8 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
                     "failed_requests": metrics.failed_requests,
                     "last_latency_seconds": round(metrics.last_latency_seconds, 2),
                     "last_error": metrics.last_error,
+                    "running_cli_calls": cli_slots.running,
+                    "busy_rejections": metrics.busy_rejections,
                 },
             }
             self._send_json(200, data)
