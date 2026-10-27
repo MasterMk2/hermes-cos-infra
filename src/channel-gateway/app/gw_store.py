@@ -28,6 +28,7 @@ Message text is stored because a queue that cannot replay is not durable.
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -97,6 +98,25 @@ def get_inbound(con: sqlite3.Connection, request_id: str):
     return con.execute(
         "SELECT * FROM inbound_messages WHERE gateway_request_id = ?", (request_id,)
     ).fetchone()
+
+
+def recent_owner_inputs(con: sqlite3.Connection, message: CanonicalMessage):
+    """Bounded routing context from this sender's authenticated input only.
+
+    History can identify a project for a read or a fresh proposal. It never
+    supplies an approval. Excluding later receipts also makes queue replay
+    independent of messages which arrived after the current turn.
+    """
+    current = get_inbound(con, message.gateway_request_id)
+    cutoff = current["received_at"] if current else message.received_at
+    return [row[0] for row in con.execute(
+        "SELECT text FROM inbound_messages WHERE conversation_id=?"
+        " AND platform=? AND platform_user_id=? AND authz_subject=?"
+        " AND gateway_request_id<>?"
+        " AND julianday(received_at) BETWEEN julianday(?)-1 AND julianday(?)"
+        " ORDER BY received_at DESC, rowid DESC LIMIT 32",
+        (message.conversation_id, message.platform, message.platform_user_id,
+         SUBJECT_OWNER, message.gateway_request_id, cutoff, cutoff))]
 
 
 def set_state(con: sqlite3.Connection, request_id: str, state: str, *,
@@ -1006,3 +1026,116 @@ def load_quota_cache(con: sqlite3.Connection):
     return con.execute(
         "SELECT * FROM line_quota_cache WHERE id = 1"
     ).fetchone()
+
+
+# --------------------------------------------------- coding handoff (J.1)
+#
+# One live proposal per conversation. Everything here is about making "the
+# owner said yes" mean one specific thing, exactly once.
+
+
+def new_proposal_token() -> str:
+    """Six upper-case hex characters. Short enough to retype on a phone,
+    unguessable enough that it cannot be hit by accident in ordinary text."""
+    return secrets.token_hex(3).upper()
+
+
+def select_proposal_project(con: sqlite3.Connection, conversation_id: str,
+                            project_key: str) -> bool:
+    """A new project withdraws an old unspent proposal, even if not ready."""
+    row = get_proposal(con, conversation_id)
+    if row is None or row["project_key"] == project_key:
+        return True
+    changed = con.execute(
+        "DELETE FROM coding_handoff_proposals WHERE conversation_id=?"
+        " AND project_key<>? AND pending_authorization_id IS NULL",
+        (conversation_id, project_key))
+    return changed.rowcount == 1
+
+
+def put_proposal(con: sqlite3.Connection, *, conversation_id: str,
+                 project_key: str, token: str, scope_digest: str,
+                 origin_request_id: str, spec_revision: int = 0,
+                 spec_sha256: str = "") -> bool:
+    """Record (or replace) the scope this conversation has been shown.
+
+    Replacing is right: showing a second scope withdraws the first. Leaving
+    both answerable would make 「実行して」 ambiguous, and an ambiguous
+    authorization is not one.
+    """
+    cur = con.execute(
+        "INSERT INTO coding_handoff_proposals (conversation_id, project_key,"
+        " token, scope_digest, spec_revision, spec_sha256, origin_request_id,"
+        " created_at) VALUES (?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(conversation_id) DO UPDATE SET"
+        "   project_key=excluded.project_key, token=excluded.token,"
+        "   scope_digest=excluded.scope_digest,"
+        "   spec_revision=excluded.spec_revision,"
+        "   spec_sha256=excluded.spec_sha256,"
+        "   origin_request_id=excluded.origin_request_id,"
+        "   created_at=excluded.created_at, consumed_at=NULL, consumed_by=NULL"
+        " WHERE coding_handoff_proposals.pending_authorization_id IS NULL",
+        (conversation_id, project_key, token, scope_digest, int(spec_revision or 0),
+         spec_sha256 or None, origin_request_id, _now()),
+    )
+    return cur.rowcount == 1
+
+
+def mark_authorization_pending(con: sqlite3.Connection, conversation_id: str,
+                               authorization_id: str) -> None:
+    """Record that this authorization was sent and its outcome is not known.
+
+    Written *before* the request leaves. If the reply never arrives, this is
+    the only thing that ties a later message in this conversation back to the
+    authorization that may already have created a job — and it is what lets a
+    retry reuse the same id instead of minting a second one.
+    """
+    con.execute(
+        "UPDATE coding_handoff_proposals SET pending_authorization_id = ?,"
+        " pending_at = ? WHERE conversation_id = ?",
+        (authorization_id, _now(), conversation_id),
+    )
+
+
+def clear_authorization_pending(con: sqlite3.Connection,
+                                conversation_id: str,
+                                authorization_id: str = None) -> None:
+    """A definite answer arrived; there is nothing left to resolve."""
+    con.execute(
+        "UPDATE coding_handoff_proposals SET pending_authorization_id = NULL,"
+        " pending_at = NULL WHERE conversation_id = ?"
+        " AND (? IS NULL OR pending_authorization_id = ?)",
+        (conversation_id, authorization_id, authorization_id),
+    )
+
+
+def get_proposal(con: sqlite3.Connection, conversation_id: str):
+    return con.execute(
+        "SELECT * FROM coding_handoff_proposals WHERE conversation_id = ?",
+        (conversation_id,),
+    ).fetchone()
+
+
+def consume_proposal(con: sqlite3.Connection, conversation_id: str,
+                     request_id: str, *, project_key: str = None,
+                     scope_digest: str = None, mark_pending: bool = False) -> bool:
+    """Claim the proposal for exactly one inbound message.
+
+    Returns True for the message that wins the claim, and also for a *replay*
+    of that same message — a redelivered webhook carries the same
+    `gateway_request_id`, and refusing it would leave the owner with no answer
+    for a job that was in fact created. Every other message gets False.
+    """
+    cur = con.execute(
+        "UPDATE coding_handoff_proposals SET consumed_at = ?, consumed_by = ?,"
+        " pending_authorization_id = CASE WHEN ? THEN ? ELSE pending_authorization_id END,"
+        " pending_at = CASE WHEN ? THEN ? ELSE pending_at END"
+        " WHERE conversation_id = ?"
+        "   AND (consumed_at IS NULL OR consumed_by = ?)"
+        "   AND (? IS NULL OR project_key = ?)"
+        "   AND (? IS NULL OR scope_digest = ?)",
+        (_now(), request_id, mark_pending, request_id, mark_pending, _now(),
+         conversation_id, request_id, project_key, project_key,
+         scope_digest, scope_digest),
+    )
+    return cur.rowcount == 1

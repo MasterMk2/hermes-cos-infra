@@ -19,6 +19,11 @@ class BridgeConfig:
     allow_delegated_mcp: bool = True    # Phase H.3.2: constrained delegated read-only agent
     auth_token: Optional[str] = None
     auth_token_file: Optional[str] = "/srv/hermes/antigravity/secrets/bridge.token"
+    premium_cli_enabled: bool = False
+    premium_cli_endpoint: str = "http://127.0.0.1:18766"
+    premium_cli_token_file: Optional[str] = None
+    premium_cli_token: Optional[str] = None
+    premium_cli_timeout_seconds: float = 60.0
     supported_models: list = field(
         default_factory=lambda: [
             "gemini-3.8-flash-medium",
@@ -45,6 +50,23 @@ def load_config(config_path: Optional[str] = None) -> BridgeConfig:
     if path and os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+            premium = data.get('premium_cli', {})
+            if not isinstance(premium, dict) or type(premium.get('enabled', False)) is not bool:
+                raise ValueError('premium_cli must be a mapping with a boolean enabled flag')
+            cfg.premium_cli_enabled = premium.get('enabled', False)
+            if cfg.premium_cli_enabled:
+                from premium_routing import validate_endpoint
+                cfg.premium_cli_endpoint = validate_endpoint(premium.get('endpoint', cfg.premium_cli_endpoint))
+                cfg.premium_cli_timeout_seconds = float(premium.get('timeout_seconds', 60))
+                if not 1 <= cfg.premium_cli_timeout_seconds <= 90:
+                    raise ValueError('premium_cli timeout_seconds must be between 1 and 90')
+                cfg.premium_cli_token_file = premium.get('token_file')
+                if not isinstance(cfg.premium_cli_token_file, str):
+                    raise ValueError('premium_cli token_file is required')
+                with open(cfg.premium_cli_token_file, encoding='utf-8') as token_file:
+                    cfg.premium_cli_token = token_file.read().strip()
+                if len(cfg.premium_cli_token) < 32:
+                    raise ValueError('premium_cli token is too short')
             if "host" in data:
                 cfg.host = str(data["host"])
             if "port" in data:

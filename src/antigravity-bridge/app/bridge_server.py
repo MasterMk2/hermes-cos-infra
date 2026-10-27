@@ -163,6 +163,26 @@ def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     return chr(10).join(lines).strip()
 
 
+def execute_routed(messages, prompt, config, model):
+    """Complex reasoning tries native CLIs; ordinary and unavailable paths keep MCP."""
+    from dataclasses import replace
+    from premium_routing import should_try_premium, try_premium
+    if should_try_premium(messages, config.premium_cli_enabled):
+        started = time.monotonic()
+        # Preserve at least 15 seconds of the existing request budget for the
+        # normal source/tool backend if the premium route cannot answer.
+        budget = min(config.premium_cli_timeout_seconds, max(0, config.timeout_seconds - 15))
+        data, status = try_premium(messages, endpoint=config.premium_cli_endpoint,
+                                   token=config.premium_cli_token, timeout_seconds=budget)
+        logger.info('premium_cli status=%s', status)
+        if data is not None:
+            metrics.successful_requests += 1
+            metrics.last_latency_seconds = time.monotonic() - started
+            return 200, data
+        config = replace(config, timeout_seconds=max(1, config.timeout_seconds - (time.monotonic() - started)))
+    return execute_antigravity(prompt=prompt, config=config, model=model)
+
+
 def classify_cli_error(returncode: int, stdout: str, stderr: str) -> Tuple[int, str, str]:
     """Classify Antigravity CLI errors into HTTP status code, error type, and message."""
     combined = (stdout + chr(10) + stderr).lower()
@@ -522,7 +542,8 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": {"message": "No prompt content found in messages", "code": 400}})
                 return
 
-            status_code, response_data = execute_antigravity(
+            status_code, response_data = execute_routed(
+                messages=messages,
                 prompt=prompt,
                 config=self.config,
                 model=model,
@@ -531,7 +552,7 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
                 choices = response_data.get("choices", [])
                 content = choices[0].get("message", {}).get("content", "") if choices else ""
                 usage = response_data.get("usage", {})
-                self._send_sse_stream(content, model, usage)
+                self._send_sse_stream(content, response_data.get('model', model), usage)
                 return
 
             self._send_json(status_code, response_data)

@@ -12,6 +12,39 @@ from att_signals import SIG_DUE_SOON, SIG_OVERDUE, SIG_NEW_COMMITMENT
 
 
 class TestCommitmentAttentionIntegration(unittest.TestCase):
+    def test_old_deferred_noise_cannot_return_in_digest(self):
+        import att_store
+        con = fx.db()
+        try:
+            for source_id, actor in [('owner', 'user'), ('other', 'counterparty')]:
+                row = fx.put_signal(con, source_id=source_id,
+                                    metadata={'actor': actor, 'event_type': 'commitment'})
+                att_store.record_decision(con, signal_id=row['signal_id'], decision='DEFER',
+                                          reason='quiet_hours', severity='IMPORTANT',
+                                          deliver_after=fx.ago(self.clock, minutes=1))
+            con.commit()
+            self.assertEqual(att_events.retire_non_owner_backlog(con), 1)
+            self.assertEqual(att_events.retire_non_owner_backlog(con), 0)
+            items = att_store.signals_awaiting_digest(con)
+            self.assertEqual([r['source_id'] for r in items], ['owner'])
+            self.assertEqual(con.execute('SELECT count(*) FROM signals').fetchone()[0], 2)
+        finally:
+            con.close()
+
+    def test_other_peoples_tasks_and_unknown_assignees_never_notify(self):
+        from test_policy import _event_row
+        for actor, kind, review in [('counterparty', 'commitment', 0),
+                                    ('counterparty', 'request', 0),
+                                    ('unknown', 'deadline', 0),
+                                    ('user', 'request', 0),
+                                    ('user', 'commitment', 1)]:
+            with self.subTest(actor=actor, kind=kind, review=review):
+                row = _event_row(actor=actor, type=kind, needs_human_review=review,
+                                 due_at=fx.ahead(self.clock, minutes=25),
+                                 occurred_at=fx.ago(self.clock, minutes=10),
+                                 snoozed_until=fx.ago(self.clock, minutes=1))
+                self.assertEqual(att_events.signals_for_event(row, self.cfg, self.clock), [])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp.name, "events.db")
