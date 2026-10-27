@@ -55,6 +55,9 @@ Discord DM に「応答に時間がかかりすぎたため中断しました」
    `gw_coding.py`・`gw_handoff.py`・`gw_handoff_client.py`・`premium_routing.py` は本番にしか無い
    （[STATUS-RECONCILIATION.md](STATUS-RECONCILIATION.md) の 9 月 10 日のローカル作業と思われる）。
    会話の Hermes session は 109 メッセージ・約 3 万 token。
+7. **会話の文脈は縮まない設定だった。** Hermes の `session_reset.mode = none`、`compression.threshold = 0.5`
+   （Gemini の大きな窓の半分なので、3 万 token では圧縮されない）。失敗時の request dump は 1 通 約 156 KB で、
+   10-25 の 152 KB から増えている。本番には `hermes-premium-cli` / `hermes-coding-handoff` など GitHub に無い service もある。
 
 ## Hermes 自体が遅かった理由（診断前の仮説）
 
