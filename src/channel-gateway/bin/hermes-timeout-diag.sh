@@ -358,8 +358,10 @@ def cmd_gwparse(frm, to):
     for r in reqs:
         if r['chars'] < 0 and r['cls'].startswith('HERMES_'):
             k = datetime.fromtimestamp(r['end'], JST).strftime('%Y-%m-%d')
-            days.setdefault(k, {'n': 0, 'cls': {}, 'ans': [], 'all': []})['cls'][r['cls']] = \
-                days[k]['cls'].get(r['cls'], 0) + 1
+            # Two statements: in `a[k] = days[k]...` the right side runs first,
+            # before setdefault has created days[k] (KeyError on the Pi).
+            d = days.setdefault(k, {'n': 0, 'cls': {}, 'ans': [], 'all': []})
+            d['cls'][r['cls']] = d['cls'].get(r['cls'], 0) + 1
             continue
         k = datetime.fromtimestamp(r['end'], JST).strftime('%Y-%m-%d')
         d = days.setdefault(k, {'n': 0, 'cls': {}, 'ans': [], 'all': []})
