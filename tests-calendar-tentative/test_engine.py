@@ -6,7 +6,7 @@ import json
 import unittest
 from datetime import timedelta
 
-from ct_fixtures import CALENDAR_ID, NOW, FakeCalendar, Workspace, make_cfg
+from ct_fixtures import CALENDAR_ID, H1_PRIMARY_ID, NOW, FakeCalendar, Workspace, make_cfg
 
 import ct_engine
 import ct_select as sel
@@ -51,7 +51,7 @@ class CreateTests(EngineCase):
         self.assertEqual(self.state_of("c1"), store.ACTIVE)
         event = self.event_of("c1")
         self.assertEqual(event["id"], sel.event_id_for(CALENDAR_ID, "c1", 1))
-        self.assertEqual(event["summary"], "[仮] 〆 協賛ロゴの入稿")
+        self.assertEqual(event["summary"], "【仮】〆 協賛ロゴの入稿")
         self.assertEqual(event["status"], "tentative")
         self.assertEqual(event["transparency"], "transparent")
         self.assertEqual(event["extendedProperties"]["private"],
@@ -198,22 +198,35 @@ class OwnerTests(EngineCase):
         self.assertEqual(self.google.verbs().count("insert"), 1)
         self.assertTrue(store.is_retired(self.state, self.event_id))
 
-    def test_an_entry_moved_to_a_real_calendar_is_confirmed(self):
-        moved = self.google.owner_move_away(self.event_id)
-        self.ws.add_index_event(self.event_id, moved["summary"], "2026-10-05", all_day=True)
+    def test_taking_the_tag_off_confirms_the_entry_for_good(self):
+        self.google.owner_edit(self.event_id, summary="〆 協賛ロゴの入稿")
         report = self.run_once()
         self.assertEqual(self.state_of("c1"), store.CONFIRMED)
         self.assertEqual(report.counts["confirmed"], 1)
+        self.ws.update_commitment("c1", due_at="2026-10-06T17:00:00+09:00")
+        self.run_once()
+        self.ws.update_commitment("c1", work_state="DONE")
+        self.google.calls.clear()
+        self.run_once()
+        self.assertEqual([v for v in self.google.verbs() if v in ("patch", "delete", "insert")], [])
+        self.assertEqual(self.google.events[self.event_id]["summary"], "〆 協賛ロゴの入稿")
+        self.assertEqual(self.google.events[self.event_id]["start"], {"date": "2026-10-05"})
+
+    def test_an_entry_moved_to_another_calendar_counts_as_rejected(self):
+        self.google.owner_move_away(self.event_id)
+        self.run_once()
+        self.assertEqual(self.state_of("c1"), store.REJECTED)
+        self.assertEqual(self.google.verbs().count("insert"), 1)
 
     def test_an_edited_entry_is_left_alone_from_then_on(self):
-        self.google.owner_edit(self.event_id, summary="協賛ロゴ 入稿（確定）")
+        self.google.owner_edit(self.event_id, summary="【仮】協賛ロゴ 入稿（先方確認中）")
         self.run_once()
         self.assertEqual(self.state_of("c1"), store.USER_EDITED)
         self.ws.update_commitment("c1", due_at="2026-10-06T17:00:00+09:00")
         self.google.calls.clear()
         self.run_once()
         self.assertEqual([v for v in self.google.verbs() if v in ("patch", "delete", "insert")], [])
-        self.assertEqual(self.google.events[self.event_id]["summary"], "協賛ロゴ 入稿（確定）")
+        self.assertEqual(self.google.events[self.event_id]["summary"], "【仮】協賛ロゴ 入稿（先方確認中）")
 
     def test_a_recoloured_entry_is_still_ours(self):
         self.google.owner_edit(self.event_id, colorId="5")
@@ -344,14 +357,15 @@ class FollowTests(EngineCase):
 
 class SafetyTests(EngineCase):
     def test_a_state_database_cannot_be_pointed_at_another_calendar(self):
+        # A state file left from the old secondary-calendar setup.
         self.ws.add_commitment("c1", "協賛ロゴの入稿", **DUE)
-        self.run_once()
-        other = make_cfg(calendar={"calendar_id": "another@group.calendar.google.com"})
-        self.google = FakeCalendar("another@group.calendar.google.com")
+        store.set_meta(self.state, "calendar_id", "tentative@group.calendar.google.com")
+        self.state.commit()
         with self.assertRaises(ct_engine.CalendarChanged):
-            self.run_once(other)
+            self.run_once()
+        self.assertEqual(self.google.calls, [])
 
-    def test_only_the_tentative_calendar_is_ever_called(self):
+    def test_only_the_configured_calendar_is_ever_called(self):
         self.ws.add_commitment("c1", "協賛ロゴの入稿", **DUE)
         self.run_once()
         self.ws.update_commitment("c1", work_state="DONE")
@@ -385,6 +399,90 @@ class SafetyTests(EngineCase):
         after = [tuple(r) for r in self.ws.events.execute("SELECT * FROM commitments")]
         self.assertEqual(mid, after)
         self.assertEqual(len(before), len(after))
+
+
+class EchoTests(EngineCase):
+    """Our entries live on the primary calendar, which H.1 snapshots and the
+    calendar backfill turns into commitments. None of that may make an entry
+    withdraw itself or come back as a second proposal."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws.add_commitment("c1", "協賛ロゴの入稿", **DUE)
+        self.run_once()
+        self.event_id = self.row("c1")["event_id"]
+        self.title = self.event_of("c1")["summary"]
+        self.own_source = f"gcal:{H1_PRIMARY_ID}:{self.event_id}"
+
+    def add_evidence(self, cid, source_type, source_id):
+        self.ws.events.execute(
+            """INSERT INTO commitment_evidence (commitment_id, source_type, source_id,
+                 observed_at, evidence_role, confidence, created_at)
+               VALUES (?, ?, ?, '2026-10-01T09:00:00+09:00', 'schedule', 1.0,
+                       '2026-10-01T09:00:00+09:00')""", (cid, source_type, source_id))
+        self.ws.events.commit()
+
+    def assert_untouched(self):
+        self.assertEqual(self.state_of("c1"), store.ACTIVE)
+        self.assertEqual([v for v in self.google.verbs() if v in ("insert", "delete")], ["insert"])
+        self.assertEqual(len(self.google.live()), 1)
+
+    def test_our_entry_in_the_h1_snapshot_is_not_a_real_event(self):
+        # An appointment, because its title key equals the commitment's once
+        # the tag is dropped; a deadline's "〆" already keeps them apart.
+        self.ws.add_commitment("c2", "定例ミーティング", due_at="2026-10-03T18:00:00+09:00",
+                               due_precision="minute", raw_type="appointment_candidate")
+        self.run_once()
+        event = self.event_of("c2")
+        self.assertEqual(event["summary"], "【仮】定例ミーティング")
+        self.ws.add_index_event(event["id"], event["summary"], event["start"]["dateTime"],
+                                calendar_id=H1_PRIMARY_ID)
+        self.run_once()
+        self.assertEqual(self.state_of("c2"), store.ACTIVE)
+        self.assertNotIn("delete", self.google.verbs())
+
+    def test_a_backfilled_copy_of_our_entry_is_not_proposed_again(self):
+        self.ws.add_index_event(self.event_id, self.title, "2026-10-05", all_day=True,
+                                calendar_id=H1_PRIMARY_ID)
+        self.ws.add_commitment("echo", self.title, authority=sel.CALENDAR_AUTHORITY,
+                               sources=[("calendar", self.own_source)], **DUE)
+        selection = sel.select(self.ws.events, cfg=self.cfg, now=NOW, index_con=self.ws.index)
+        self.assertEqual(selection.skipped["echo"], sel.R_OWN_ENTRY)
+        self.run_once()
+        self.assertIsNone(self.row("echo"))
+        self.assert_untouched()
+
+    def test_the_copy_merged_into_the_original_does_not_withdraw_it(self):
+        self.add_evidence("c1", "calendar", self.own_source)
+        self.ws.update_commitment("c1", authority=sel.CALENDAR_AUTHORITY)
+        self.run_once()
+        self.assert_untouched()
+
+    def test_a_copy_that_gained_chat_evidence_is_still_ours(self):
+        self.ws.add_commitment("echo", self.title, authority=sel.CALENDAR_AUTHORITY,
+                               sources=[("calendar", self.own_source), ("discord", "msg-x")],
+                               **DUE)
+        selection = sel.select(self.ws.events, cfg=self.cfg, now=NOW, index_con=self.ws.index)
+        self.assertEqual(selection.skipped["echo"], sel.R_OWN_ENTRY)
+
+    def test_a_real_event_on_the_primary_calendar_still_withdraws_it(self):
+        # The control for the tests above: same calendar, same title, not ours.
+        self.ws.add_index_event("ownerevent1", "協賛ロゴの入稿", "2026-10-05", all_day=True,
+                                calendar_id=H1_PRIMARY_ID)
+        self.run_once()
+        self.assertEqual(self.state_of("c1"), store.WITHDRAWN)
+        self.assertEqual(self.row("c1")["last_error"], sel.R_MATCHES_EXISTING)
+
+    def test_the_owners_own_events_are_never_touched(self):
+        self.google.owner_add("ownerevent1", "歯医者")
+        before = dict(self.google.events["ownerevent1"])
+        self.ws.update_commitment("c1", due_at="2026-10-07T12:00:00+09:00")
+        self.run_once()
+        self.ws.update_commitment("c1", work_state="DONE")
+        self.run_once()
+        self.assertEqual(self.state_of("c1"), store.WITHDRAWN)
+        self.assertNotIn("ownerevent1", [target for _, target in self.google.calls])
+        self.assertEqual(self.google.events["ownerevent1"], before)
 
 
 class PlanTests(EngineCase):

@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""One-time authorization for tentative registration, and its calendar.
+"""One-time authorization for tentative registration.
 
 Run as root on the Pi, through an SSH local-port forward, exactly like H.1's
 `cal_oauth.py` — but asking Google for one scope only:
 
-    https://www.googleapis.com/auth/calendar.app.created
+    https://www.googleapis.com/auth/calendar.events.owned
 
-which lets this service create its own secondary calendars and manage
-events on those, and nothing else. The consent screen says so.
+which lets this service see, create, change and delete events on calendars
+the owner owns, and nothing else: no settings, no sharing, no calendar list.
+The consent screen says so. Entries go onto the primary calendar with a
+`【仮】` title prefix (ct_config).
 
     sudo /srv/hermes/calendar-tentative/venv/bin/python \\
-        /srv/hermes/calendar-tentative/app/ct_oauth.py --create-calendar "Hermes 仮登録"
+        /srv/hermes/calendar-tentative/app/ct_oauth.py
 
 It listens only on 127.0.0.1, prints the authorization URL (never a token),
-writes the refresh token to a root-only file, and — with --create-calendar —
-creates the secondary calendar and prints its id for `calendar.calendar_id`.
-The same Desktop OAuth client as H.1 may be reused; the refresh token is
-separate, so revoking one never affects the other.
+and writes the refresh token to a root-only file. The same Desktop OAuth
+client as H.1 may be reused; the refresh token is separate, so revoking one
+never affects the other.
 """
 
 from __future__ import annotations
@@ -31,10 +32,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ct_google import (
+    SCOPES,
     ApiError,
     CredentialUnavailable,
-    OAuthCredentials,
-    TentativeCalendarClient,
     authorization_url,
     exchange_authorization_code,
     random_oauth_state,
@@ -43,10 +43,6 @@ from ct_google import (
 
 DEFAULT_CREDENTIAL_DIR = "/etc/hermes-secrets/google-calendar-tentative"
 DEFAULT_PORT = 8766
-CALENDAR_DESCRIPTION = (
-    "Hermes が会話・メールから見つけた予定と締切の仮登録です。"
-    "確定するものは自分のカレンダーへ移動し、不要なものは削除してください。"
-)
 
 
 def _write_root_secret(path: Path, value: str) -> None:
@@ -124,7 +120,7 @@ def _authorize(credential_dir: Path, host: str, port: int, timeout_seconds: int)
               file=sys.stderr)
         return 1
     granted = set(str(tokens.get("scope") or "").split())
-    if granted and granted != {"https://www.googleapis.com/auth/calendar.app.created"}:
+    if granted and granted != set(SCOPES):
         # A broader grant than this service needs is refused, not stored.
         print(f"Google granted unexpected scopes {sorted(granted)}; no token was written",
               file=sys.stderr)
@@ -138,49 +134,19 @@ def _authorize(credential_dir: Path, host: str, port: int, timeout_seconds: int)
     return 0
 
 
-def _create_calendar(credential_dir: Path, name: str, time_zone: str) -> int:
-    try:
-        client = TentativeCalendarClient(OAuthCredentials.from_directory(credential_dir))
-        created = client.create_calendar(summary=name, time_zone=time_zone,
-                                         description=CALENDAR_DESCRIPTION)
-    except (CredentialUnavailable, ApiError) as exc:
-        print(f"Calendar creation failed: {exc}", file=sys.stderr)
-        return 1
-    calendar_id = str(created.get("id") or "")
-    if not calendar_id:
-        print("Google did not return a calendar id", file=sys.stderr)
-        return 1
-    print("Tentative calendar created. Put this in calendar.calendar_id:")
-    print(f"  {calendar_id}")
-    print("Do NOT add it to H.1's calendars.selected_ids.")
-    return 0
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--credential-dir", default=DEFAULT_CREDENTIAL_DIR)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--timeout-seconds", type=int, default=600)
-    parser.add_argument("--skip-authorize", action="store_true",
-                        help="reuse the stored refresh token (only create the calendar)")
-    parser.add_argument("--create-calendar", metavar="NAME", default=None)
-    parser.add_argument("--time-zone", default="Asia/Tokyo")
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1" or not (1 <= args.port <= 65535):
         parser.error("OAuth callback may bind only to 127.0.0.1 with a valid port")
     if os.geteuid() != 0:
         print("must run as root so the refresh token is written root-only", file=sys.stderr)
         return 2
-    credential_dir = Path(args.credential_dir)
-    if not args.skip_authorize:
-        rc = _authorize(credential_dir, args.host, args.port, args.timeout_seconds)
-        if rc:
-            return rc
-    if args.create_calendar:
-        return _create_calendar(credential_dir, args.create_calendar.strip()[:100] or "Hermes 仮登録",
-                                args.time_zone)
-    return 0
+    return _authorize(Path(args.credential_dir), args.host, args.port, args.timeout_seconds)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Calendar Tentative Registration — Google OAuth 2.0 and Calendar v3, stdlib.
 
-The single OAuth scope is `calendar.app.created`: "Make secondary Google
-calendars, and see, create, change, and delete events on them." The token
-cannot read or change the owner's own calendars — not by policy in this
-file, but by what Google issued. H.1's read-only token and this one are
-separate refresh tokens in separate credential directories, so neither
-service can borrow the other's authority.
+The single OAuth scope is `calendar.events.owned`: "See, create, change, and
+delete events on Google calendars you own." It reaches events only — not
+calendar settings, sharing, or calendars the owner merely subscribes to —
+which is the narrowest scope that can write the owner's primary calendar.
+Which events this service touches is decided by the engine: only ids it
+derived itself (`hermesct…`), each write guarded by If-Match. H.1's
+read-only token and this one are separate refresh tokens in separate
+credential directories, so neither service can borrow the other's authority.
 
 Access tokens stay in process memory. The refresh token, client id and the
 optional client secret are read from systemd's per-unit credential directory
@@ -40,7 +42,7 @@ from pathlib import Path
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 API_ROOT = "https://www.googleapis.com/calendar/v3"
-SCOPES = ("https://www.googleapis.com/auth/calendar.app.created",)
+SCOPES = ("https://www.googleapis.com/auth/calendar.events.owned",)
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
@@ -235,11 +237,6 @@ class TentativeCalendarClient:
 
     # -- verbs -----------------------------------------------------------
 
-    def create_calendar(self, *, summary: str, time_zone: str, description: str = "") -> dict:
-        return self._api("POST", "/calendars", payload={
-            "summary": summary, "timeZone": time_zone, "description": description,
-        })
-
     def insert_event(self, calendar_id: str, body: dict) -> dict:
         return self._api("POST", f"/calendars/{self._cal(calendar_id)}/events",
                          params={"sendUpdates": "none"}, payload=body)
@@ -266,13 +263,20 @@ class TentativeCalendarClient:
             "DELETE", f"/calendars/{self._cal(calendar_id)}/events/{self._cal(event_id)}",
             params={"sendUpdates": "none"}, headers={"If-Match": etag})
 
-    def list_events(self, calendar_id: str) -> list:
-        """Every event on the tentative calendar, deleted ones included."""
+    def list_events(self, calendar_id: str, *, private_property: str) -> list:
+        """The events carrying `private_property` (`key=value`), deleted ones included.
+
+        The target is the owner's primary calendar, years of it; only the
+        entries this service marked are fetched. Google may return a deleted
+        entry without its properties, so it is simply absent here — which the
+        engine already reads as "the owner deleted it".
+        """
         items: list = []
         page_token = None
         for _ in range(50):
             page = self._api("GET", f"/calendars/{self._cal(calendar_id)}/events", params={
                 "showDeleted": True, "maxResults": 2500, "pageToken": page_token,
+                "privateExtendedProperty": private_property,
             })
             items.extend(i for i in page.get("items") or [] if isinstance(i, dict))
             page_token = page.get("nextPageToken")

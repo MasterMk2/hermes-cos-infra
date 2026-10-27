@@ -58,11 +58,11 @@ COMPLETED
 ## カレンダー自動仮登録（2026-10-27、未配備）
 
 既存の commitments（Discord / LINE / Gmail / Calendar の統合結果）から、本人の日付付きの
-締切・予定で、まだカレンダーにないものを専用サブカレンダー「Hermes 仮登録」へ
-**仮（tentative）予定**として自動登録する。自分のカレンダーへ移動すれば確定、削除すれば却下
+締切・予定で、まだカレンダーにないものをメインカレンダーへ、件名の先頭に【仮】を付けた
+**仮（tentative）予定**として自動登録する。【仮】を消せば確定、削除すれば却下
 （再登録しない）。追加時は Discord に一通報告する（任意）。
 
-- OAuth スコープは `calendar.app.created` のみ。本人の既存カレンダーは読めず書けない
+- OAuth スコープは `calendar.events.owned` のみ。触るのは自分が作った仮予定だけ（private 拡張プロパティと予定IDで限定）
 - 判断は決定論的な規則のみ（I.2 planner と同じ適格条件）。LLM は使わない
 - Gmail だけが根拠の項目は、「自分が送った・返信した・送ったことのある相手（リスト）」と
   Gmail の分類（メイン）で人からのメールに絞って入れる。メルマガ・プロモーション・自動通知・
@@ -134,7 +134,7 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 | 12 | [docs/16-phase-h32-constrained-antigravity-backend.md](docs/16-phase-h32-constrained-antigravity-backend.md) / [security closeout](docs/17-phase-h32s-antigravity-security-closeout.md) | H.3.2 / H.3.2-S（当時の完了記録） |
 | 13 | [docs/18-phase-i1-production-event-profiling.md](docs/18-phase-i1-production-event-profiling.md) / [production closeout](docs/19-phase-i1s-unified-commitments-production-closeout.md) | I.1 / I.1-S（当時の完了記録） |
 | - | [docs/STATUS-RECONCILIATION.md](docs/STATUS-RECONCILIATION.md) | I.2実装・後続作業記録・現在未確認の運用状態を分離した照合 |
-| - | [docs/CALENDAR-TENTATIVE.md](docs/CALENDAR-TENTATIVE.md) | commitments → 専用サブカレンダーへの自動仮登録（未配備） |
+| - | [docs/CALENDAR-TENTATIVE.md](docs/CALENDAR-TENTATIVE.md) | commitments → メインカレンダーへの【仮】付き自動仮登録（未配備） |
 | - | [docs/lessons-learned.md](docs/lessons-learned.md) | 実測で見つかった落とし穴と修正 |
 
 ## Code Snapshot (`src/`)
@@ -175,7 +175,7 @@ src/
 │   ├── app/                    syncToken sync / OAuth transport / webhook / index
 │   ├── mcp/calendar_mcp.py     calendar_search / calendar_get / calendar_status
 │   └── systemd/ + install-root.sh + bin/  dedicated identity / credential boundary
-├── calendar-tentative/         commitments → 仮予定 (calendar.app.created のみ)
+├── calendar-tentative/         commitments → 【仮】予定 (calendar.events.owned のみ)
 │   ├── app/                    select / engine / store / google / notify / oauth / service
 │   └── systemd/ + install-root.sh  hermestentative / 15分 timer (未有効化で配置)
 └── docker-compose.hermes.yaml  実機 deploy 対象 (digest pin)

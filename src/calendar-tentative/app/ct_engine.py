@@ -3,9 +3,9 @@
 
     1. reserve     desired commitments get a PENDING row and a fixed event id
     2. resolve     INSERTING/UNKNOWN rows are settled by GETting that exact id
-    3. reconcile   one list of the tentative calendar shows what the owner did:
-                   deleted (REJECTED), moved to a real calendar (CONFIRMED),
-                   edited (USER_EDITED), or left alone
+    3. reconcile   one list of this service's entries (by private marker) shows
+                   what the owner did: deleted (REJECTED), took the 【仮】 off
+                   the title (CONFIRMED), edited (USER_EDITED), or left alone
     4. maintain    untouched entries follow their commitment: PATCH on change,
                    DELETE when it resolved or the real event now exists
     5. insert      new entries, soonest first, within per-run and total caps
@@ -19,9 +19,10 @@ id is never reused.
 
 The owner always wins. PATCH and DELETE carry `If-Match: <etag>`; if the owner
 touched the entry, Google answers 412 and the row becomes USER_EDITED. A
-deleted entry is never re-created. Withdrawal only removes an entry this
-service created, on the calendar this service created, and only one whose
-time has not passed.
+deleted entry is never re-created. Entries share the owner's primary
+calendar, so the engine only ever addresses ids it derived itself
+(`hermesct…`); withdrawal removes only such an entry the owner has not
+touched, and only one whose time has not passed.
 """
 
 from __future__ import annotations
@@ -204,7 +205,8 @@ def run(*, cfg, state_con, selection, client, now: datetime, notifier=None) -> R
     client.authenticate()
     _reserve(state_con, items, selection, cal=cal, report=report)
     _resolve_unknown(state_con, client, cal=cal, report=report)
-    snapshot_ok = _reconcile(state_con, client, selection, cal=cal, report=report)
+    snapshot_ok = _reconcile(state_con, client, cal=cal,
+                             prefix=cfg.calendar["summary_prefix"], report=report)
     if snapshot_ok:
         _maintain(state_con, client, items, selection, cfg=cfg, cal=cal, now=now, report=report)
     _insert(state_con, client, items, cfg=cfg, cal=cal, report=report)
@@ -282,15 +284,16 @@ def _resolve_unknown(con, client, *, cal: str, report: RunReport) -> None:
         _settle_from_remote(con, row, remote, report=report)
 
 
-def _reconcile(con, client, selection, *, cal: str, report: RunReport) -> bool:
+def _reconcile(con, client, *, cal: str, prefix: str, report: RunReport) -> bool:
     """Learn what the owner did to ACTIVE entries. False if Google is unreadable."""
     active = [r for r in store.all_proposals(con).values() if r["state"] == store.ACTIVE]
     if not active:
         return True
     try:
-        snapshot = {str(item.get("id")): item for item in client.list_events(cal)}
+        snapshot = {str(item.get("id")): item for item in
+                    client.list_events(cal, private_property=f"{PRIVATE_MARKER}=1")}
     except ApiError as exc:
-        log.warning("tentative calendar unreadable: %s:%s", exc.status, exc.code)
+        log.warning("tentative entries unreadable: %s:%s", exc.status, exc.code)
         report.bump("list_failed")
         return False
     for row in active:
@@ -300,9 +303,6 @@ def _reconcile(con, client, selection, *, cal: str, report: RunReport) -> bool:
             if row["withdraw_requested_at"]:
                 store.transition(con, cid, store.WITHDRAWN, error=row["withdraw_reason"])
                 report.bump("withdrawn")
-            elif row["event_id"] in selection.event_ids_elsewhere:
-                store.transition(con, cid, store.CONFIRMED)
-                report.bump("confirmed")
             else:
                 store.transition(con, cid, store.REJECTED)
                 report.bump("rejected")
@@ -315,6 +315,10 @@ def _reconcile(con, client, selection, *, cal: str, report: RunReport) -> bool:
                                    applied_body=_body(row))
             elif remote_matches(remote, _body(row, "applied_body_json")):
                 store.adopt_remote(con, cid, etag=remote.get("etag") or "")
+            elif not str(remote.get("summary") or "").lstrip().startswith(prefix.strip()):
+                # The owner took the 【仮】 off: it is theirs now.
+                store.transition(con, cid, store.CONFIRMED, etag=remote.get("etag") or "")
+                report.bump("confirmed")
             else:
                 store.transition(con, cid, store.USER_EDITED, etag=remote.get("etag") or "")
                 report.bump("user_edited")

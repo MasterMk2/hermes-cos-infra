@@ -6,7 +6,7 @@ import re
 import unittest
 from datetime import date, datetime, timedelta
 
-from ct_fixtures import CALENDAR_ID, JST, NOW, Workspace, make_cfg
+from ct_fixtures import CALENDAR_ID, H1_PRIMARY_ID, JST, NOW, Workspace, make_cfg
 
 import ct_select as sel
 
@@ -33,7 +33,7 @@ class TimingTests(SelectionCase):
         self.assertEqual(d.end, date(2026, 10, 6))
         self.assertIsNone(d.deadline_time)
         body = sel.build_event_body(d, cfg=self.cfg)
-        self.assertEqual(body["summary"], "[仮] 〆 協賛ロゴの入稿")
+        self.assertEqual(body["summary"], "【仮】〆 協賛ロゴの入稿")
         self.assertEqual(body["start"], {"date": "2026-10-05"})
         self.assertEqual(body["end"], {"date": "2026-10-06"})
         self.assertEqual(body["status"], "tentative")
@@ -45,7 +45,7 @@ class TimingTests(SelectionCase):
         d = self.select().desired["c1"]
         self.assertTrue(d.all_day)
         self.assertEqual(d.deadline_time, "17:30")
-        self.assertEqual(sel.summary_for(d, "[仮] "), "[仮] 〆17:30 見積書の送付")
+        self.assertEqual(sel.summary_for(d, "【仮】"), "【仮】〆17:30 見積書の送付")
 
     def test_an_appointment_with_a_time_is_a_timed_entry(self):
         self.ws.add_commitment("c1", "定例ミーティング", due_at="2026-10-03T18:00:00+09:00",
@@ -57,14 +57,14 @@ class TimingTests(SelectionCase):
         self.assertEqual(body["start"], {"dateTime": "2026-10-03T18:00:00+09:00",
                                          "timeZone": "Asia/Tokyo"})
         self.assertEqual(body["end"]["dateTime"], "2026-10-03T19:00:00+09:00")
-        self.assertEqual(body["summary"], "[仮] 定例ミーティング")
+        self.assertEqual(body["summary"], "【仮】定例ミーティング")
 
     def test_an_appointment_with_only_a_day_is_all_day_without_a_deadline_mark(self):
         self.ws.add_commitment("c1", "学科交流会", due_at="2026-10-03T00:00:00+09:00",
                                due_precision="date", raw_type="appointment_candidate")
         d = self.select().desired["c1"]
         self.assertEqual((d.kind, d.all_day), (sel.KIND_APPOINTMENT, True))
-        self.assertEqual(sel.summary_for(d, "[仮] "), "[仮] 学科交流会")
+        self.assertEqual(sel.summary_for(d, "【仮】"), "【仮】学科交流会")
 
     def test_a_utc_timestamp_lands_on_the_local_date(self):
         # 16:00Z on the 4th is 01:00 on the 5th in Tokyo.
@@ -200,16 +200,23 @@ class ExistingEventTests(SelectionCase):
         self.ws.add_index_event("e1", "資料作成の打ち合わせ", "2026-10-05", all_day=True)
         self.assertIn("c1", self.select().desired)
 
-    def test_cancelled_and_own_calendar_events_do_not_count(self):
+    def test_cancelled_events_and_our_own_entries_do_not_count(self):
+        at = "2026-10-05T18:00:00+09:00"
+        self.ws.add_commitment("c1", "定例ミーティング", due_at=at, due_precision="minute",
+                               raw_type="appointment_candidate")
+        self.ws.add_index_event("e1", "定例ミーティング", at, status="cancelled")
+        # Our own entry, as H.1 sees it on the primary calendar. Its title
+        # matches once the 【仮】 tag is dropped; its id says whose it is.
+        own = sel.event_id_for(CALENDAR_ID, "c1", 1)
+        self.ws.add_index_event(own, "【仮】定例ミーティング", at, calendar_id=H1_PRIMARY_ID)
+        self.assertIn("c1", self.select().desired)
+
+    def test_a_real_event_on_the_primary_calendar_still_counts(self):
         self.ws.add_commitment("c1", "発表練習", due_at="2026-10-05T17:00:00+09:00",
                                due_precision="day")
-        self.ws.add_index_event("e1", "発表練習", "2026-10-05", all_day=True, status="cancelled")
-        self.ws.add_index_event("e2", "[仮] 〆 発表練習", "2026-10-05", all_day=True,
-                                calendar_id=CALENDAR_ID)
-        s = self.select()
-        self.assertIn("c1", s.desired)
-        self.assertNotIn("e2", s.event_ids_elsewhere)
-        self.assertNotIn("e1", s.event_ids_elsewhere)
+        self.ws.add_index_event("abc123", "発表練習", "2026-10-05", all_day=True,
+                                calendar_id=H1_PRIMARY_ID)
+        self.assertEqual(self.select().skipped["c1"], sel.R_MATCHES_EXISTING)
 
     def test_without_an_index_the_check_is_simply_off(self):
         self.ws.add_commitment("c1", "発表練習", due_at="2026-10-05T17:00:00+09:00",
@@ -235,6 +242,10 @@ class IdentityTests(SelectionCase):
         self.assertEqual(one, sel.event_id_for(CALENDAR_ID, "cmt_1", 1))
         self.assertNotEqual(one, sel.event_id_for(CALENDAR_ID, "cmt_1", 2))
         self.assertNotEqual(one, sel.event_id_for("other@group.calendar.google.com", "cmt_1", 1))
+        self.assertTrue(one.startswith(sel.OWN_EVENT_PREFIX))
+        self.assertTrue(sel.is_own_event(one))
+        self.assertTrue(sel.is_own_event(f"gcal:{H1_PRIMARY_ID}:{one}"))
+        self.assertFalse(sel.is_own_event(f"gcal:{H1_PRIMARY_ID}:abc123"))
         # Google: base32hex alphabet (0-9, a-v), length 5..1024.
         self.assertRegex(one, r"^[0-9a-v]{5,1024}$")
 
@@ -250,11 +261,11 @@ class IdentityTests(SelectionCase):
         self.ws.add_commitment("c1", "見積書の送付", due_at="2026-10-05T17:30:00+09:00",
                                due_precision="minute", counterparty="ベンダA",
                                sources=[("discord", "d"), ("gmail", "g")])
-        text = sel.description_for(self.select().desired["c1"])
+        text = sel.description_for(self.select().desired["c1"], "【仮】")
         self.assertIn("Discord・Gmail", text)
         self.assertIn("期限: 10/5(月) 17:30", text)
         self.assertIn("相手: ベンダA", text)
-        self.assertIn("自分のカレンダーへ移動", text)
+        self.assertIn("タイトル先頭の【仮】を消し", text)
         self.assertIn("ref: c1", text)
 
     def test_normalize_title_strips_tags_and_space_only(self):

@@ -6,13 +6,11 @@ typo cannot silently become "the default the operator did not mean". Nothing
 here may hold a credential: the OAuth client and refresh token reach the
 process only through systemd's per-unit credential directory.
 
-The one value with no usable default is `calendar.calendar_id`. It must be the
-secondary calendar that `ct_oauth.py --create-calendar` made for this service,
-and the parser refuses anything that is not shaped like one — in particular
-the `primary` alias and an address-shaped id, which is how a personal calendar
-is named. The OAuth scope (`calendar.app.created`) already makes the owner's
-own calendars unwritable; this check makes the mistake visible at start-up
-instead of as a 403 on the first insert.
+Entries go onto the owner's primary calendar, marked by a title prefix
+(`【仮】`) rather than by living on a calendar of their own. `calendar.calendar_id`
+accepts exactly `primary`: the OAuth scope (`calendar.events.owned`) would
+also reach the owner's other calendars, and this check keeps every write on
+the one calendar the owner looks at, the one the engine reconciles.
 """
 
 from __future__ import annotations
@@ -31,18 +29,16 @@ CONFIG_ENV_VAR = "HERMES_CALENDAR_TENTATIVE_CONFIG"
 MODE_APPLY = "apply"
 MODE_DRY_RUN = "dry_run"
 
-#: Google names calendars created through the API like this. The owner's
-#: primary calendar is their address and a subscribed calendar is something
-#: else again; neither is a place this service may write.
-SECONDARY_CALENDAR_SUFFIX = "@group.calendar.google.com"
+#: The only write target: Google's alias for the owner's own main calendar.
+PRIMARY_CALENDAR = "primary"
 
 DEFAULT_PATHS = {
     "state_db": "/srv/hermes/calendar-tentative/state/tentative.db",
     # Canonical commitments. Opened read-only; this service never writes it.
     "events_db": "/srv/hermes/hermes-data/events/events.db",
     # H.1's published read-only snapshot. Used to avoid proposing what is
-    # already on a real calendar and to notice a tentative entry the owner
-    # moved onto one. Optional: an empty value disables both checks.
+    # already on a real calendar; this service's own entries in it are
+    # ignored. Optional: an empty value disables the check.
     "calendar_index_db": "/srv/hermes/calendar/index/index.db",
     # H.2's published read-only snapshot. Only headers, labels, thread ids
     # and the sent flag are read, to tell mail from people apart from
@@ -66,9 +62,11 @@ DEFAULT_OAUTH = {
     "credential_dir": "",
 }
 DEFAULT_CALENDAR = {
-    "calendar_id": "",
+    "calendar_id": PRIMARY_CALENDAR,
     "time_zone": "Asia/Tokyo",
-    "summary_prefix": "[仮] ",
+    # Marks an entry as unconfirmed. Removing it from the title is how the
+    # owner confirms one (ct_engine), so it must not be empty.
+    "summary_prefix": "【仮】",
     "default_duration_minutes": 60,
     # Google event colour "1".."11", or empty for the calendar's own colour.
     "color_id": "",
@@ -157,18 +155,13 @@ def _bool(value, name: str) -> bool:
 
 
 def validate_calendar_id(value: str) -> str:
-    """Empty (not yet created) or a secondary calendar id; nothing else."""
+    """Exactly `primary`; nothing else."""
     cal = str(value or "").strip()
-    if not cal:
-        return ""
-    if cal.lower() == "primary" or not cal.endswith(SECONDARY_CALENDAR_SUFFIX):
+    if cal != PRIMARY_CALENDAR:
         raise ConfigError(
-            "calendar.calendar_id must be the secondary calendar created by "
-            f"ct_oauth.py (ending in {SECONDARY_CALENDAR_SUFFIX}); the primary "
-            "calendar and personal calendars are never a write target"
+            "calendar.calendar_id must be \"primary\": entries go onto the owner's "
+            "main calendar with a title prefix, never onto another calendar"
         )
-    if len(cal) > 256 or any(ch.isspace() for ch in cal):
-        raise ConfigError("calendar.calendar_id is malformed")
     return cal
 
 
@@ -226,8 +219,8 @@ def parse_config(data, *, path: str = "<memory>") -> Config:
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise ConfigError("calendar.time_zone is not a known IANA zone") from exc
     prefix = cal["summary_prefix"]
-    if not isinstance(prefix, str) or len(prefix) > 20 or "\n" in prefix:
-        raise ConfigError("calendar.summary_prefix must be a short single-line string")
+    if not isinstance(prefix, str) or not prefix.strip() or len(prefix) > 20 or "\n" in prefix:
+        raise ConfigError("calendar.summary_prefix must be a short, non-empty single-line string")
     _int(cal["default_duration_minutes"], "calendar.default_duration_minutes", 5, 1440)
     color = str(cal["color_id"] or "")
     if color and color not in {str(n) for n in range(1, 12)}:

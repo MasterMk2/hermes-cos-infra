@@ -22,6 +22,13 @@ production data and this layer feeds the same owner the same facts:
 * Anything Calendar already holds is not proposed again: `calendar_authority`
   rows, rows with Calendar evidence, and rows whose normalized title and time
   match an event in the published snapshot.
+* This service's own entries are not "already on the calendar". They live on
+  the primary calendar that H.1 reads, so they come back as snapshot rows and,
+  through a Calendar backfill or merge, as Calendar evidence. Counting that
+  echo would make every entry withdraw itself one H.1 sync after it was
+  created. Every id this service makes starts with `hermesct`; snapshot rows,
+  evidence and authority that rest only on such an id are ignored, and a
+  commitment that is nothing but such an echo is never proposed.
 
 Time is never guessed. A deadline needs a day (`day`/`date`) or a clock time
 (`minute`/`exact_datetime`); `week`, `month`, `daypart`, `approximate` and
@@ -86,6 +93,10 @@ R_IMPRECISE_TIME = "imprecise_time"
 R_PAST = "past"
 R_BEYOND_HORIZON = "beyond_horizon"
 R_DUPLICATE_SOURCE = "duplicate_source"
+R_OWN_ENTRY = "own_tentative_entry"
+
+#: Every event id this service derives starts with this (event_id_for).
+OWN_EVENT_PREFIX = "hermesct"
 
 #: Reasons that mean "a tentative entry for this is now wrong", as opposed to
 #: "it is no longer worth proposing" (past, beyond the horizon, reclassified).
@@ -130,6 +141,12 @@ def shown_counterparty(value) -> str | None:
     if not text or "@" in text or _OPAQUE_ID.match(text):
         return None
     return text
+
+
+def is_own_event(value) -> bool:
+    """An event id (or an H.1 `gcal:<calendar>:<event>` source id) this
+    service created."""
+    return str(value or "").rsplit(":", 1)[-1].startswith(OWN_EVENT_PREFIX)
 
 
 def normalize_title(value) -> str:
@@ -206,8 +223,6 @@ class Selection:
     desired: dict = field(default_factory=dict)
     #: commitment_id -> reason, for every commitment that is not desired.
     skipped: dict = field(default_factory=dict)
-    #: Event ids present on some OTHER selected calendar (H.1 snapshot).
-    event_ids_elsewhere: frozenset = frozenset()
     index_available: bool = False
     gmail_screen_available: bool = False
     #: (received, categorised) message counts; (n, 0) means Gmail's smart
@@ -249,14 +264,21 @@ def _load_commitments(con) -> list:
 
 
 def _load_evidence(con) -> tuple:
+    """(types, pairs, echoed): evidence without this service's own entries,
+    and the commitments that carried any of those."""
     types: dict = {}
     pairs: dict = {}
+    echoed: set = set()
     for cid, source_type, source_id in con.execute(
         "SELECT commitment_id, source_type, source_id FROM commitment_evidence"
     ):
-        types.setdefault(cid, set()).add(str(source_type or ""))
-        pairs.setdefault(cid, set()).add((str(source_type or ""), str(source_id or "")))
-    return types, pairs
+        source_type, source_id = str(source_type or ""), str(source_id or "")
+        if source_type == "calendar" and is_own_event(source_id):
+            echoed.add(cid)
+            continue
+        types.setdefault(cid, set()).add(source_type)
+        pairs.setdefault(cid, set()).add((source_type, source_id))
+    return types, pairs, echoed
 
 
 def _load_raw_types(con) -> dict:
@@ -284,24 +306,23 @@ class _IndexEvent:
     start: object  # date for all-day, aware datetime otherwise
 
 
-def _load_index(con, *, own_calendar_id: str, tz) -> tuple:
-    """(title_key -> [_IndexEvent], event ids on other calendars)."""
+def _load_index(con, *, tz) -> dict:
+    """title_key -> [_IndexEvent] for the snapshot's real events."""
     by_title: dict = {}
-    ids: set = set()
     cols = _table_columns(con, "calendar_events")
-    if not {"calendar_id", "event_id", "status", "summary", "start_at", "all_day"} <= cols:
-        return by_title, frozenset()
+    if not {"event_id", "status", "summary", "start_at", "all_day"} <= cols:
+        return by_title
     for row in con.execute(
-        "SELECT calendar_id, event_id, status, summary, start_at, all_day FROM calendar_events"
+        "SELECT event_id, status, summary, start_at, all_day FROM calendar_events"
     ):
-        calendar_id, event_id, status, summary, start_at, all_day = row
-        # Our own calendar is never evidence that something is "already on a
-        # calendar": that is how a tentative entry would withdraw itself.
-        if own_calendar_id and calendar_id == own_calendar_id:
+        event_id, status, summary, start_at, all_day = row
+        # Our own entry is never evidence that something is "already on a
+        # calendar": that is how a tentative entry would withdraw itself. Its
+        # title would match, too — normalize_title drops the 【仮】 tag.
+        if is_own_event(event_id):
             continue
         if str(status or "").lower() == "cancelled":
             continue
-        ids.add(str(event_id))
         kind, value = parse_stored(start_at, tz)
         if kind is None:
             continue
@@ -313,7 +334,7 @@ def _load_index(con, *, own_calendar_id: str, tz) -> tuple:
             by_title.setdefault(key, []).append(_IndexEvent(key, True, start))
         else:
             by_title.setdefault(key, []).append(_IndexEvent(key, False, value))
-    return by_title, frozenset(ids)
+    return by_title
 
 
 # ----------------------------------------------------------------- deciding
@@ -389,12 +410,12 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
     by_title: dict = {}
     selection = Selection()
     if index_con is not None:
-        by_title, selection.event_ids_elsewhere = _load_index(
-            index_con, own_calendar_id=cfg.calendar_id, tz=tz)
+        by_title = _load_index(index_con, tz=tz)
         selection.index_available = True
 
     rows = _load_commitments(events_con)
-    types_by_id, pairs_by_id = _load_evidence(events_con)
+    types_by_id, pairs_by_id, echoed = _load_evidence(events_con)
+    own_prefix = cfg.calendar["summary_prefix"].strip()
     raw_types = _load_raw_types(events_con)
 
     gmail_mode = sel_cfg["gmail_only"]
@@ -412,6 +433,13 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
         has_chat = bool(source_types & NON_GMAIL_SOURCES)
         gmail_only = bool(source_types) and not has_chat
 
+        own_title = str(row.get("title") or "").lstrip().startswith(own_prefix)
+        if cid in echoed and (not source_types or own_title):
+            # A Calendar copy of one of our own entries — alone, or with
+            # evidence merged into it (it still carries our title). Proposing
+            # it would put 【仮】 on top of 【仮】.
+            selection.skipped[cid] = R_OWN_ENTRY
+            continue
         if row.get("work_state") in TERMINAL_WORK_STATES:
             selection.skipped[cid] = R_RESOLVED
             continue
@@ -443,7 +471,11 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
                 selection.skipped[cid] = label
                 continue
             mail_basis = label
-        if row.get("authority") == CALENDAR_AUTHORITY or "calendar" in source_types:
+        # A merge with one of our own entries hands its calendar authority to
+        # the merged row; that authority is our echo, not a real event.
+        authority_is_echo = cid in echoed and "calendar" not in source_types
+        if (row.get("authority") == CALENDAR_AUTHORITY and not authority_is_echo) \
+                or "calendar" in source_types:
             selection.skipped[cid] = R_ALREADY_ON_CALENDAR
             continue
         try:
@@ -536,7 +568,7 @@ def summary_for(desired: Desired, prefix: str) -> str:
     return clean_text(f"{prefix}{core}", 200)
 
 
-def description_for(desired: Desired) -> str:
+def description_for(desired: Desired, prefix: str) -> str:
     sources = "・".join(SOURCE_LABELS.get(t, t) for t in desired.source_types) or "記録"
     what = "締切" if desired.kind == KIND_DEADLINE else "予定"
     lines = [f"Hermes が {sources} の記録から仮登録した{what}です。"]
@@ -548,7 +580,7 @@ def description_for(desired: Desired) -> str:
         lines.append(f"相手: {desired.counterparty}")
     if desired.mail_basis in ct_mail.BASIS_LABELS:
         lines.append(f"根拠: {ct_mail.BASIS_LABELS[desired.mail_basis]}")
-    lines.append("確定するなら自分のカレンダーへ移動、不要ならこの予定を削除してください。"
+    lines.append(f"確定するならタイトル先頭の{prefix.strip()}を消し、不要ならこの予定を削除してください。"
                  "削除した仮登録は再登録しません。")
     lines.append(f"ref: {desired.commitment_id}")
     return "\n".join(lines)
@@ -566,7 +598,7 @@ def build_event_body(desired: Desired, *, cfg) -> dict:
     tz_name = cfg.calendar["time_zone"]
     body = {
         "summary": summary_for(desired, cfg.calendar["summary_prefix"]),
-        "description": description_for(desired),
+        "description": description_for(desired, cfg.calendar["summary_prefix"]),
         "start": _when(desired.start, desired.all_day, tz_name),
         "end": _when(desired.end, desired.all_day, tz_name),
         # Shown as tentative, and never blocks free/busy: nobody has agreed to
