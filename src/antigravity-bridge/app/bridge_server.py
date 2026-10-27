@@ -105,8 +105,12 @@ def run_cli(cmd: List[str], timeout: float) -> subprocess.CompletedProcess:
     MCP servers, a node runtime) would keep running on the Pi after the 504
     and compete with the next call for memory and CPU.
     """
+    # errors="replace": a CLI killed mid-write can leave half a UTF-8
+    # character in the pipe, and a strict decode would turn the timeout into
+    # an internal error.
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, start_new_session=True)
+                            text=True, encoding="utf-8", errors="replace",
+                            start_new_session=True)
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

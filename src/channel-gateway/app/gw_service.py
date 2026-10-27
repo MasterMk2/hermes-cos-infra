@@ -385,6 +385,10 @@ class Gateway:
                         tasks.discard(done)
                     continue
                 row = None
+                # Cleared before the claim, not after an empty one: a wake
+                # set while claim_next runs (a new message, a freed slot,
+                # stop) must survive into the idle wait below.
+                self.wake.clear()
                 try:
                     row = await self._in_thread(store.claim_next,
                                                 max_active=max_active)
@@ -392,7 +396,6 @@ class Gateway:
                     log.exception("worker: claim failed")
 
                 if row is None:
-                    self.wake.clear()
                     try:
                         await asyncio.wait_for(self.wake.wait(), IDLE_POLL_SECONDS)
                     except asyncio.TimeoutError:
@@ -549,17 +552,20 @@ class Gateway:
             if self.stop.is_set():
                 return None
             now = self.clock().timestamp()
-            if now >= deadline:
-                result = HermesResult("timeout", "", run_id, payload.get("usage"))
-                result.elapsed = int(now - started.timestamp())
-                log.warning("hermes run %s for %s still %s at the deadline", run_id,
-                            request_id, payload.get("status") or "unread")
-                return result
             if now - last_touch >= heartbeat:
-                if not await self._in_thread(store.touch_claim, request_id):
-                    log.warning("claim on %s lost while waiting; not delivering", request_id)
-                    return None
-                last_touch = now
+                try:
+                    alive = await self._in_thread(store.touch_claim, request_id)
+                except Exception:
+                    # One failed write is not a lost claim: the lease is 300 s
+                    # and the next pass tries again.
+                    log.warning("heartbeat on %s failed; retrying", request_id,
+                                exc_info=True)
+                else:
+                    if not alive:
+                        log.warning("claim on %s lost while waiting; not delivering",
+                                    request_id)
+                        return None
+                    last_touch = now
             if typing and now - last_typing >= TYPING_PULSE_SECONDS:
                 last_typing = now
                 try:
@@ -588,7 +594,9 @@ class Gateway:
                     except (HermesUnavailable, HermesRejected) as again:
                         log.error("hermes lost run for %s and refused a restart: %s",
                                   request_id, again)
-                        result = HermesResult("failed", "", run_id)
+                        unreachable = isinstance(again, HermesUnavailable)
+                        result = HermesResult("unavailable" if unreachable else "failed",
+                                              "", run_id)
                         result.elapsed = int(now - started.timestamp())
                         return result
                     if not await self._in_thread(store.note_run_started, request_id, run_id):
@@ -610,8 +618,19 @@ class Gateway:
                     result.elapsed = int(now - started.timestamp())
                     return result
 
+            # The deadline is checked only after a read, so a wait resumed
+            # past it (a restart late in the run) still collects an answer
+            # Hermes finished meanwhile, and the last read lands on it.
+            now = self.clock().timestamp()
+            if now >= deadline:
+                result = HermesResult("timeout", "", run_id, payload.get("usage"))
+                result.elapsed = int(now - started.timestamp())
+                log.warning("hermes run %s for %s still %s at the deadline", run_id,
+                            request_id, payload.get("status") or "unread")
+                return result
             try:
-                await asyncio.wait_for(self.stop.wait(), interval)
+                await asyncio.wait_for(self.stop.wait(),
+                                       max(0.0, min(interval, deadline - now)))
             except asyncio.TimeoutError:
                 pass
 
@@ -849,9 +868,30 @@ class Gateway:
         log.info("line quota cache restored (age=%ds ok=%s)", int(age),
                  bool(row["ok"]))
 
+    async def recover_previous_process(self):
+        """Requeue what the previous process left PROCESSING. Startup only.
+
+        One gateway owns this database, so every PROCESSING row at startup
+        belongs to a process that is gone. Its waits were heartbeated, so the
+        300 s lease would hold them -- and their max_active slots -- for up to
+        ten minutes, by which time a resumed wait is past its deadline. They
+        go back to the queue now with their run id and start; uncertain
+        replies are held exactly as recover_stale holds them after a lease
+        expires.
+        """
+        try:
+            recovered = await self._in_thread(store.recover_stale, lease_seconds=0)
+        except Exception:
+            log.exception("startup recovery failed; the lease will recover them")
+            return None
+        if any(recovered.values()):
+            log.warning("recovered the previous process's requests: %s", recovered)
+        return recovered
+
     async def run(self):
         self.session = aiohttp.ClientSession()
         self._seed_quota_cache()
+        await self.recover_previous_process()
         tasks = [asyncio.create_task(self.worker(), name="worker"),
                  asyncio.create_task(self.maintenance(), name="maintenance")]
         runner = None

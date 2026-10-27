@@ -94,6 +94,11 @@ class InterfaceBot(discord.Client):
         # Resolved lazily by `owner_dm_channel`, cleared whenever opening it
         # fails so a transient error cannot pin a broken handle forever.
         self._owner_dm = None
+        # Orders intake commits. Each DM is its own task; with the SQLite work
+        # in a thread, two DMs sent back to back could commit (and be claimed)
+        # in either order. asyncio.Lock wakes waiters first in, first out, and
+        # nothing awaits before it in _handle, so commits follow dispatch.
+        self._record_lock = asyncio.Lock()
 
     # -- lifecycle -----------------------------------------------------
 
@@ -154,7 +159,8 @@ class InterfaceBot(discord.Client):
         # SQLite work runs in a thread. On the event loop it shares the thread
         # with discord.py's gateway heartbeat, and a slow USB write once held
         # that heartbeat long enough to risk a shard reconnect.
-        outcome = await asyncio.to_thread(self._record, canonical)
+        async with self._record_lock:
+            outcome = await asyncio.to_thread(self._record, canonical)
         if outcome == "not_owner":
             log.info("dropped non-owner DM from %s", message.author.id)
         elif outcome == "queued":

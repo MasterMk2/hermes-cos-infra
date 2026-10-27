@@ -12,6 +12,7 @@ that the fake Hermes advances, so an eight-minute wait runs in milliseconds.
 """
 
 import asyncio
+import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -204,28 +205,94 @@ def test_a_terminal_failure_and_an_empty_answer_are_internal_errors(tmp_path):
 # ----------------------------------------------------------------- restarts
 
 
-def test_a_restart_resumes_the_same_run_without_asking_again(tmp_path):
-    db = tmp_path / "gw.db"
-    gw = make_gateway(db, hermes_steps=[{"status": "running"}] * 3)
+def stop_mid_wait(db, polls=3):
+    """A gateway that stops while waiting: the row stays PROCESSING, freshly heartbeated."""
+    gw = make_gateway(db, hermes_steps=[{"status": "running"}] * polls)
     row = seed(gw)
-    gw.hermes.on_poll = lambda n: gw.stop.set() if n == 3 else None
+    gw.hermes.on_poll = lambda n: gw.stop.set() if n == polls else None
     run(gw.process(row))
     assert replies(gw) == []
     assert inbound(gw)["state"] == "PROCESSING"
+    return gw
 
+
+def claim(gw, max_active=2):
+    con = gw.db()
+    try:
+        row = store.claim_next(con, max_active=max_active)
+        con.commit()
+        return row
+    finally:
+        con.close()
+
+
+def test_a_restart_resumes_the_same_run_without_asking_again(tmp_path):
+    db = tmp_path / "gw.db"
+    stop_mid_wait(db)
     restarted = make_gateway(db, hermes_steps=[{"status": "completed", "output": "再開後の答え"}])
-    con = restarted.db()
-    con.execute("UPDATE inbound_messages SET claimed_at = '2000-01-01'")
-    con.commit()
-    assert store.recover_stale(con)["requeued"] == 1
-    con.commit()
-    row = store.claim_next(con, max_active=2)
-    con.commit()
-    con.close()
-    run(restarted.process(row))
+    # The claim is seconds old, well inside the 300 s lease: only the startup
+    # recovery may hand it back, and it must do so at once.
+    assert run(restarted.recover_previous_process())["requeued"] == 1
+    run(restarted.process(claim(restarted)))
     assert restarted.hermes.started == []
     assert restarted.hermes.polled == ["run-1"]
     assert replies(restarted) == ["再開後の答え"]
+
+
+def test_a_run_that_finished_during_a_long_restart_is_still_delivered(tmp_path):
+    # Review of this change: a wait resumed past its deadline answered with
+    # the timeout text without reading the run once, though Hermes had the
+    # answer ready.
+    db = tmp_path / "gw.db"
+    gw = stop_mid_wait(db)
+    con = gw.db()
+    late = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    con.execute("UPDATE inbound_messages SET run_started_at = ?", (late,))
+    con.commit()
+    con.close()
+    restarted = make_gateway(db, hermes_steps=[{"status": "completed", "output": "停止中に出た答え"}])
+    run(restarted.recover_previous_process())
+    run(restarted.process(claim(restarted)))
+    assert restarted.hermes.polled == ["run-1"]
+    assert replies(restarted) == ["停止中に出た答え"]
+    assert metric(restarted, "last_hermes_success_at") is not None
+    assert metric(restarted, "last_hermes_failure_at") is None
+
+
+def test_a_run_still_going_after_its_deadline_is_read_once_then_timed_out(tmp_path):
+    db = tmp_path / "gw.db"
+    gw = stop_mid_wait(db)
+    con = gw.db()
+    late = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    con.execute("UPDATE inbound_messages SET run_started_at = ?", (late,))
+    con.commit()
+    con.close()
+    restarted = make_gateway(db, hermes_steps=[{"status": "running"}] * 5)
+    run(restarted.recover_previous_process())
+    run(restarted.process(claim(restarted)))
+    assert restarted.hermes.polled == ["run-1"]
+    assert replies(restarted) == [USER_FACING_TIMEOUT]
+
+
+def test_requests_left_by_a_stopped_process_do_not_hold_every_slot(tmp_path):
+    db = tmp_path / "gw.db"
+    gw = make_gateway(db)
+    for rid, conv, platform in (("dm-1", CONV, "discord"),
+                                ("line-1", "line:" + fx.OWNER_LINE, "line")):
+        seed(gw, rid, conversation_id=conv, platform=platform, claim=False)
+    for rid in ("dm-1", "line-1"):
+        row = claim(gw)
+        con = gw.db()
+        store.note_run_started(con, row["gateway_request_id"], "run-" + rid)
+        con.commit()
+        con.close()
+    seed(gw, "dm-other", conversation_id="discord:other", claim=False)
+    assert claim(gw) is None            # both slots held by the dead process
+    restarted = make_gateway(db)
+    assert run(restarted.recover_previous_process())["requeued"] == 2
+    picked = {claim(restarted)["gateway_request_id"], claim(restarted)["gateway_request_id"]}
+    assert picked == {"dm-1", "line-1"}  # oldest first, each resuming its run
+    assert inbound(restarted, "dm-1")["hermes_run_id"] == "run-dm-1"
 
 
 def test_the_deadline_is_the_runs_own_across_a_restart(tmp_path):
@@ -315,6 +382,38 @@ def test_a_forgotten_run_is_restarted_once_under_the_same_key(tmp_path):
     assert gw.hermes.polled == ["run-1", "run-2"]
     assert replies(gw) == ["二度目"]
     assert inbound(gw)["hermes_run_id"] == "run-2"
+
+
+def test_a_forgotten_run_hermes_cannot_restart_gets_the_unavailable_text(tmp_path):
+    class Warming(FakeHermes):
+        def start_run(self, envelope, text, *, session_id, request_id):
+            if self.started:
+                self.started.append(request_id)
+                raise HermesUnavailable("http_503")
+            return super().start_run(envelope, text, session_id=session_id,
+                                     request_id=request_id)
+
+    gw = make_gateway(tmp_path / "gw.db")
+    gw.hermes = Warming(gw.clock, [HermesRejected("run_not_found")])
+    run(gw.process(seed(gw)))
+    assert replies(gw) == [USER_FACING_UNAVAILABLE]
+
+
+def test_a_failed_heartbeat_write_does_not_end_the_wait(tmp_path, monkeypatch):
+    gw = make_gateway(tmp_path / "gw.db", step_seconds=61,
+                      hermes_steps=[{"status": "running"}] * 3 + [{"status": "completed", "output": "ok"}])
+    real, calls = store.touch_claim, []
+
+    def flaky(con, request_id):
+        calls.append(request_id)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(con, request_id)
+
+    monkeypatch.setattr(store, "touch_claim", flaky)
+    run(gw.process(seed(gw)))
+    assert len(calls) >= 2
+    assert replies(gw) == ["ok"]
 
 
 def test_a_run_forgotten_twice_is_a_failure(tmp_path):
@@ -445,7 +544,7 @@ def test_two_conversations_wait_on_hermes_at_the_same_time(tmp_path):
         release.set()
         gw.stop.set()
         gw.wake.set()
-        await asyncio.wait_for(worker, 5)
+        await asyncio.wait_for(worker, 10)
 
     run(scenario())
     assert peak[0] == 2               # the DM and LINE waited concurrently
@@ -453,9 +552,9 @@ def test_two_conversations_wait_on_hermes_at_the_same_time(tmp_path):
     assert sorted(order) == ["dm-1", "dm-2", "line-1"]
 
 
-def test_max_active_one_restores_strictly_serial_work(tmp_path):
+def peak_concurrency(tmp_path, limit):
     cfg = parse_config(fx.config_dict(paths={"state_db": str(tmp_path / "gw.db")},
-                                      limits={"max_active_requests": 1},
+                                      limits={"max_active_requests": limit},
                                       hermes={"poll_interval_seconds": 0.01}))
     gw = Gateway(cfg, {"hermes_api_key": "synthetic-test-key"})
     gw.clock = Clock()
@@ -463,16 +562,21 @@ def test_max_active_one_restores_strictly_serial_work(tmp_path):
     seed(gw, "dm-1", claim=False)
     seed(gw, "line-1", conversation_id="line:" + fx.OWNER_LINE, platform="line", claim=False)
     in_flight, peak, done = set(), [0], []
+    lock = threading.Lock()
 
     class Counting(FakeHermes):
         def start_run(self, envelope, text, *, session_id, request_id):
             return f"run-{request_id}", False
 
         def get_run(self, run_id, *, timeout=None):
-            in_flight.add(run_id)
-            peak[0] = max(peak[0], len(in_flight))
-            in_flight.discard(run_id)
-            done.append(run_id)
+            with lock:
+                in_flight.add(run_id)
+                peak[0] = max(peak[0], len(in_flight))
+            # Held long enough that two concurrent requests always overlap.
+            threading.Event().wait(0.3)
+            with lock:
+                in_flight.discard(run_id)
+                done.append(run_id)
             return {"status": "completed", "output": "x"}
 
     gw.hermes = Counting(gw.clock, [])
@@ -486,10 +590,20 @@ def test_max_active_one_restores_strictly_serial_work(tmp_path):
                 break
         gw.stop.set()
         gw.wake.set()
-        await asyncio.wait_for(worker, 5)
+        await asyncio.wait_for(worker, 10)
 
     run(scenario())
-    assert peak[0] == 1 and len(done) == 2
+    assert len(done) == 2
+    return peak[0]
+
+
+def test_max_active_one_restores_strictly_serial_work(tmp_path):
+    assert peak_concurrency(tmp_path, 1) == 1
+
+
+def test_max_active_two_really_overlaps(tmp_path):
+    # The control that shows the test above can fail.
+    assert peak_concurrency(tmp_path, 2) == 2
 
 
 def test_shutdown_leaves_a_waiting_request_recoverable(tmp_path):
@@ -505,7 +619,7 @@ def test_shutdown_leaves_a_waiting_request_recoverable(tmp_path):
                 break
         gw.stop.set()
         gw.wake.set()
-        await asyncio.wait_for(worker, 5)
+        await asyncio.wait_for(worker, 10)
 
     run(scenario())
     current = inbound(gw)

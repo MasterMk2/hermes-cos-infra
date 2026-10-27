@@ -125,6 +125,9 @@ class Probe:
     #: as "healthy" would silently close a real outage (section 140).
     inconclusive: bool = False
     facts: dict = field(default_factory=dict)
+    #: Reasons whose open episodes a healthy verdict must leave open: the
+    #: service is otherwise fine, but this problem has not been shown fixed.
+    hold_reasons: tuple = ()
 
 
 def _age(value, now) -> float | None:
@@ -183,11 +186,12 @@ def probe_gateway(cfg, clock, gateway) -> Probe:
         # answered anything since. That is "nobody asked", not "it works":
         # falling through to ok here announced 「gateway は復旧しました」 on
         # 2026-10-27 exactly one hour after the last failure, with Hermes
-        # still failing. Inconclusive keeps the episode open and silent until
-        # a real success closes it with a truthful recovery.
-        return Probe(SVC_GATEWAY, True, inconclusive=True,
+        # still failing. The gateway is otherwise healthy, so its other
+        # episodes close as usual; only hermes_failing stays open, silent,
+        # until a real success closes it with a truthful recovery.
+        return Probe(SVC_GATEWAY, True,
                      detail="no hermes success since the last failure",
-                     facts=facts)
+                     facts=facts, hold_reasons=("hermes_failing",))
 
     return Probe(SVC_GATEWAY, True, facts=facts)
 
@@ -554,7 +558,9 @@ def signals_from_probes(con, probes, cfg, clock) -> list:
             continue
 
         # Healthy. Close whatever was open, and announce only what was told.
-        for closed in store.close_episodes(con, probe.service, now=now_s):
+        for closed in store.close_episodes(con, probe.service,
+                                           keep_reasons=probe.hold_reasons,
+                                           now=now_s):
             if not closed["notified_at"] or closed["recovery_notified_at"]:
                 continue
             if not cfg.health.get("recovery_notifications", True):

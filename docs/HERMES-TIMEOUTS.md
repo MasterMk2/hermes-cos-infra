@@ -22,11 +22,11 @@ Discord DM に「応答に時間がかかりすぎたため中断しました」
 | 場所 | 変更 |
 |---|---|
 | `gw_store` / `gw_schema` | `claim_next` を `BEGIN IMMEDIATE` + `rowcount` で原子的に。`note_run_started` が `hermes_run_id` と `run_started_at`（追加列）を最初の poll より前に保存。`touch_claim` で claim を更新 |
-| `gw_service` | 会話ごとに 1 件、全体で `limits.max_active_requests` 件まで並列。保存済み run id があれば再開し、新しい run は始めない。期限は `run_started_at` から測るので再起動をまたいでも延びない。heartbeat で claim を更新、status 取得の短い失敗は `unavailable_grace_seconds` まで待つ、Hermes が run を忘れた場合は同じ Idempotency-Key で 1 回だけ再開始。停止時は PROCESSING と run id を残し、次の起動が同じ run を待つ |
-| `gw_discord` | 受信時の DB 処理を event loop の外へ。待機中は typing 表示を 8 s ごとに更新 |
+| `gw_service` | 会話ごとに 1 件、全体で `limits.max_active_requests` 件まで並列。保存済み run id があれば再開し、新しい run は始めない。期限は `run_started_at` から測るので再起動をまたいでも延びない。heartbeat で claim を更新、status 取得の短い失敗は `unavailable_grace_seconds` まで待つ、Hermes が run を忘れた場合は同じ Idempotency-Key で 1 回だけ再開始。期限の判定は status を読んだ後なので、期限を過ぎて再開した待ちも、完了済みの答えなら届ける。停止時は PROCESSING と run id を残し、次の起動が lease を待たずにすぐ戻して同じ run を待つ |
+| `gw_discord` | 受信時の DB 処理を event loop の外へ（受信順に 1 件ずつ記録するので、続けて送った 2 通の順番は入れ替わらない）。待機中は typing 表示を 8 s ごとに更新 |
 | `gw_config` | `absolute_timeout_seconds` 既定 480（上限 840: attention の queue_stuck 900 s 未満）、`poll_request_timeout_seconds`、`heartbeat_seconds`、`unavailable_grace_seconds` を追加 |
 | `gw_format` | 時間切れの文言を「少し時間をおいて、もう一度聞いてください。」に（遅さの原因は質問の長さとは限らず、分けて聞き直す案内は根拠が無かったため） |
-| `att_health` | 失敗が窓から外れても、その後に成功が無ければ inconclusive。回復通知は Hermes が実際に答えたときだけ |
+| `att_health` | 失敗が窓から外れても、その後に成功が無ければ `hermes_failing` の episode だけ開いたまま保持。回復通知は Hermes が実際に答えたときだけ。gateway の他の episode（接続断など）は通常どおり閉じて、次の障害もまた通知される |
 | Antigravity bridge | 呼び出しごとに内容を含まない 1 行（model / status / outcome / 所要秒 / prompt bytes）。timeout 時は stderr の固定語彙フラグだけ記録。CLI を別 session で起動し、timeout でプロセスグループごと kill。128 KiB 超の prompt は `prompt_too_large` として報告（status は 500 のまま）。`/health` の last_error に実行ファイルのパスを出さない |
 
 返信の at-most-once（[REPLY-RESTART-SAFETY.md](REPLY-RESTART-SAFETY.md)、[LINE-RESTART-SAFETY.md](LINE-RESTART-SAFETY.md)）は変えていない。
@@ -62,6 +62,10 @@ sudo bash src/channel-gateway/bin/hermes-timeout-diag.sh 2026-10-27 12:50-15:40
 ## 配備するときに
 
 - `gw_schema` は追加列だけで、既存 DB は起動時に `run_started_at` が足される
+- **`config.yaml` の `hermes.absolute_timeout_seconds` は手で 480 に上げる。** 旧 sample は 240 を明示していて、
+  deploy.sh は config.yaml を書き換えない。240 のままだと、遅れた回答を待つ時間は以前と同じ
+- 起動時に、前のプロセスが PROCESSING のまま残した行をすぐ queue に戻す（同じ DB を使う Gateway は 1 つだけ、という前提。
+  2 つ同時に動かさないこと）。送信中だった返信は lease 切れのときと同じく UNKNOWN で保留し、再送しない
 - 配備は `src/channel-gateway/bin/deploy.sh`（コピーして差分を表示するだけ。再起動は別手順）
 - 旧版へ戻すと、PROCESSING のまま残った行を旧コードが新しい run で処理し直すことがある。
   戻すなら受信を止め、PROCESSING 行が無いことを確かめてから

@@ -152,6 +152,37 @@ class TestOwnerDmIsQueued(DiscordAdapterTestCase):
         self.assertNotEqual(seen[0], loop_thread)
         self.assertEqual(self.counts().get("QUEUED"), 1)
 
+    async def test_two_quick_dms_are_recorded_in_the_order_they_arrived(self):
+        # With the database work in a thread, nothing ordered two DMs' commits:
+        # the second could be queued, claimed and answered before the first.
+        import asyncio
+        import threading
+        import time
+        events, original = [], self.bot._record
+
+        def slow_first(canonical):
+            mid = canonical.platform_message_id
+            events.append(("start", mid))
+            if not events[:-1]:
+                time.sleep(0.2)   # the first DM's write is slow (a USB stall)
+            try:
+                return original(canonical)
+            finally:
+                events.append(("end", mid))
+
+        self.bot._record = slow_first
+        first = asyncio.create_task(self.bot._handle(fake_message(content="一通目", message_id=1)))
+        second = asyncio.create_task(self.bot._handle(fake_message(content="二通目", message_id=2)))
+        await asyncio.gather(first, second)
+        self.assertEqual(events, [("start", "1"), ("end", "1"), ("start", "2"), ("end", "2")])
+        con = open_db(self.db_path)
+        try:
+            row = store.claim_next(con, max_active=2)
+            con.commit()
+        finally:
+            con.close()
+        self.assertEqual(row["text"], "一通目")
+
     async def test_typing_pulse_is_best_effort(self):
         class Channel:
             def __init__(self, error=None):

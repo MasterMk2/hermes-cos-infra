@@ -522,13 +522,20 @@ def cmd_yamlpick(path, mode):
         h = data.get('hermes') or {}
         base = str(h.get('base_url', '(default http://127.0.0.1:8642)'))
         print(f"   hermes.base_url = {base}")
-        for k in ('model', 'soft_timeout_seconds', 'absolute_timeout_seconds', 'poll_interval_seconds', 'session_prefix'):
+        for k in ('model', 'soft_timeout_seconds', 'absolute_timeout_seconds', 'poll_interval_seconds',
+                  'poll_request_timeout_seconds', 'heartbeat_seconds', 'unavailable_grace_seconds',
+                  'session_prefix'):
             print(f"   hermes.{k} = {h.get(k, '(default)')}")
+        if str(h.get('absolute_timeout_seconds')) == '240':
+            print("   NOTE absolute_timeout_seconds is pinned to the old 240 here: deploy.sh never touches"
+                  " config.yaml, so after the durable-wait fix this must be raised by hand (sample: 480)")
         for k, v in (data.get('limits') or {}).items():
             print(f"   limits.{k} = {v}")
         for sec in ('discord', 'line', 'proactive'):
             print(f"   {sec}.enabled = {(data.get(sec) or {}).get('enabled')}")
-        print(f"   (repo defaults: absolute_timeout_seconds=240 poll_interval_seconds=2 max_active_requests=2)")
+        print("   (code defaults: 597c897 absolute_timeout_seconds=240; durable-wait fix 480, poll_request_timeout"
+              "_seconds=10 heartbeat_seconds=60 unavailable_grace_seconds=90; both poll_interval_seconds=2"
+              " max_active_requests=2)")
         return
     if mode == 'bridge':
         for k in ('host', 'port', 'binary_path', 'default_model', 'timeout_seconds', 'allow_tool_emulation',
@@ -696,8 +703,13 @@ EOF
 # the deployed files are the ones that checkout would deploy. Read-only: cmp + git.
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)
 if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/src/channel-gateway/app/gw_service.py" ]; then
-  REV=$(git -c safe.directory="$REPO_ROOT" -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')
-  DIRTY=$(git -c safe.directory="$REPO_ROOT" -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null | wc -l)
+  # As the checkout's owner, never root: a root `git status` refreshes .git/index
+  # as root:root 0600 (umask 077), locking the owner out, and runs repo-configured
+  # hooks (core.fsmonitor) as root. --no-optional-locks: no index write at all.
+  REPO_OWNER=$(stat -c %U "$REPO_ROOT" 2>/dev/null)
+  rgit() { timeout 30 sudo -u "${REPO_OWNER:-nobody}" git --no-optional-locks -C "$REPO_ROOT" "$@" 2>/dev/null; }
+  REV=$(rgit rev-parse --short HEAD || echo '?')
+  DIRTY=$(rgit status --porcelain --untracked-files=no | wc -l)
   sub "deployed vs this checkout ($REPO_ROOT @ $REV, $DIRTY locally modified tracked files)"
   for f in "$REPO_ROOT"/src/channel-gateway/app/*.py; do
     printf '%s %s\n' "$f" "$GW/app/$(basename "$f")"

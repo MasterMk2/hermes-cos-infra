@@ -197,6 +197,17 @@ class TestCliObservability(unittest.TestCase):
         self.assertEqual(code, 500)
         self.assertNotIn("/sensitive", res["error"]["message"])
 
+    @unittest.skipUnless(os.path.exists("/bin/sh"), "needs /bin/sh")
+    def test_a_timeout_mid_character_is_still_a_timeout(self):
+        from bridge_server import run_cli
+
+        script = "printf 'progress \\343\\201' >&2; sleep 30"
+        with patch("bridge_server.run_cli",
+                   lambda cmd, timeout: run_cli(["/bin/sh", "-c", script], 1)):
+            code, res = execute_antigravity("hi", self.cfg)
+        self.assertEqual(code, 504)
+        self.assertEqual(res["error"]["type"], "timeout")
+
     @unittest.skipUnless(os.path.exists("/bin/sh") and os.path.isdir("/proc"), "needs /bin/sh and /proc")
     def test_a_timeout_kills_what_the_cli_started(self):
         import tempfile

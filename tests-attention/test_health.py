@@ -100,14 +100,39 @@ class TestEpisodes(unittest.TestCase):
         out = run(con, [failing], cfg, fx.clock_at("2026-10-27T04:35"))
         store.mark_episode_notified(con, out[0].metadata["episode_id"])
         con.commit()
-        # An hour on, nothing has succeeded: inconclusive, so no 「復旧」.
-        quiet = health.Probe("gateway", True, inconclusive=True)
+        # An hour on, nothing has succeeded: the episode is held, so no 「復旧」.
+        quiet = health.Probe("gateway", True, hold_reasons=("hermes_failing",))
         self.assertEqual(run(con, [quiet], cfg, fx.clock_at("2026-10-27T05:20")), [])
         self.assertEqual(len(store.open_episodes(con, "gateway")), 1)
         # The next real answer closes it, with one truthful recovery.
         recovered = run(con, [probe("gateway", True)], cfg,
                         fx.clock_at("2026-10-27T06:00"))
         self.assertEqual([s.signal_type for s in recovered], ["health_recovered"])
+
+    def test_a_held_hermes_failure_does_not_keep_an_outage_open(self):
+        # Review of the 2026-10-27 fix: holding the whole gateway verdict kept
+        # every gateway episode open, so a later outage was folded into the
+        # old, already announced one and nobody was told.
+        cfg, con = self.cfg, self.con
+        failing = probe("gateway", False, "hermes_failing")
+        run(con, [failing], cfg, fx.clock_at("2026-10-27T04:19"))
+        out = run(con, [failing], cfg, fx.clock_at("2026-10-27T04:40"))
+        store.mark_episode_notified(con, out[0].metadata["episode_id"])
+        down = probe("gateway", False, "unreachable")
+        run(con, [down], cfg, fx.clock_at("2026-10-27T05:00"))
+        out = run(con, [down], cfg, fx.clock_at("2026-10-27T05:20"))
+        store.mark_episode_notified(con, out[0].metadata["episode_id"])
+        con.commit()
+        held = health.Probe("gateway", True, hold_reasons=("hermes_failing",))
+        back = run(con, [held], cfg, fx.clock_at("2026-10-27T05:45"))
+        self.assertEqual([(s.signal_type, s.metadata["reason"]) for s in back],
+                         [("health_recovered", "unreachable")])
+        self.assertEqual([e["reason"] for e in store.open_episodes(con, "gateway")],
+                         ["hermes_failing"])
+        # The next outage is a new episode and is announced once it lasts.
+        run(con, [down], cfg, fx.clock_at("2026-10-28T02:00"))
+        again = run(con, [down], cfg, fx.clock_at("2026-10-28T02:20"))
+        self.assertEqual([s.signal_type for s in again], ["health_degraded"])
 
     def test_recovery_from_a_failure_nobody_heard_about_is_silent(self):
         # Section 38. Announcing the end of a problem that was never announced
@@ -206,18 +231,21 @@ class TestGatewayProbe(unittest.TestCase):
         p = health.probe_gateway(self.cfg, self.clock, self.gw(
             last_hermes_failure_at=fx.ago(self.clock, hours=2),
             last_hermes_success_at=fx.ago(self.clock, hours=6)))
-        self.assertTrue(p.inconclusive)
+        self.assertTrue(p.ok)
+        self.assertFalse(p.inconclusive)
+        self.assertEqual(p.hold_reasons, ("hermes_failing",))
 
     def test_a_failure_with_no_success_ever_recorded_is_not_a_recovery(self):
         p = health.probe_gateway(self.cfg, self.clock, self.gw(
             last_hermes_failure_at=fx.ago(self.clock, hours=2)))
-        self.assertTrue(p.inconclusive)
+        self.assertEqual(p.hold_reasons, ("hermes_failing",))
 
     def test_a_success_after_the_last_failure_is_healthy_again(self):
         p = health.probe_gateway(self.cfg, self.clock, self.gw(
             last_hermes_failure_at=fx.ago(self.clock, hours=2),
             last_hermes_success_at=fx.ago(self.clock, minutes=1)))
         self.assertTrue(p.ok, p.reason)
+        self.assertEqual(p.hold_reasons, ())
 
 
 class TestCollectorProbe(unittest.TestCase):
