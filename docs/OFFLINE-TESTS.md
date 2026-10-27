@@ -1,6 +1,7 @@
 # Offline test environment
 
-Gateway / Attention / Planningを同じコマンドで検査するテスト専用環境。
+Gateway / Attention / Planning / Calendar Tentativeを同じコマンドで検査するテスト専用環境。
+Calendar Tentativeは実スキーマのDBと偽のGoogleを使い、Googleへは接続しない。
 既存サービスのvirtualenv、install-root.sh、systemd、資格情報には触らない。
 
 ## Runtime と凍結復元

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the same three offline suites locally and in CI; never install or send."""
+"""Run the same offline suites locally and in CI; never install or send."""
 
 import argparse
 import os
@@ -20,7 +20,8 @@ def main():
     for suite, module_path in (
             ("tests-gateway", "src/channel-gateway/app"),
             ("tests-attention", "src/attention/app"),
-            ("tests-planning", "src")):
+            ("tests-planning", "src"),
+            ("tests-calendar-tentative", "src/calendar-tentative/app")):
         env = os.environ.copy()
         # Explicit paths, no user/site pytest plugins or inherited pytest flags.
         env["PYTHONPATH"] = os.pathsep.join(str(ROOT / p) for p in

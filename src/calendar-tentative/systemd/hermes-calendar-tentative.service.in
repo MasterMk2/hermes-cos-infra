@@ -1,0 +1,107 @@
+# Hermes calendar tentative registration — one run per timer tick.
+#
+# WHAT THIS SERVICE HOLDS: one Google refresh token whose only scope is
+# calendar.app.created. With it the service can manage the secondary calendar
+# it created and nothing else — not the owner's primary calendar, not any
+# other calendar, not Gmail. It holds no Discord or LINE token and no
+# recipient: the optional owner digest goes through the channel gateway's
+# unix socket, which fixes the recipient itself.
+
+[Unit]
+Description=Hermes calendar tentative registration (commitments -> tentative calendar)
+Documentation=file:///srv/hermes/calendar-tentative/config/config.yaml
+After=network-online.target hermes-calendar.service channel-gateway.service
+Wants=network-online.target
+# /srv/hermes is the USB disk. Starting before it mounts would create an
+# empty state database elsewhere and lose the record of what was created.
+RequiresMountsFor=/srv/hermes
+
+[Service]
+Type=oneshot
+User=hermestentative
+Group=hermestentative
+WorkingDirectory=/srv/hermes/calendar-tentative
+
+# Rendered by install-root.sh:
+#   hermesreconcile   read events.db (commitments)
+#   hermesproactive   connect to the gateway socket, only when it exists
+SupplementaryGroups=@SUPPLEMENTARY_GROUPS@
+
+# systemd reads the root-only files; the service sees per-unit copies in
+# $CREDENTIALS_DIRECTORY and cannot reach /etc/hermes-secrets itself.
+LoadCredential=client-id:/etc/hermes-secrets/google-calendar-tentative/client-id
+LoadCredential=client-secret:/etc/hermes-secrets/google-calendar-tentative/client-secret
+LoadCredential=refresh-token:/etc/hermes-secrets/google-calendar-tentative/refresh-token
+
+ExecStart=/srv/hermes/calendar-tentative/venv/bin/python /srv/hermes/calendar-tentative/app/ct_service.py --config /srv/hermes/calendar-tentative/config/config.yaml run
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TZ=Asia/Tokyo
+
+# The timer is the retry. A systemd restart would only multiply attempts.
+Restart=no
+RestartPreventExitStatus=78
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-calendar-tentative
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+# TCP for googleapis.com; AF_UNIX for the gateway socket.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=200M
+TasksMax=32
+TimeoutStartSec=300
+
+# The only writable places: its own state, and the gateway socket inode.
+ReadWritePaths=/srv/hermes/calendar-tentative/state
+ReadWritePaths=-/srv/hermes/channel-gateway/run
+# Canonical commitments, mounted read-only: the service cannot change them
+# even by accident (the code also opens them mode=ro + query_only).
+ReadOnlyPaths=/srv/hermes/hermes-data/events
+ReadOnlyPaths=-/srv/hermes/calendar/index
+# H.2's published snapshot, for the mail screen. The code selects headers,
+# labels, thread ids and the sent flag only; it never reads message bodies.
+ReadOnlyPaths=-/srv/hermes/gmail/index
+
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+InaccessiblePaths=-/srv/hermes/docker
+InaccessiblePaths=-/srv/hermes/hermes-data/.env
+InaccessiblePaths=-/srv/hermes/hermes-data/auth.json
+InaccessiblePaths=-/srv/hermes/hermes-data/sessions
+InaccessiblePaths=-/srv/hermes/hermes-data/memories
+InaccessiblePaths=-/srv/hermes/hermes-data/cron
+InaccessiblePaths=-/srv/hermes/channel-gateway/state
+InaccessiblePaths=-/srv/hermes/channel-gateway/config
+InaccessiblePaths=-/srv/hermes/calendar/state
+InaccessiblePaths=-/srv/hermes/gmail/state
+InaccessiblePaths=-/srv/hermes/gmail-event
+InaccessiblePaths=-/srv/hermes/github
+InaccessiblePaths=-/srv/hermes/attention/state
+InaccessiblePaths=-/srv/hermes/attention/config
+InaccessiblePaths=-/srv/hermes/coding-worker
+
+# No [Install] section: started only by hermes-calendar-tentative.timer.
