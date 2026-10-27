@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "projects": {
+    "handoff-protocol-check": {
+      "repository": "coding-worker-smoke-test",
+      "agent": "pi-sandbox-hermes-commandcode",
+      "spec_dir": "/opt/hermes-coding-handoff/specs/handoff-protocol-check",
+      "aliases": ["protocol-check", "route-check"],
+      "tests_command": "python3 -m unittest discover -s tests -v",
+      "allowed_paths": ["pkg/", "tests/", "README.md"],
+      "required_toolchains": ["python3", "git"],
+      "max_attempts": 3,
+      "enabled": true,
+      "acceptance_criteria": [
+        {
+          "id": "probe-module",
+          "description": "pkg/handoff_probe.py exists",
+          "verification": {
+            "kind": "file_exists",
+            "params": {"path": "pkg/handoff_probe.py"}
+          }
+        },
+        {
+          "id": "probe-entry-point",
+          "description": "route_signature is defined in pkg/handoff_probe.py",
+          "verification": {
+            "kind": "function_exists",
+            "params": {"file": "pkg/handoff_probe.py", "name": "route_signature"}
+          }
+        },
+        {
+          "id": "probe-tests",
+          "description": "the registered test command passes",
+          "verification": {"kind": "test_command", "params": {}}
+        },
+        {
+          "id": "probe-scope",
+          "description": "changes stay inside the registered write scope",
+          "verification": {"kind": "git_scope", "params": {}}
+        }
+      ],
+      "note": "Route verification only. A pass here is evidence about the handoff protocol, never about FastRawPhotoView."
+    },
+
+    "fastrawphotoview": {
+      "repository": "fastrawphotoview",
+      "agent": "pi-sandbox-hermes-commandcode",
+      "spec_dir": "/opt/hermes-coding-handoff/specs/fastrawphotoview",
+      "aliases": ["FastRawPhotoView", "frpv", "raw-browser"],
+      "tests_command": "cargo test --manifest-path src-tauri/Cargo.toml",
+      "allowed_paths": ["src-tauri/", "src/", "tests/", "package.json", "LICENSES.md", "README.md"],
+      "required_toolchains": ["python3", "git", "rustc", "cargo", "node", "npm"],
+      "max_attempts": 4,
+      "enabled": true,
+      "acceptance_criteria": [
+        {
+          "id": "tauri-workspace",
+          "description": "the Tauri/Rust workspace exists",
+          "verification": {
+            "kind": "file_exists",
+            "params": {"path": "src-tauri/Cargo.toml"}
+          }
+        },
+        {
+          "id": "nef-preview",
+          "description": "the NEF reader exposes embedded-preview extraction",
+          "verification": {
+            "kind": "artifact_contains",
+            "params": {"path": "src-tauri/src/raw/nef.rs", "text": "fn extract_preview"}
+          }
+        },
+        {
+          "id": "transport-trait",
+          "description": "one transport trait covers both SMB and FTP",
+          "verification": {
+            "kind": "artifact_contains",
+            "params": {"path": "src-tauri/src/transport/mod.rs", "text": "trait Transport"}
+          }
+        },
+        {
+          "id": "licence-record",
+          "description": "every dependency licence is recorded from package metadata",
+          "verification": {
+            "kind": "file_exists",
+            "params": {"path": "LICENSES.md"}
+          }
+        },
+        {
+          "id": "frpv-tests",
+          "description": "the registered test command passes",
+          "verification": {"kind": "test_command", "params": {}}
+        },
+        {
+          "id": "frpv-scope",
+          "description": "changes stay inside the registered write scope",
+          "verification": {"kind": "git_scope", "params": {}}
+        }
+      ],
+      "note": "Full agreed product scope. Requires rustc/cargo/node/npm in the worker image and an initial commit in the repository; until both exist, preflight refuses with a provisioning prerequisite rather than dispatching."
+    }
+  }
+}

@@ -6,6 +6,7 @@ Agent output is stored on the filesystem (logs/artifacts), never inlined.
 """
 
 import json
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
@@ -200,16 +201,34 @@ def _row_to_job(r):
     return d
 
 
+#: The shape the supervisor, the bridge and the worker all validate.
+JOB_ID_RE = re.compile(r"^job_[0-9a-f]{10}$")
+
+
 def new_id(prefix):
     return f"{prefix}_{secrets.token_hex(5)}"
 
 
 def create_job(goal, repository, acceptance_criteria, agent=None, project_id=None,
                task_id=None, parent_job_id=None, kind="implementation",
-               priority="normal", max_attempts=6, tests_command=None):
+               priority="normal", max_attempts=6, tests_command=None,
+               job_id=None):
+    """Create one job. `job_id` lets a caller supply a *deterministic* id.
+
+    J.1: the handoff broker derives a job id from the owner's authorization and
+    records it before creating anything, so that a crash between creation and
+    bookkeeping is recoverable. Passing it here makes `jobs.job_id` — a primary
+    key — the thing that enforces exactly-once, rather than the broker's own
+    bookkeeping. A duplicate raises `sqlite3.IntegrityError`, which the caller
+    is expected to read as "already created" and resolve with `get_job`.
+
+    Omitting it keeps the original behaviour: a fresh random id.
+    """
     con = connect()
     try:
-        jid = new_id("job")
+        jid = job_id or new_id("job")
+        if job_id is not None and not JOB_ID_RE.match(str(job_id)):
+            raise ValueError(f"job_id must match {JOB_ID_RE.pattern}")
         ts = now_iso()
         con.execute(
             "INSERT INTO jobs (job_id, project_id, task_id, parent_job_id, kind, goal,"

@@ -28,6 +28,7 @@ like, read on 2026-09-04 before any of this was written:
 from __future__ import annotations
 
 import logging
+import json
 
 from att_signals import (
     SIG_DUE_SOON,
@@ -44,6 +45,34 @@ from att_time import parse_iso
 log = logging.getLogger("attention.events")
 
 ACTIONABLE_TYPES = ("request", "commitment", "deadline", "follow_up")
+
+
+def retire_non_owner_backlog(con):
+    """Prevent old digest/deferred decisions from bypassing the new collector.
+
+    Append an audit decision; keep signals, delivery history and source evidence.
+    Calendar, health and coding signals use different source types.
+    """
+    from att_store import record_decision
+    rows = con.execute(
+        "SELECT s.* FROM signals s JOIN attention_decisions d ON s.signal_id=d.signal_id "
+        "WHERE s.source_type='event' AND d.decision IN ('DEFER','DIGEST') "
+        "AND d.decision_id=(SELECT MAX(decision_id) FROM attention_decisions WHERE signal_id=s.signal_id)"
+    ).fetchall()
+    count = 0
+    for row in rows:
+        try:
+            meta = json.loads(row['metadata'] or '{}')
+        except (ValueError, TypeError):
+            meta = {}
+        if (isinstance(meta, dict) and meta.get('actor') == 'user'
+                and meta.get('event_type') in {'commitment', 'deadline', 'follow_up'}
+                and not meta.get('needs_human_review')):
+            continue
+        record_decision(con, signal_id=row['signal_id'], decision='SUPPRESS',
+                        reason='owner_not_confirmed', severity=row['severity'])
+        count += 1
+    return count
 
 
 def window_label(hours: float) -> str:
@@ -132,7 +161,8 @@ def collect(cfg, clock, *, initialized_at=None) -> list:
                 d_rows = con.execute(
                     "SELECT ce.source_id FROM commitment_evidence ce "
                     "JOIN commitments c ON ce.commitment_id = c.commitment_id "
-                    "WHERE c.work_state = 'DISMISSED'"
+                    "WHERE c.work_state IN ('DISMISSED', 'DONE', 'CANCELLED', 'BLOCKED', 'WAITING') "
+                    "OR c.responsibility <> 'SELF'"
                 ).fetchall()
                 dismissed_event_ids = {str(r[0]) for r in d_rows}
             except Exception:
@@ -167,6 +197,12 @@ def collect(cfg, clock, *, initialized_at=None) -> list:
 
 
 def signals_for_event(row, cfg, clock) -> list:
+    # Proactive task reminders require a confirmed owner action. Received
+    # requests can target another group member; the speaker is not assignee.
+    if (str(row["actor"]) != "user"
+            or str(row["type"]) not in {"commitment", "deadline", "follow_up"}
+            or bool(row["needs_human_review"])):
+        return []
     ev = cfg.events
     now = clock.now()
     status = str(row["status"] or "").lower()
@@ -276,7 +312,7 @@ def signals_for_event(row, cfg, clock) -> list:
             signals.append(build(
                 SIG_WAITING_FOR_USER if waiting else SIG_NEW_COMMITMENT,
                 ("event", row["event_id"], "new"),
-                "IMPORTANT" if (waiting and confidence >=
+                "IMPORTANT" if (actionability >= float(ev["min_actionability_notify"]) and confidence >=
                                 float(ev["min_confidence_notify"])) else "INFO",
                 waiting_for_user=bool(waiting), age_days=round(age_days, 2),
             ))

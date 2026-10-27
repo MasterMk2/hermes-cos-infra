@@ -31,6 +31,7 @@ the rest. That is the whole of section 12's "the gateway is not an agent".
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 
 import discord
@@ -94,6 +95,15 @@ class InterfaceBot(discord.Client):
         # Resolved lazily by `owner_dm_channel`, cleared whenever opening it
         # fails so a transient error cannot pin a broken handle forever.
         self._owner_dm = None
+        # Intake commits, in dispatch order. Each DM is its own task; with the
+        # SQLite work on the shared pool, two DMs sent back to back could
+        # commit (and be claimed) in either order. One worker thread runs jobs
+        # in submission order, and nothing awaits before the submission in
+        # _handle. A job is queued at dispatch, not parked behind a lock, so a
+        # shutdown that cancels the DM's task still lets it commit: queued
+        # jobs run before the interpreter exits.
+        self._intake = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="discord-intake")
 
     # -- lifecycle -----------------------------------------------------
 
@@ -151,6 +161,20 @@ class InterfaceBot(discord.Client):
             )
             return
 
+        # SQLite work runs in a thread. On the event loop it shares the thread
+        # with discord.py's gateway heartbeat, and a slow USB write once held
+        # that heartbeat long enough to risk a shard reconnect.
+        job = asyncio.get_running_loop().run_in_executor(self._intake, self._record,
+                                                         canonical)
+        # Shielded: cancelling this task must not withdraw a queued commit.
+        outcome = await asyncio.shield(job)
+        if outcome == "not_owner":
+            log.info("dropped non-owner DM from %s", message.author.id)
+        elif outcome == "queued":
+            self.wake.set()
+
+    def _record(self, canonical) -> str:
+        """Durably record one DM. Returns 'queued', 'duplicate' or 'not_owner'."""
         con = open_db(self.db_path)
         try:
             request_id, is_new = store.record_inbound(con, canonical)
@@ -162,22 +186,20 @@ class InterfaceBot(discord.Client):
                             platform=PLATFORM_DISCORD, authenticated=False,
                             detail="not_owner")
                 con.commit()
-                log.info("dropped non-owner DM from %s", message.author.id)
-                return
+                return "not_owner"
             if not is_new:
                 store.audit(con, "inbound_duplicate", request_id=request_id,
                             platform=PLATFORM_DISCORD, detail="dedupe")
                 con.commit()
-                return
+                return "duplicate"
             store.enqueue(con, request_id)
             store.audit(con, "inbound_queued", request_id=request_id,
                         platform=PLATFORM_DISCORD, authenticated=True,
                         capability_profile=canonical.capability_profile)
             con.commit()
+            return "queued"
         finally:
             con.close()
-
-        self.wake.set()
 
     # -- outbound ------------------------------------------------------
 
@@ -196,6 +218,23 @@ class InterfaceBot(discord.Client):
         except Exception as exc:  # lookup failed before any channel.send
             return 0, f"channel_unavailable:{type(exc).__name__}"
         return await self._send_to(channel, chunks)
+
+    async def typing_once(self, channel_id) -> bool:
+        """Show "typing…" in a DM for a few seconds. Best effort, no state.
+
+        One POST to Discord's typing endpoint (`await channel.typing()` in
+        discord.py 2.x). It creates no message, so repeating it after a
+        restart is harmless, and Discord clears it when the reply arrives.
+        Any failure is swallowed: the indicator must never affect the reply.
+        """
+        try:
+            channel = self.get_channel(int(channel_id)) or \
+                await self.fetch_channel(int(channel_id))
+            await channel.typing()
+            return True
+        except Exception as exc:
+            log.debug("typing indicator skipped: %s", type(exc).__name__)
+            return False
 
     async def owner_dm_channel(self):
         """The DM channel with the configured owner, opened if it is not open.

@@ -71,8 +71,18 @@ hermes:
   # absolute timeout does not change that — it only decides how long a slow
   # answer is waited for before the user is told it gave up.
   soft_timeout_seconds: 45
-  absolute_timeout_seconds: 240
+  # 2026-10-27: real DM turns ran past the old 240 s budget; the gateway gave
+  # up on the run and anything Hermes produced after that was thrown away
+  # (why Hermes was that slow: docs/HERMES-TIMEOUTS.md). The wait is now
+  # durable: the run id is stored
+  # first, the deadline is measured from the run's start across restarts, the
+  # claim is renewed every heartbeat, and a late answer is the one reply.
+  # Must stay <= 840 (attention queue_stuck is 900 s).
+  absolute_timeout_seconds: 480
   poll_interval_seconds: 2
+  poll_request_timeout_seconds: 10
+  heartbeat_seconds: 60
+  unavailable_grace_seconds: 90
   session_prefix: gw
 
 limits:

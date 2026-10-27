@@ -135,6 +135,7 @@ docker-compose.yaml / docker-compose-stageB.yaml は template / snapshot
 | 13 | [docs/18-phase-i1-production-event-profiling.md](docs/18-phase-i1-production-event-profiling.md) / [production closeout](docs/19-phase-i1s-unified-commitments-production-closeout.md) | I.1 / I.1-S（当時の完了記録） |
 | - | [docs/STATUS-RECONCILIATION.md](docs/STATUS-RECONCILIATION.md) | I.2実装・後続作業記録・現在未確認の運用状態を分離した照合 |
 | - | [docs/CALENDAR-TENTATIVE.md](docs/CALENDAR-TENTATIVE.md) | commitments → 専用サブカレンダーへの自動仮登録（未配備） |
+| - | [docs/HERMES-TIMEOUTS.md](docs/HERMES-TIMEOUTS.md) | 2026-10-27 の応答タイムアウト: Gateway の修正と Pi 用の読み取り専用診断（未配備） |
 | - | [docs/lessons-learned.md](docs/lessons-learned.md) | 実測で見つかった落とし穴と修正 |
 
 ## Code Snapshot (`src/`)

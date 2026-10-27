@@ -419,8 +419,8 @@ class TestSourceToggles(unittest.TestCase):
 def _event_row(**over):
     """A row shaped like the Event Layer's `events` table."""
     base = {
-        "event_id": "evt_test", "type": "request", "subtype": None,
-        "summary": "テスト依頼", "actor": "counterparty",
+        "event_id": "evt_test", "type": "commitment", "subtype": None,
+        "summary": "テスト依頼", "actor": "user",
         "counterparty": "だれか", "status": "open",
         "actionability": 0.8, "importance": 0.6, "urgency": 0.6,
         "confidence": 0.9, "occurred_at": None, "due_at": None,

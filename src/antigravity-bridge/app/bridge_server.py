@@ -4,10 +4,12 @@ Exposes an OpenAI-compatible HTTP interface to the official Google Antigravity C
 running natively on Raspberry Pi 4 (aarch64).
 """
 
+import errno
 import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -59,6 +61,75 @@ class BridgeMetrics:
 
 metrics = BridgeMetrics()
 
+# Linux MAX_ARG_STRLEN: a single argv string longer than this fails execve with
+# E2BIG. The prompt goes to the CLI as one argument (--print), so a long-lived
+# session whose history passes this cannot be executed at all.
+ARGV_MAX_BYTES = 131072
+# How long to wait for the CLI's pipes to close after killing it on a timeout.
+CLI_KILL_GRACE_SECONDS = 5
+# Fixed vocabulary read from a timed-out CLI's partial stderr. Only the flag
+# names are logged, never the text: stderr can echo the prompt.
+STDERR_FLAGS = (
+    ("rate_limited", re.compile(r"resource exhausted|quota|rate.?limit|\b429\b", re.I)),
+    ("retrying", re.compile(r"retry|retrying|backoff", re.I)),
+    ("auth", re.compile(r"not logged in|sign in|unauthori[sz]ed|\b401\b", re.I)),
+    ("overloaded", re.compile(r"overloaded|unavailable|\b503\b", re.I)),
+    ("upstream_timeout", re.compile(r"deadline|timed? ?out", re.I)),
+)
+_MODEL_SAFE = re.compile(r"[^A-Za-z0-9._:/-]")
+
+
+def stderr_flags(stderr) -> str:
+    """Content-free summary of a CLI's stderr: matching flag names only."""
+    if not isinstance(stderr, str) or not stderr:
+        return "none"
+    found = [name for name, rx in STDERR_FLAGS if rx.search(stderr)]
+    return ",".join(found) or "none"
+
+
+def _kill_group(proc) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+def run_cli(cmd: List[str], timeout: float) -> subprocess.CompletedProcess:
+    """subprocess.run, except that a timeout kills the CLI's whole process group.
+
+    subprocess.run kills only the direct child. Whatever the CLI started (its
+    MCP servers, a node runtime) would keep running on the Pi after the 504
+    and compete with the next call for memory and CPU.
+    """
+    # errors="replace": a CLI killed mid-write can leave half a UTF-8
+    # character in the pipe, and a strict decode would turn the timeout into
+    # an internal error.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace",
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        try:
+            out, err = proc.communicate(timeout=CLI_KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            # A descendant that left the group still holds the pipes.
+            out, err = "", ""
+            for pipe in (proc.stdout, proc.stderr):
+                pipe.close()
+            proc.wait()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    except BaseException:
+        _kill_group(proc)
+        proc.wait()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
 
 def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     """Format OpenAI messages into a clean prompt string for Antigravity CLI."""
@@ -92,6 +163,26 @@ def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     return chr(10).join(lines).strip()
 
 
+def execute_routed(messages, prompt, config, model):
+    """Complex reasoning tries native CLIs; ordinary and unavailable paths keep MCP."""
+    from dataclasses import replace
+    from premium_routing import should_try_premium, try_premium
+    if should_try_premium(messages, config.premium_cli_enabled):
+        started = time.monotonic()
+        # Preserve at least 15 seconds of the existing request budget for the
+        # normal source/tool backend if the premium route cannot answer.
+        budget = min(config.premium_cli_timeout_seconds, max(0, config.timeout_seconds - 15))
+        data, status = try_premium(messages, endpoint=config.premium_cli_endpoint,
+                                   token=config.premium_cli_token, timeout_seconds=budget)
+        logger.info('premium_cli status=%s', status)
+        if data is not None:
+            metrics.successful_requests += 1
+            metrics.last_latency_seconds = time.monotonic() - started
+            return 200, data
+        config = replace(config, timeout_seconds=max(1, config.timeout_seconds - (time.monotonic() - started)))
+    return execute_antigravity(prompt=prompt, config=config, model=model)
+
+
 def classify_cli_error(returncode: int, stdout: str, stderr: str) -> Tuple[int, str, str]:
     """Classify Antigravity CLI errors into HTTP status code, error type, and message."""
     combined = (stdout + chr(10) + stderr).lower()
@@ -120,7 +211,30 @@ def execute_antigravity(
     model: Optional[str] = None,
     json_schema: Optional[str] = None,
 ) -> Tuple[int, Dict[str, Any]]:
-    """Execute Antigravity CLI non-interactively and return OpenAI-compatible result or error dict."""
+    """Execute Antigravity CLI non-interactively and return OpenAI-compatible result or error dict.
+
+    Every call leaves one content-free log line (model, status, outcome,
+    duration, prompt size) so a slow Hermes turn can be split into bridge
+    calls afterwards; before this only failures were logged.
+    """
+    start = time.monotonic()
+    status_code, body = _execute_antigravity(prompt, config, model, json_schema)
+    error = body.get("error") if isinstance(body, dict) else None
+    logger.info(
+        "cli call model=%s status=%d outcome=%s duration=%.1fs prompt_bytes=%d",
+        _MODEL_SAFE.sub("?", str(model or config.default_model))[:64], status_code,
+        error.get("type", "error") if isinstance(error, dict) else "ok",
+        time.monotonic() - start, len(prompt.encode("utf-8", "replace")),
+    )
+    return status_code, body
+
+
+def _execute_antigravity(
+    prompt: str,
+    config: BridgeConfig,
+    model: Optional[str] = None,
+    json_schema: Optional[str] = None,
+) -> Tuple[int, Dict[str, Any]]:
     selected_model = model or config.default_model
     
     cmd = [
@@ -136,12 +250,7 @@ def execute_antigravity(
 
     start_t = time.time()
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-        )
+        proc = run_cli(cmd, config.timeout_seconds)
         duration = time.time() - start_t
         metrics.last_latency_seconds = duration
         
@@ -207,16 +316,41 @@ def execute_antigravity(
         metrics.successful_requests += 1
         return 200, res
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         metrics.failed_requests += 1
         err_msg = f"Antigravity CLI timed out after {config.timeout_seconds}s"
         metrics.last_error = err_msg
-        logger.error(err_msg)
+        partial = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        logger.error("%s (stderr flags=%s, %d chars)", err_msg, stderr_flags(partial),
+                     len(partial) if isinstance(partial, str) else 0)
         return 504, {
             "error": {
                 "message": err_msg,
                 "type": "timeout",
                 "code": 504,
+            }
+        }
+    except OSError as e:
+        metrics.failed_requests += 1
+        if e.errno == errno.E2BIG:
+            size = len(prompt.encode("utf-8", "replace"))
+            err_msg = (f"Antigravity CLI prompt too large to execute: {size} bytes"
+                       f" (one argument may not exceed {ARGV_MAX_BYTES})")
+            err_type = "prompt_too_large"
+        else:
+            # strerror only: str(e) carries the binary path, and last_error is
+            # served on /health.
+            err_msg = f"Bridge could not run the Antigravity CLI: {e.strerror or type(e).__name__}"
+            err_type = "internal_error"
+        metrics.last_error = err_msg
+        logger.error(err_msg)
+        # Still a 500: what Hermes does on a 500 (fall back to the next
+        # provider) is unchanged by this classification.
+        return 500, {
+            "error": {
+                "message": err_msg,
+                "type": err_type,
+                "code": 500,
             }
         }
     except Exception as e:
@@ -408,7 +542,8 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": {"message": "No prompt content found in messages", "code": 400}})
                 return
 
-            status_code, response_data = execute_antigravity(
+            status_code, response_data = execute_routed(
+                messages=messages,
                 prompt=prompt,
                 config=self.config,
                 model=model,
@@ -417,7 +552,7 @@ class AntigravityRequestHandler(BaseHTTPRequestHandler):
                 choices = response_data.get("choices", [])
                 content = choices[0].get("message", {}).get("content", "") if choices else ""
                 usage = response_data.get("usage", {})
-                self._send_sse_stream(content, model, usage)
+                self._send_sse_stream(content, response_data.get('model', model), usage)
                 return
 
             self._send_json(status_code, response_data)

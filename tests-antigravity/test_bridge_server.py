@@ -93,7 +93,7 @@ class TestAntigravityExecution(unittest.TestCase):
             timeout_seconds=5,
         )
 
-    @patch("subprocess.run")
+    @patch("bridge_server.run_cli")
     def test_successful_execution(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -111,7 +111,7 @@ class TestAntigravityExecution(unittest.TestCase):
         self.assertEqual(res["choices"][0]["message"]["content"], "Hello from Gemini 3.8 Flash!")
         self.assertEqual(res["usage"]["total_tokens"], 120)
 
-    @patch("subprocess.run")
+    @patch("bridge_server.run_cli")
     def test_malformed_json_handling(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -124,7 +124,7 @@ class TestAntigravityExecution(unittest.TestCase):
         self.assertIn("error", res)
         self.assertEqual(res["error"]["type"], "invalid_response")
 
-    @patch("subprocess.run")
+    @patch("bridge_server.run_cli")
     def test_denied_actions_handling(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -141,6 +141,100 @@ class TestAntigravityExecution(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn("strictly read-only assistant", res["choices"][0]["message"]["content"])
         self.assertIn("RunCommand", res["choices"][0]["message"]["content"])
+
+
+class TestCliObservability(unittest.TestCase):
+    """What the bridge leaves behind for diagnosing a slow Hermes turn."""
+
+    def setUp(self):
+        self.cfg = BridgeConfig(binary_path="/sensitive/host/path/antigravity",
+                                default_model="gemini-3.8-flash-medium", timeout_seconds=5)
+
+    @patch("bridge_server.run_cli")
+    def test_every_call_logs_one_content_free_line(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = json.dumps({"response": "ok", "usage": {}})
+        mock_proc.stderr = ""
+        mock_run.return_value = mock_proc
+        prompt = "User: \u79d8\u5bc6\u306e\u76f8\u8ac7"
+        with self.assertLogs("antigravity-bridge", level="INFO") as caught:
+            code, _ = execute_antigravity(prompt, self.cfg)
+        self.assertEqual(code, 200)
+        calls = [line for line in caught.output if "cli call" in line]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("status=200 outcome=ok", calls[0])
+        self.assertIn(f"prompt_bytes={len(prompt.encode('utf-8'))}", calls[0])
+        self.assertNotIn(prompt, "\n".join(caught.output))
+
+    @patch("bridge_server.run_cli")
+    def test_a_timeout_logs_stderr_flags_not_stderr(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            ["antigravity"], 5, stderr="429 rate limit, retrying: User: private words")
+        with self.assertLogs("antigravity-bridge", level="INFO") as caught:
+            code, res = execute_antigravity("User: private words", self.cfg)
+        self.assertEqual(code, 504)
+        self.assertEqual(res["error"]["type"], "timeout")
+        text = "\n".join(caught.output)
+        self.assertIn("timed out after 5s (stderr flags=rate_limited,retrying", text)
+        self.assertIn("outcome=timeout", text)
+        self.assertNotIn("private words", text)
+
+    def test_an_oversized_prompt_is_reported_as_such_without_the_binary_path(self):
+        cfg = BridgeConfig(binary_path="/bin/true", timeout_seconds=5)
+        prompt = "x" * 200000          # one argv string over MAX_ARG_STRLEN
+        code, res = execute_antigravity(prompt, cfg)
+        self.assertEqual(code, 500)    # unchanged, so Hermes still falls back
+        self.assertEqual(res["error"]["type"], "prompt_too_large")
+        self.assertIn("200", res["error"]["message"])
+        self.assertNotIn("/bin/true", res["error"]["message"])
+
+    @patch("bridge_server.run_cli")
+    def test_other_exec_failures_do_not_leak_the_binary_path(self, mock_run):
+        mock_run.side_effect = FileNotFoundError(2, "No such file or directory",
+                                                 "/sensitive/host/path/antigravity")
+        code, res = execute_antigravity("hi", self.cfg)
+        self.assertEqual(code, 500)
+        self.assertNotIn("/sensitive", res["error"]["message"])
+
+    @unittest.skipUnless(os.path.exists("/bin/sh"), "needs /bin/sh")
+    def test_a_timeout_mid_character_is_still_a_timeout(self):
+        from bridge_server import run_cli
+
+        script = "printf 'progress \\343\\201' >&2; sleep 30"
+        with patch("bridge_server.run_cli",
+                   lambda cmd, timeout: run_cli(["/bin/sh", "-c", script], 1)):
+            code, res = execute_antigravity("hi", self.cfg)
+        self.assertEqual(code, 504)
+        self.assertEqual(res["error"]["type"], "timeout")
+
+    @unittest.skipUnless(os.path.exists("/bin/sh") and os.path.isdir("/proc"), "needs /bin/sh and /proc")
+    def test_a_timeout_kills_what_the_cli_started(self):
+        import tempfile
+        import time
+        from bridge_server import run_cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "pid")
+            script = f"sleep 60 & echo $! > {pidfile}; wait"
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_cli(["/bin/sh", "-c", script], 1)
+            self.assertLess(time.monotonic() - started, 30)
+            with open(pidfile) as fh:
+                child = int(fh.read().strip())
+
+        def alive(pid):
+            try:
+                with open(f"/proc/{pid}/stat") as fh:
+                    return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+            except FileNotFoundError:
+                return False
+
+        deadline = time.monotonic() + 5
+        while alive(child) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(alive(child), "the CLI's own child outlived the timeout")
 
 
 class TestRequestHandlerDelegation(unittest.TestCase):
