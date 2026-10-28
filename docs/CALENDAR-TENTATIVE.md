@@ -356,8 +356,9 @@ Hermes の主モデル（Antigravity bridge）は、自分の MCP サーバー�
    `mcp(tentative/calendar_tentative_add)`、`mcp(tentative/calendar_tentative_list)`
 4. `sudo systemctl restart hermes-antigravity.service`
 
-bridge の unit は `ProtectSystem=strict` だが、読み取り専用の場所にあるソケットにも接続はできる
-（`RestrictAddressFamilies` の指定はない）。ソケットに接続できるのは `hermesantigravity` グループだけ。
+bridge の unit は `ProtectSystem=strict` だが、Unix ソケットへの接続は読み取り専用のマウント越しでもできるはずで、
+`RestrictAddressFamilies` の指定もない（実機では未確認。同じ制限の一時 unit から接続して確かめる）。
+ソケットに接続できるのは `hermesantigravity` グループだけ。
 
 戻すとき: ソケットを止める（`systemctl disable --now hermes-calendar-tentative-request.socket`）だけで、
 ツールは「仮登録の仕組みに届きませんでした」と返すようになる。登録自体を消すなら 2・3 のバックアップを戻して再起動。
