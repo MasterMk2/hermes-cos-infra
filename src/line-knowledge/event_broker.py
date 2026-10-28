@@ -38,6 +38,8 @@ logger = logging.getLogger("classifier-broker")
 SOCKET_PATH = Path(os.environ.get("HERMES_CLASSIFIER_SOCK", "/run/hermes/classifier.sock"))
 BRIDGE_URL = os.environ.get("HERMES_BRIDGE_URL", "http://172.18.0.1:8765/v1/chat/completions")
 BRIDGE_CONFIG_PATH = Path(os.environ.get("HERMES_BRIDGE_CONFIG", "/srv/hermes/antigravity/config/bridge.yaml"))
+# bridge_config.BridgeConfig.auth_token_file's default
+BRIDGE_TOKEN_FILE = "/srv/hermes/antigravity/secrets/bridge.token"
 MODEL = "gemini-3.8-flash-medium"
 MAX_PAYLOAD_BYTES = 32768
 TIMEOUT_SECONDS = 45.0
@@ -106,34 +108,38 @@ DISCORD_CLASSIFIER_SYSTEM = DISCORD_PROMPT_PREFIX + LINE_CLASSIFIER_SYSTEM + DIS
 
 
 def load_bearer_token() -> str:
-    """Load internal bearer token from bridge config without exposing to client."""
+    """Load the bearer token from where the bridge itself reads it.
+
+    Same order as bridge_config.load_config: auth_token in bridge.yaml, else
+    the file its auth_token_file names. The broker runs as the bridge's user,
+    so it can read that file, and it no longer needs the Hermes config.yaml,
+    which the hermes-data binds hide from it.
+    """
     token = os.environ.get("HERMES_BRIDGE_TOKEN", "").strip()
     if token:
         return token
+    cfg = {}
     try:
         if BRIDGE_CONFIG_PATH.is_file():
             import yaml
             with open(BRIDGE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-                if isinstance(cfg, dict):
-                    t = cfg.get("auth_token", "").strip()
-                    if t:
-                        return t
-    except (PermissionError, OSError, Exception) as e:
-        logger.debug(f"Bridge config path unreadable: {e}")
-    # Fallback to reading /srv/hermes/hermes-data/config.yaml default_headers
-    data_cfg = Path("/srv/hermes/hermes-data/config.yaml")
+                cfg = yaml.safe_load(f) or {}
+    except Exception as e:
+        raise RuntimeError(f"Could not read {BRIDGE_CONFIG_PATH}: {type(e).__name__}") from e
+    if not isinstance(cfg, dict):
+        raise RuntimeError(f"{BRIDGE_CONFIG_PATH} is not a mapping")
+    token = str(cfg.get("auth_token") or "").strip()
+    if token:
+        return token
+    token_file = str(cfg.get("auth_token_file", BRIDGE_TOKEN_FILE))
     try:
-        if data_cfg.is_file():
-            import yaml
-            with open(data_cfg, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-                auth = cfg.get("model", {}).get("default_headers", {}).get("Authorization", "")
-                if auth.startswith("Bearer "):
-                    return auth[7:].strip()
-    except Exception:
-        pass
-    raise RuntimeError(f"Could not load Bearer token from {BRIDGE_CONFIG_PATH} or {data_cfg}")
+        with open(token_file, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+    except OSError as e:
+        raise RuntimeError(f"Could not read the bridge token file {token_file}: {type(e).__name__}") from e
+    if not token:
+        raise RuntimeError(f"The bridge token file {token_file} is empty")
+    return token
 
 
 BEARER_TOKEN = ""
