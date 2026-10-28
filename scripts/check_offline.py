@@ -22,7 +22,8 @@ def main():
             ("tests-attention", "src/attention/app"),
             ("tests-planning", "src"),
             ("tests-calendar-tentative", "src/calendar-tentative/app"),
-            ("tests-line-knowledge", "src/line-knowledge")):
+            ("tests-line-knowledge", "src/line-knowledge"),
+            ("tests-gmail", "src/gmail/app")):
         env = os.environ.copy()
         # Explicit paths, no user/site pytest plugins or inherited pytest flags.
         env["PYTHONPATH"] = os.pathsep.join(str(ROOT / p) for p in
