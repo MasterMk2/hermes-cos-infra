@@ -111,9 +111,12 @@ def load_bearer_token() -> str:
     """Load the bearer token from where the bridge itself reads it.
 
     Same order as bridge_config.load_config: auth_token in bridge.yaml, else
-    the file its auth_token_file names. The broker runs as the bridge's user,
-    so it can read that file, and it no longer needs the Hermes config.yaml,
-    which the hermes-data binds hide from it.
+    the file its auth_token_file names. It no longer needs the Hermes
+    config.yaml, which the hermes-data binds hide from it.
+
+    On the host the broker cannot read bridge.yaml: it is root:hermesantigravity
+    0640 and the broker runs with group hermesreconcile. The default token file
+    is owned by the broker's user, so that case falls back to it.
     """
     token = os.environ.get("HERMES_BRIDGE_TOKEN", "").strip()
     if token:
@@ -124,6 +127,8 @@ def load_bearer_token() -> str:
             import yaml
             with open(BRIDGE_CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
+    except PermissionError:
+        logger.info(f"{BRIDGE_CONFIG_PATH} is not readable; using {BRIDGE_TOKEN_FILE}")
     except Exception as e:
         raise RuntimeError(f"Could not read {BRIDGE_CONFIG_PATH}: {type(e).__name__}") from e
     if not isinstance(cfg, dict):

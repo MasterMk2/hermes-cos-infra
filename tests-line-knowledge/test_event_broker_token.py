@@ -76,6 +76,27 @@ class LoadBearerTokenTests(unittest.TestCase):
         self.write_token(self.default_file, "from-default-file")
         self.assertEqual(event_broker.load_bearer_token(), "from-default-file")
 
+    def test_unreadable_bridge_yaml_falls_back_to_the_default_file(self):
+        # The host case: bridge.yaml is 0640 for a group the broker lacks.
+        self.write_yaml("auth_token_file: /elsewhere/bridge.token\n")
+        self.write_token(self.default_file, "from-default-file")
+        real_open = open
+
+        def denying_open(file, *args, **kwargs):
+            if str(file) == str(self.yaml_path):
+                raise PermissionError(13, "Permission denied", str(file))
+            return real_open(file, *args, **kwargs)
+
+        with patch("builtins.open", denying_open):
+            self.assertEqual(event_broker.load_bearer_token(), "from-default-file")
+
+    def test_untraversable_config_dir_falls_back_to_the_default_file(self):
+        # Python 3.13's Path.is_file raises on EACCES; 3.14 returns False.
+        self.write_token(self.default_file, "from-default-file")
+        with patch.object(type(self.yaml_path), "is_file",
+                          side_effect=PermissionError(13, "Permission denied")):
+            self.assertEqual(event_broker.load_bearer_token(), "from-default-file")
+
     def test_missing_token_file_is_an_error(self):
         self.write_yaml("port: 8765\n")
         with self.assertRaisesRegex(RuntimeError, "bridge token file"):
