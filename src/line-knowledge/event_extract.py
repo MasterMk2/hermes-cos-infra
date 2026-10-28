@@ -447,11 +447,8 @@ def main():
     # deterministic no-candidate bookkeeping (no LLM)
     cand_ids = {c["source_id"] for c in candidates} | {c["source_id"] for c in deferred}
     ts_by_id = {r.get("message_id"): r["sent_at"] for r in recs}
-    fresh_ids = {
-        r.get("message_id") for r in recs if r.get("message_id") not in {
-            p[0] for p in con.execute("SELECT source_id FROM processed_messages")
-        }
-    }
+    processed_ids = {p[0] for p in con.execute("SELECT source_id FROM processed_messages")}
+    fresh_ids = {r.get("message_id") for r in recs if r.get("message_id") not in processed_ids}
     no_candidate_ids = fresh_ids - cand_ids
 
     llm_ok = True
