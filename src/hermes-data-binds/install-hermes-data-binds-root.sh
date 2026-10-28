@@ -12,12 +12,17 @@
 #   sudo bash install-hermes-data-binds-root.sh rollback
 #
 # Prints access results and counts only; never message bodies or titles.
+#
+# hermes-classifier-broker is not covered. It reads the bridge bearer token
+# from /srv/hermes/hermes-data/config.yaml (0640, group hermesreconcile), so
+# hiding that file stopped it from starting (2026-10-28). It needs its own fix
+# first: read the token from where the bridge reads it, or bind config.yaml.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DROPIN=30-hermes-data-binds.conf
-UNITS=(hermes-morning-brief hermes-line-reconcile hermes-classifier-broker hermes-calendar hermes-antigravity)
-LONG_RUNNING=(hermes-classifier-broker hermes-calendar hermes-antigravity)
+UNITS=(hermes-morning-brief hermes-line-reconcile hermes-calendar hermes-antigravity)
+LONG_RUNNING=(hermes-calendar hermes-antigravity)
 PROBE=/run/hermes-data-binds-probe.py
 BACKUP_ROOT=/srv/hermes/backups
 
@@ -76,9 +81,6 @@ CHECKS = {
     ("events.db open r+b", lambda: rw(f"{H}/events/events.db"), True),
     ("logs/line-reconcile.log append-open", lambda: append(f"{H}/logs/line-reconcile.log"), True),
     ("logs/line-refresh.log read", lambda: read(f"{H}/logs/line-refresh.log"), False),
-  ],
-  "hermes-classifier-broker": [
-    ("tools/events/event_broker.py read", lambda: read(f"{H}/tools/events/event_broker.py"), True),
   ],
   "hermes-calendar": [
     ("events.db read", lambda: sq(f"{H}/events/events.db", "commitments"), True),
@@ -229,7 +231,7 @@ cmd_restart() {
     ns_probe "$u" || bad=1
   done
   step "functional checks"
-  ls -la /run/hermes/classifier.sock 2>&1 | sed 's/^/  /'
+  ls -la /run/hermes/classifier.sock 2>&1 | sed 's/^/  /' || bad=1
   python3 - <<'PY' || bad=1
 import urllib.request
 try:
