@@ -115,6 +115,13 @@ STDERR_FLAGS = (
     ("upstream_timeout", re.compile(r"deadline|timed? ?out", re.I)),
 )
 _MODEL_SAFE = re.compile(r"[^A-Za-z0-9._:/-]")
+# What the owner reads when the CLI refused every write and wrote no answer of
+# its own. It reaches the Discord DM verbatim, so it is plain Japanese and names
+# no tool; the refused action names go to the log instead.
+DENIED_REPLY = (
+    "ごめんなさい、それはこのチャットからはできない操作でした。"
+    "ここでは調べることと、下書きやまとめを作ることならできます。"
+)
 
 
 def stderr_flags(stderr) -> str:
@@ -354,7 +361,8 @@ def _execute_antigravity(
         denied = cli_out.get("denied_actions", [])
         if not response_text and denied:
             denied_names = ", ".join(d.get("display_name", d.get("action", "unknown")) for d in denied)
-            response_text = f"I am a strictly read-only assistant. I do not have permission to perform mutation actions ({denied_names})."
+            logger.info(f"cli denied actions with no response: {denied_names}")
+            response_text = DENIED_REPLY
 
         usage_info = cli_out.get("usage", {})
         

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from bridge_config import BridgeConfig
 from bridge_server import (
+    DENIED_REPLY,
     classify_cli_error,
     execute_antigravity,
     format_messages_to_prompt,
@@ -137,10 +138,31 @@ class TestAntigravityExecution(unittest.TestCase):
         mock_proc.stderr = ""
         mock_run.return_value = mock_proc
 
-        code, res = execute_antigravity("Run a shell command", self.cfg)
+        with self.assertLogs("antigravity-bridge", level="INFO") as caught:
+            code, res = execute_antigravity("Run a shell command", self.cfg)
         self.assertEqual(code, 200)
-        self.assertIn("strictly read-only assistant", res["choices"][0]["message"]["content"])
-        self.assertIn("RunCommand", res["choices"][0]["message"]["content"])
+        content = res["choices"][0]["message"]["content"]
+        # The owner gets Japanese with no tool name; the name is in the log.
+        self.assertEqual(content, DENIED_REPLY)
+        self.assertNotIn("RunCommand", content)
+        self.assertTrue(any("RunCommand" in line for line in caught.output))
+
+    @patch("bridge_server.run_cli")
+    def test_denied_actions_keep_the_models_own_answer(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = json.dumps({
+            "response": "カレンダーには書き込めないので、候補の一覧を出しますね。",
+            "denied_actions": [{"action": "command", "display_name": "RunCommand"}],
+            "usage": {},
+        })
+        mock_proc.stderr = ""
+        mock_run.return_value = mock_proc
+
+        code, res = execute_antigravity("予定を登録して", self.cfg)
+        self.assertEqual(code, 200)
+        self.assertEqual(res["choices"][0]["message"]["content"],
+                         "カレンダーには書き込めないので、候補の一覧を出しますね。")
 
 
 class TestCliObservability(unittest.TestCase):
