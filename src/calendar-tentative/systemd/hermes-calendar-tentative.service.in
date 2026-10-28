@@ -1,9 +1,9 @@
 # Hermes calendar tentative registration — one run per timer tick.
 #
 # WHAT THIS SERVICE HOLDS: one Google refresh token whose only scope is
-# calendar.app.created. With it the service can manage the secondary calendar
-# it created and nothing else — not the owner's primary calendar, not any
-# other calendar, not Gmail. It holds no Discord or LINE token and no
+# calendar.events.owned: events on calendars the owner owns, and nothing
+# else — no calendar settings or sharing, not Gmail. The service writes only
+# 【仮】 entries it created on the primary calendar, by ids it derived itself. It holds no Discord or LINE token and no
 # recipient: the optional owner digest goes through the channel gateway's
 # unix socket, which fixes the recipient itself.
 

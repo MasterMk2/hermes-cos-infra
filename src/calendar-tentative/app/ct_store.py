@@ -20,7 +20,7 @@ ahead claim and the hold it becomes when the answer is lost.
     UNKNOWN      the insert may have happened. Resolved only by asking Google
                  for the exact event id; never by inserting again blindly.
     ACTIVE       the tentative event exists and is still ours.
-    CONFIRMED    the owner moved it onto one of their own calendars.  final
+    CONFIRMED    the owner took the 【仮】 off the title.               final
     REJECTED     the owner deleted it. Never proposed again.              final
     USER_EDITED  the owner changed it. We never touch it again.           final
     WITHDRAWN    we removed it: the commitment resolved or Calendar got

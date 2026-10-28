@@ -41,9 +41,11 @@ from ct_google import ApiError  # noqa: E402
 
 JST = ZoneInfo("Asia/Tokyo")
 NOW = datetime(2026, 10, 1, 9, 0, tzinfo=JST)
-CALENDAR_ID = "tentative-test@group.calendar.google.com"
+CALENDAR_ID = "primary"
 OWNER_CALENDAR_ID = "owner-main@group.calendar.google.com"
 OWNER_ADDRESS = "owner@example.com"
+#: How H.1 names the primary calendar in its snapshot: the owner's address.
+H1_PRIMARY_ID = OWNER_ADDRESS
 
 RAW_EVENTS_SQL = """
 CREATE TABLE IF NOT EXISTS events (
@@ -276,10 +278,16 @@ class FakeCalendar:
             current["etag"] = self._next_etag()
         return self._run("delete", apply)
 
-    def list_events(self, calendar_id):
+    def list_events(self, calendar_id, *, private_property):
         self._check_calendar(calendar_id)
-        self.calls.append(("list", None))
-        return self._run("list", lambda: [copy.deepcopy(v) for v in self.events.values()])
+        self.calls.append(("list", private_property))
+        key, _, value = private_property.partition("=")
+
+        def marked(event):
+            private = (event.get("extendedProperties") or {}).get("private") or {}
+            return private.get(key) == value
+        return self._run("list", lambda: [copy.deepcopy(v) for v in self.events.values()
+                                          if marked(v)])
 
     def verbs(self):
         return [verb for verb, _ in self.calls]
@@ -297,3 +305,8 @@ class FakeCalendar:
     def owner_move_away(self, event_id):
         """Moved to another calendar: gone from this one entirely."""
         return self.events.pop(event_id)
+
+    def owner_add(self, event_id, summary):
+        """An event of the owner's own on the same (primary) calendar."""
+        self.events[event_id] = {"id": event_id, "summary": summary, "status": "confirmed",
+                                 "etag": self._next_etag()}

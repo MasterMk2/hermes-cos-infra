@@ -139,11 +139,11 @@ Installed. Nothing is authorized, created or scheduled yet. Next, as root:
  1. Reuse H.1's Desktop OAuth client (or create another):
       install -m 0400 -o root -g root $H1_SECRET_DIR/client-id     $SECRET_DIR/client-id
       install -m 0400 -o root -g root $H1_SECRET_DIR/client-secret $SECRET_DIR/client-secret
- 2. Authorize (scope: calendar.app.created only) and create the calendar,
-    through an SSH forward:  ssh -L 8766:127.0.0.1:8766 <pi>
-      $ROOT/venv/bin/python $ROOT/app/ct_oauth.py --create-calendar "Hermes 仮登録"
- 3. Put the printed id in $ROOT/config/config.yaml -> calendar.calendar_id
-    (never add it to H.1's calendars.selected_ids).
+ 2. Authorize (scope: calendar.events.owned only) through an SSH forward:
+      ssh -L 8766:127.0.0.1:8766 <pi>
+      $ROOT/venv/bin/python $ROOT/app/ct_oauth.py
+ 3. Entries go onto the primary calendar (calendar.calendar_id: primary) with
+    a 【仮】 title prefix. Consider behaviour.mode: dry_run for the first runs.
  4. Check and preview — no Google call, nothing written:
       sudo -u $SERVICE_USER $ROOT/venv/bin/python $ROOT/app/ct_service.py --config $ROOT/config/config.yaml check
       sudo -u $SERVICE_USER $ROOT/venv/bin/python $ROOT/app/ct_service.py --config $ROOT/config/config.yaml plan

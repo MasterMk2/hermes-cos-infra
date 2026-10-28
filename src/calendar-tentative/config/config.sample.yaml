@@ -2,15 +2,15 @@
 #
 # Every commitment Hermes already tracks (Discord / LINE / Gmail / Calendar,
 # unified in events.db) that is the owner's own dated work and is not yet on
-# a calendar becomes a TENTATIVE event on a dedicated secondary calendar.
-# Accept one by moving it to your own calendar; reject one by deleting it.
-# A deleted entry is never re-created.
+# a calendar becomes a TENTATIVE event on your primary calendar, its title
+# starting with 【仮】. Accept one by removing 【仮】 from the title; reject one
+# by deleting it. A deleted entry is never re-created.
 
 paths:
   state_db: /srv/hermes/calendar-tentative/state/tentative.db
   events_db: /srv/hermes/hermes-data/events/events.db
-  # H.1's read-only snapshot: avoids duplicating real events and notices a
-  # tentative entry you moved to a real calendar. Empty disables both.
+  # H.1's read-only snapshot: avoids duplicating real events (this service's
+  # own entries in it are ignored). Empty disables the check.
   calendar_index_db: /srv/hermes/calendar/index/index.db
   # H.2's read-only snapshot, used only by the Gmail screen below (headers,
   # labels, threads and the sent flag; never bodies). Without it, rows whose
@@ -22,12 +22,11 @@ oauth:
   credential_dir: ""
 
 calendar:
-  # Printed by: ct_oauth.py --create-calendar "Hermes 仮登録"
-  # Must end in @group.calendar.google.com. Never your primary calendar, and
-  # never add this id to H.1's calendars.selected_ids.
-  calendar_id: ""
+  # Only "primary" is accepted.
+  calendar_id: primary
   time_zone: Asia/Tokyo
-  summary_prefix: "[仮] "
+  # Removing it from the title is how an entry is confirmed; not empty.
+  summary_prefix: "【仮】"
   # Length of a timed entry when the source gave only a start time.
   default_duration_minutes: 60
   # Google event colour 1..11, or "" for the calendar's own colour.

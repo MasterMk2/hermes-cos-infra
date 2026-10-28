@@ -56,7 +56,7 @@ class WhatTheOwnerDidTests(ScreenCase):
         cid = self.mail_commitment(is_sent=True, to="client@example.org")
         d = self.select().desired[cid]
         self.assertEqual(d.mail_basis, cm.BASIS_SENT)
-        self.assertIn("根拠: あなたが送ったメール", sel.description_for(d))
+        self.assertIn("根拠: あなたが送ったメール", sel.description_for(d, "【仮】"))
 
     def test_a_reply_after_the_owner_wrote_passes_whatever_gmail_thinks(self):
         self.ws.add_mail("gmail:ask", is_sent=True, to="shop@example.org", thread_id="t-shop")
@@ -136,14 +136,14 @@ class WhatGmailDecidedTests(ScreenCase):
         self.assertSkipped(cid, cm.R_GMAIL_NOTIFICATION, "people")
         d = self.select("people_and_notifications").desired[cid]
         self.assertEqual(d.mail_basis, cm.BASIS_NOTIFICATION)
-        self.assertIn("根拠: 自動通知のメール", sel.description_for(d))
+        self.assertIn("根拠: 自動通知のメール", sel.description_for(d, "【仮】"))
 
     def test_primary_mail_from_a_person_passes(self):
         cid = self.mail_commitment(sender="山田太郎 <taro@example.org>",
                                    labels=("INBOX", "CATEGORY_PERSONAL", "IMPORTANT"))
         d = self.select().desired[cid]
         self.assertEqual(d.mail_basis, cm.BASIS_PERSONAL)
-        self.assertIn("根拠: Gmail がメイン（個人）に分類したメール", sel.description_for(d))
+        self.assertIn("根拠: Gmail がメイン（個人）に分類したメール", sel.description_for(d, "【仮】"))
 
     def test_without_gmail_categories_a_stranger_never_passes(self):
         # Google turns smart features (and with them categories) off by
@@ -238,7 +238,7 @@ class HeaderTests(ScreenCase):
         self.ws.add_mail("gmail:p", sender="山田 <yamada@example.org>")
         self.ws.add_commitment("c", "見積書の確認", sources=[("gmail", "gmail:p")],
                                counterparty="山田 <yamada@example.org>", **DUE)
-        text = sel.description_for(self.select().desired["c"])
+        text = sel.description_for(self.select().desired["c"], "【仮】")
         self.assertNotIn("@", text)
         self.assertNotIn("相手:", text)
         self.assertIsNone(sel.shown_counterparty("U" + "0123456789abcdef" * 2))  # privacy-ok

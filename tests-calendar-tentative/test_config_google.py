@@ -20,18 +20,28 @@ from ct_config import ConfigError, load_config, parse_config
 class ConfigTests(unittest.TestCase):
     def test_defaults_are_conservative(self):
         cfg = parse_config({})
-        self.assertEqual(cfg.calendar_id, "")
+        self.assertEqual(cfg.calendar_id, "primary")
+        self.assertEqual(cfg.calendar["summary_prefix"], "【仮】")
         self.assertEqual(cfg.selection["gmail_only"], "people")
         self.assertFalse(cfg.notify["enabled"])
         self.assertEqual(cfg.limits["max_creates_per_run"], 10)
 
-    def test_only_a_secondary_calendar_is_a_write_target(self):
-        for bad in ("primary", "PRIMARY", "owner@example.com",
+    def test_only_the_primary_calendar_is_a_write_target(self):
+        # The scope reaches every calendar the owner owns; the config keeps
+        # writes on the one calendar the engine reconciles.
+        for bad in ("", "PRIMARY", "owner@example.com",
+                    "tentative@group.calendar.google.com",
                     "ja.japanese#holiday@group.v.calendar.google.com"):
             with self.subTest(bad=bad), self.assertRaises(ConfigError):
                 parse_config({"calendar": {"calendar_id": bad}})
         cfg = parse_config({"calendar": {"calendar_id": CALENDAR_ID}})
-        self.assertEqual(cfg.calendar_id, CALENDAR_ID)
+        self.assertEqual(cfg.calendar_id, "primary")
+
+    def test_the_prefix_cannot_be_empty(self):
+        # Removing the prefix is how the owner confirms an entry.
+        for bad in ("", "  "):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                parse_config({"calendar": {"summary_prefix": bad}})
 
     def test_credentials_and_unknown_keys_are_refused(self):
         for data in ({"refresh_token": "x"}, {"oauth": {"client_secret": "x"}},
@@ -43,7 +53,8 @@ class ConfigTests(unittest.TestCase):
         path = os.path.join(ROOT, "src", "calendar-tentative", "config", "config.sample.yaml")
         cfg = load_config(path)
         self.assertEqual(cfg.selection["gmail_only"], "people")
-        self.assertEqual(cfg.calendar_id, "")
+        self.assertEqual(cfg.calendar_id, "primary")
+        self.assertEqual(cfg.calendar["summary_prefix"], "【仮】")
         self.assertTrue(cfg.notify["enabled"])
 
     def test_values_are_range_checked(self):
@@ -96,11 +107,11 @@ class GoogleClientTests(unittest.TestCase):
     def token(self):
         return _Response({"access_token": "at", "expires_in": 3600})
 
-    def test_the_only_scope_requested_is_app_created(self):
-        self.assertEqual(gg.SCOPES, ("https://www.googleapis.com/auth/calendar.app.created",))
+    def test_the_only_scope_requested_is_events_owned(self):
+        self.assertEqual(gg.SCOPES, ("https://www.googleapis.com/auth/calendar.events.owned",))
         url = gg.authorization_url("cid", "http://127.0.0.1:8766/oauth2/callback", "st")
         scope = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["scope"]
-        self.assertEqual(scope, ["https://www.googleapis.com/auth/calendar.app.created"])
+        self.assertEqual(scope, ["https://www.googleapis.com/auth/calendar.events.owned"])
 
     def test_insert_sends_no_invitations(self):
         self.responses = [self.token(), _Response({"id": "e1", "etag": '"1"'})]
@@ -125,8 +136,17 @@ class GoogleClientTests(unittest.TestCase):
 
     def test_an_expired_token_is_refreshed_once(self):
         self.responses = [self.token(), _http_error(401), self.token(), _Response({"items": []})]
-        self.assertEqual(self.client.list_events(CALENDAR_ID), [])
+        self.assertEqual(self.client.list_events(CALENDAR_ID, private_property="hermes_ct=1"), [])
         self.assertEqual(len(self.requests), 4)
+
+    def test_the_list_asks_only_for_our_marked_entries(self):
+        # The primary calendar holds years of the owner's events; only ours
+        # are fetched, deleted ones included.
+        self.responses = [self.token(), _Response({"items": [{"id": "hermesct1"}]})]
+        self.client.list_events(CALENDAR_ID, private_property="hermes_ct=1")
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.requests[1].full_url).query)
+        self.assertEqual(query["privateExtendedProperty"], ["hermes_ct=1"])
+        self.assertEqual(query["showDeleted"], ["true"])
 
     def test_failures_say_whether_anything_could_have_changed(self):
         self.responses = [self.token(), _http_error(400, {"error": {"errors": [{"reason": "invalid"}]}})]

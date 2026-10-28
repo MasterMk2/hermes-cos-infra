@@ -53,7 +53,7 @@ HOLD = frozenset({IN_FLIGHT, OUTCOME_UNKNOWN, CONTENT_MISMATCH, REJECTED})
 RETRYABLE = frozenset({FAILED, UNREACHABLE, UNKNOWN})
 
 HEADER = "カレンダーに仮登録しました（{n}件）"
-FOOTER = "確定するなら自分のカレンダーへ移動、不要なら削除してください。"
+FOOTER = "確定するならタイトル先頭の【仮】を消し、不要なら削除してください。"
 
 
 def notification_id_for(commitment_ids) -> str:

@@ -71,8 +71,9 @@ class ServiceTests(ServiceCase):
         self.assertNotIn("協賛", json.dumps(data, ensure_ascii=False))
         self.assertFalse(os.path.exists(self.ws.state_path))
 
-    def test_run_without_a_calendar_is_a_configuration_stop(self):
-        code, _ = self.cli("--config", self.config(calendar={"calendar_id": ""}), "run")
+    def test_a_calendar_other_than_primary_is_a_configuration_stop(self):
+        code, _ = self.cli("--config", self.config(
+            calendar={"calendar_id": "tentative@group.calendar.google.com"}), "run")
         self.assertEqual(code, ct_service.EXIT_CONFIG)
 
     def test_run_without_credentials_is_a_configuration_stop(self):
@@ -84,14 +85,17 @@ class ServiceTests(ServiceCase):
     def test_a_malformed_config_exits_78(self):
         path = os.path.join(self.ws.dir, "bad.yaml")
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write("calendar: {calendar_id: primary}\n")
+            handle.write("calendar: {calendar_id: somebody@example.com}\n")
         code, _ = self.cli("--config", path, "status")
         self.assertEqual(code, ct_service.EXIT_CONFIG)
 
-    def test_check_flags_a_tentative_calendar_selected_in_h1(self):
-        self.ws.add_index_event("e1", "[仮] x", "2026-10-05", all_day=True, calendar_id=CALENDAR_ID)
+    def test_check_accepts_our_own_entries_in_h1(self):
+        # They are on the primary calendar, which H.1 reads; selection
+        # ignores them by id, so check only reports them.
+        self.ws.add_index_event("hermesct" + "0" * 40, "【仮】x", "2026-10-05", all_day=True,
+                                calendar_id="owner@example.com")
         code, _ = self.cli("--config", self.config(), "check")
-        self.assertEqual(code, ct_service.EXIT_CONFIG)
+        self.assertEqual(code, ct_service.EXIT_OK)
 
     def test_plan_screens_gmail_only_rows_through_the_index(self):
         self.ws.add_mail("gmail:sent", is_sent=True, to="client@example.org")

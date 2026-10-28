@@ -155,6 +155,25 @@ def reconcile_event_row(row: sqlite3.Row) -> Commitment:
     )
 
 
+#: Event ids and title tag of calendar tentative registration
+#: (src/calendar-tentative, ct_select.OWN_EVENT_PREFIX / summary_prefix).
+TENTATIVE_EVENT_PREFIX = "hermesct"
+TENTATIVE_TITLE_TAG = "【仮】"
+
+
+def _tentative_entry(cal_row) -> bool:
+    """An unconfirmed (or withdrawn) entry of calendar tentative registration.
+
+    It was made from a commitment, so backfilling it would list that work
+    twice. Google may drop the title of a deleted event, so a cancelled
+    entry counts regardless. One the owner confirmed (【仮】 removed) is an
+    ordinary calendar event."""
+    if not str(cal_row["event_id"] or "").startswith(TENTATIVE_EVENT_PREFIX):
+        return False
+    return (str(cal_row["status"] or "").lower() == "cancelled"
+            or str(cal_row["summary"] or "").lstrip().startswith(TENTATIVE_TITLE_TAG))
+
+
 def reconcile_calendar_event(cal_row: sqlite3.Row) -> Commitment:
     """Map an authoritative calendar event to a canonical Commitment."""
     cal_id = cal_row["source_id"] or cal_row["event_id"]
@@ -295,6 +314,8 @@ def run_backfill(
         cal_cur = calendar_conn.cursor()
         cal_cur.execute("SELECT * FROM calendar_events")
         for cal_row in cal_cur.fetchall():
+            if _tentative_entry(cal_row):
+                continue
             cal_cmt = reconcile_calendar_event(cal_row)
             save_commitment(events_conn, cal_cmt, actor=actor, reason="calendar_backfill", auto_commit=False)
             cal_count += 1

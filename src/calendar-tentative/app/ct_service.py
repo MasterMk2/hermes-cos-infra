@@ -63,7 +63,7 @@ def open_index(cfg):
         return con
     except sqlite3.Error as exc:
         # Optional input: without it the service only loses the duplicate
-        # check against real events and the "moved = confirmed" signal.
+        # check against real events.
         log.warning("calendar index unavailable (%s); continuing without it",
                     type(exc).__name__)
         return None
@@ -145,10 +145,6 @@ def cmd_plan(cfg, now, *, with_titles: bool) -> int:
 def cmd_run(cfg, now, *, force_dry_run: bool) -> int:
     if force_dry_run or cfg.dry_run:
         return cmd_plan(cfg, now, with_titles=False)
-    if not cfg.calendar_id:
-        log.error("calendar.calendar_id is empty: create the tentative calendar with "
-                  "ct_oauth.py --create-calendar and put its id in %s", cfg.path)
-        return EXIT_CONFIG
     try:
         client = TentativeCalendarClient(OAuthCredentials.from_directory(cfg.credential_dir))
     except CredentialUnavailable as exc:
@@ -210,11 +206,7 @@ def cmd_status(cfg) -> int:
 def cmd_check(cfg) -> int:
     ok = True
     log.info("config      : %s (mode=%s)", cfg.path, cfg.behaviour["mode"])
-    if cfg.calendar_id:
-        log.info("calendar    : configured")
-    else:
-        log.error("calendar    : calendar.calendar_id is empty (run ct_oauth.py --create-calendar)")
-        ok = False
+    log.info("calendar    : %s, title prefix %s", cfg.calendar_id, cfg.calendar["summary_prefix"])
 
     directory = cfg.credential_dir
     for name, required in (("client-id", True), ("refresh-token", True), ("client-secret", False)):
@@ -237,20 +229,15 @@ def cmd_check(cfg) -> int:
 
     index = open_index(cfg)
     if index is None:
-        log.warning("calendar idx: unavailable (duplicate check and confirm detection off)")
+        log.warning("calendar idx: unavailable (duplicate check off)")
     else:
-        mine = 0
-        if cfg.calendar_id:
-            mine = index.execute("SELECT COUNT(*) FROM calendar_events WHERE calendar_id = ?",
-                                 (cfg.calendar_id,)).fetchone()[0]
+        # Our entries are on the primary calendar, so H.1 holds them too.
+        # ct_select ignores them by id; this only reports how many there are.
+        mine = index.execute(
+            "SELECT COUNT(*) FROM calendar_events WHERE event_id LIKE ?",
+            (ct_select.OWN_EVENT_PREFIX + "%",)).fetchone()[0]
         index.close()
-        log.info("calendar idx: readable")
-        if mine:
-            # Selecting the tentative calendar in H.1 would turn every
-            # tentative entry into a calendar_authority commitment.
-            log.error("calendar idx: the tentative calendar is selected in H.1 "
-                      "(calendars.selected_ids); remove it there")
-            ok = False
+        log.info("calendar idx: readable (%d own entries, ignored as evidence)", mine)
 
     mode = cfg.selection["gmail_only"]
     if mode in ("off", "all"):
