@@ -50,6 +50,17 @@ BACKFILL_DAYS = 14  # first run: only classify messages newer than this
 LLM_TIMEOUT = 300
 CLASSIFY_PARALLEL = int(os.environ.get('HERMES_CLASSIFY_PARALLEL', '1'))
 CLASSIFIER_SOCKET = Path(os.environ.get('HERMES_CLASSIFIER_SOCKET', '/run/hermes/classifier.sock'))
+# event_broker.TIMEOUT_SECONDS plus a margin, so the broker's answer, or its
+# own timeout error, always arrives before this side stops listening.
+BROKER_WAIT_SECONDS = 165
+# A failure faster than this means the broker or the bridge is not answering
+# at all; it is retried once. A slower failure means a model call ran for this
+# message (the bridge may still be running it), so it counts against the
+# message and is not repeated.
+FAST_FAILURE_SECONDS = 10
+# Slow failures in a row after which a run stops: by then the provider is more
+# likely overloaded than these messages hard to classify.
+FAILURE_STREAK_LIMIT = 2
 
 REQUIRED = ("message_id", "chat_id", "sent_at", "body")
 
@@ -262,7 +273,7 @@ def extract_json(text):
     return json.loads(text[start: end + 1])
 
 
-def call_broker(cand, timeout=45):
+def call_broker(cand, timeout=BROKER_WAIT_SECONDS):
     """Classify ONE message via the safe local Unix domain socket broker."""
     import socket
     payload = {
@@ -299,14 +310,19 @@ def call_broker(cand, timeout=45):
         return res
 
 
+class ClassifierUnavailable(RuntimeError):
+    """Both attempts failed fast: the broker or the bridge is down, not slow."""
+
+
 def classify_one(cand):
     """Classify ONE message per LLM call (single-object output is stable).
     Uses safe native classification broker when available; bounded retry."""
     last_err = None
     for attempt in (1, 2):
+        started = time.monotonic()
         try:
             if CLASSIFIER_SOCKET.exists():
-                return call_broker(cand, timeout=45)
+                return call_broker(cand)
             payload = {
                 "source_id": cand["source_id"],
                 "message": cand["message"],
@@ -333,9 +349,28 @@ def classify_one(cand):
                 raise ValueError("classifier output missing is_event")
             return out
         except Exception as exc:
+            if time.monotonic() - started >= FAST_FAILURE_SECONDS:
+                raise RuntimeError(f"classifier failed after {attempt} attempt(s): {exc}") from exc
             last_err = exc
-            time.sleep(3)
-    raise RuntimeError(f"classifier failed after retry: {last_err}")
+            if attempt == 1:
+                time.sleep(3)
+    raise ClassifierUnavailable(f"classifier failed fast twice: {last_err}") from last_err
+
+
+def record_failure(con, cand, failed_attempts, now):
+    """Count a failed classification without losing the message.
+
+    The message is retried on the next run. After 3 consecutive failures it is
+    parked as 'abandoned' so it cannot consume LLM calls forever.
+    """
+    attempts = failed_attempts.get(cand["source_id"], 0) + 1
+    result = f"abandoned:{attempts}" if attempts >= 3 else f"failed:{attempts}"
+    con.execute(
+        "INSERT OR REPLACE INTO processed_messages (source_id, sent_at, processed_at, result) "
+        "VALUES (?,?,?,?)",
+        (cand["source_id"], cand["sent_at_ms"], now, result),
+    )
+    log(f"classification deferred for {cand['source_id']} (attempt {attempts}, {result})")
 
 
 def compute_attention(conf, act, imp, urg, due_at, status):
@@ -404,6 +439,9 @@ def main():
     ap.add_argument("--index", default=str(INDEX_DB))
     ap.add_argument("--max-candidates", type=int, default=MAX_CANDIDATES_PER_RUN)
     ap.add_argument("--max-llm-calls", type=int, default=12)
+    # Seconds after which no new LLM call starts; 0 means no limit. The call
+    # already running may still take up to BROKER_WAIT_SECONDS.
+    ap.add_argument("--max-seconds", type=float, default=0)
     ap.add_argument("--state", default=str(STATE))
     args = ap.parse_args()
 
@@ -456,15 +494,19 @@ def main():
 
     processed_any = False
     idx = 0
+    failures_in_a_row = 0
     while idx < len(candidates):
         if metrics["llm_calls"] >= args.max_llm_calls:
             log("max llm calls reached; deferring rest")
+            break
+        if args.max_seconds and time.time() - t0 >= args.max_seconds:
+            log("time budget reached; deferring rest")
             break
         wave = candidates[idx: idx + CLASSIFY_PARALLEL]
         wave = wave[: max(0, args.max_llm_calls - metrics["llm_calls"])]
         if not wave:
             break
-        results = {}
+        results, unavailable = {}, False
         try:
             with ThreadPoolExecutor(max_workers=CLASSIFY_PARALLEL) as ex:
                 futures = {ex.submit(classify_one, c): c for c in wave}
@@ -472,33 +514,26 @@ def main():
                     try:
                         results[c["source_id"]] = fut.result()
                     except Exception as exc:
+                        unavailable |= isinstance(exc, ClassifierUnavailable)
                         log(f"classification failed for {c['source_id']}: {exc}")
         finally:
             idx += len(wave)
         metrics["llm_calls"] += len(wave)
-        if not results:
-            # Whole wave failed (e.g. provider/container outage): no ledger
-            # change, no strike increment — plain retry on the next run.
+        if unavailable:
+            # The broker or the bridge did not answer at all (e.g. a provider
+            # or container outage): no ledger change, no strike — plain retry
+            # on the next run.
             llm_ok = False
-            log("whole wave failed; stopping run (candidates left unprocessed)")
+            log("classifier unavailable; stopping run (candidates left unprocessed)")
             break
         now = now_iso()
         for c in wave:
             r = results.get(c["source_id"])
             if r is None:
-                # classification failed (timeout/error): do NOT lose the
-                # candidate. Record the failure count; the message retries on
-                # the next run. After 3 consecutive failures it is parked as
-                # 'abandoned' so it cannot consume LLM calls forever.
-                attempts = failed_attempts.get(c["source_id"], 0) + 1
-                result = f"abandoned:{attempts}" if attempts >= 3 else f"failed:{attempts}"
-                con.execute(
-                    "INSERT OR REPLACE INTO processed_messages (source_id, sent_at, processed_at, result) "
-                    "VALUES (?,?,?,?)",
-                    (c["source_id"], c["sent_at_ms"], now, result),
-                )
-                log(f"classification deferred for {c['source_id']} (attempt {attempts}, {result})")
+                record_failure(con, c, failed_attempts, now)
+                failures_in_a_row += 1
                 continue
+            failures_in_a_row = 0
             if not isinstance(r, dict) or not r.get("is_event"):
                 con.execute(
                     "INSERT OR REPLACE INTO processed_messages (source_id, sent_at, processed_at, result) "
@@ -598,6 +633,11 @@ def main():
                 (c["source_id"], c["sent_at_ms"], now_iso(), "classified"),
             )
         con.commit()
+        if failures_in_a_row >= FAILURE_STREAK_LIMIT:
+            llm_ok = False
+            log(f"{failures_in_a_row} classifications failed in a row; "
+                "stopping run (candidates left unprocessed)")
+            break
 
     if llm_ok:
         # processed bookkeeping for no-candidate and deferred items
