@@ -51,7 +51,7 @@ RAW_EVENTS_SQL = """
 CREATE TABLE IF NOT EXISTS events (
   event_id TEXT PRIMARY KEY, type TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
   actor TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'open',
-  source_type TEXT, source_id TEXT
+  confidence REAL, source_type TEXT, source_id TEXT
 );
 """
 
@@ -133,7 +133,7 @@ class Workspace:
                        due_at=None, due_precision=None, scheduled_at=None,
                        scheduled_end_at=None, authority="evidence", confidence=0.85,
                        currentness="current", counterparty=None, sources=None,
-                       raw_type=None, source_count=None):
+                       raw_type=None, raw_confidence=None, source_count=None):
         sources = sources if sources is not None else [("discord", f"msg-{cid}")]
         stamp = "2026-09-30T12:00:00+09:00"
         self.events.execute(
@@ -155,8 +155,9 @@ class Workspace:
             if raw_type:
                 self._n += 1
                 self.events.execute(
-                    "INSERT INTO events (event_id, type, source_type, source_id) VALUES (?, ?, ?, ?)",
-                    (f"evt_{self._n}", raw_type, source_type, source_id),
+                    """INSERT INTO events (event_id, type, confidence, source_type, source_id)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (f"evt_{self._n}", raw_type, raw_confidence, source_type, source_id),
                 )
         self.events.commit()
 

@@ -13,9 +13,15 @@ production data and this layer feeds the same owner the same facts:
 
 * Universal exclusions: `DONE`/`CANCELLED`/`DISMISSED`, `INFORMATIONAL`, and
   `currentness = 'superseded'`.
-* The owner's work only: `SELF`, or `SHARED` when Discord/LINE/Calendar also
+* The owner's work: `SELF`, or `SHARED` when Discord/LINE/Calendar also
   carries it. `COUNTERPARTY` and `WAITING`/`BLOCKED` are someone else's next
-  step, and a tentative slot on the owner's calendar would misstate that.
+  step and are left out — except what a Discord/LINE conversation dated
+  (`selection.others_from_chat`): a group's request or deadline (`SHARED`,
+  in any state) and an event someone else holds at a clock time
+  (`COUNTERPARTY`). Commitments track whose move is next, a calendar tracks
+  when things happen; a COOP night or a group's due date belongs on the
+  second even though the owner owes nobody a reply. Their ownership is
+  uncertain by design, so the extractor's confidence in the event decides.
 * Gmail-only evidence passes the mail screen in `ct_mail` first (I.1: 95%
   of Gmail-derived rows were newsletters and campaigns). By default only mail
   from people qualifies; `selection.gmail_only` widens or closes that.
@@ -52,7 +58,17 @@ import ct_mail
 TERMINAL_WORK_STATES = frozenset({"DONE", "CANCELLED", "DISMISSED"})
 NOT_OWNER_WORK_STATES = frozenset({"WAITING", "BLOCKED"})
 NON_GMAIL_SOURCES = frozenset({"discord", "line", "calendar"})
+#: Conversations: where others' dated events and group deadlines come from.
+CHAT_SOURCES = frozenset({"discord", "line"})
 CALENDAR_AUTHORITY = "calendar_authority"
+
+#: Why an entry that is not the owner's own task was admitted (Desired.chat_basis).
+BASIS_GROUP = "group"
+BASIS_OTHERS_EVENT = "others_event"
+CHAT_BASIS_LABELS = {
+    BASIS_GROUP: "グループ宛ての依頼・締切（担当は未確定）",
+    BASIS_OTHERS_EVENT: "相手が予定している会・用事",
+}
 
 #: `due_precision` values that carry a real clock time.
 PRECISE_PRECISIONS = frozenset({"minute", "exact_datetime"})
@@ -206,6 +222,8 @@ class Desired:
     source_count: int
     #: For a Gmail-only row: why the mail screen trusted it (ct_mail.BASIS_*).
     mail_basis: str | None = None
+    #: For a row that is not the owner's own task: BASIS_GROUP / BASIS_OTHERS_EVENT.
+    chat_basis: str | None = None
 
     @property
     def sort_key(self) -> tuple:
@@ -281,22 +299,32 @@ def _load_evidence(con) -> tuple:
     return types, pairs, echoed
 
 
-def _load_raw_types(con) -> dict:
-    """commitment_id -> raw Event Layer types, joined through evidence.
+def _load_raw_facts(con) -> tuple:
+    """(types, confidence): commitment_id -> raw Event Layer types, and the
+    highest extractor confidence among its events, joined through evidence.
 
     Commitments did not keep the extractor's `type`; the raw `events` row
     still has it. A missing table or column means "no type known", which
-    makes every dated row a deadline — the conservative reading.
+    makes every dated row a deadline — the conservative reading — and "no
+    confidence known", which leaves only the commitment's own.
     """
-    if not {"type", "source_type", "source_id"} <= _table_columns(con, "events"):
-        return {}
-    out: dict = {}
-    for cid, etype in con.execute(
-        """SELECT ce.commitment_id, e.type FROM commitment_evidence ce
-           JOIN events e ON e.source_type = ce.source_type AND e.source_id = ce.source_id"""
+    columns = _table_columns(con, "events")
+    if not {"type", "source_type", "source_id"} <= columns:
+        return {}, {}
+    conf_sql = "e.confidence" if "confidence" in columns else "NULL"
+    types: dict = {}
+    confidence: dict = {}
+    for cid, etype, conf in con.execute(
+        f"""SELECT ce.commitment_id, e.type, {conf_sql} FROM commitment_evidence ce
+            JOIN events e ON e.source_type = ce.source_type AND e.source_id = ce.source_id"""
     ):
-        out.setdefault(cid, set()).add(str(etype or ""))
-    return out
+        types.setdefault(cid, set()).add(str(etype or ""))
+        try:
+            value = float(conf)
+        except (TypeError, ValueError):
+            continue
+        confidence[cid] = max(confidence.get(cid, 0.0), value)
+    return types, confidence
 
 
 @dataclass(frozen=True)
@@ -386,6 +414,27 @@ def _timing(row: dict, raw_types: set, tz, default_duration: timedelta):
     return KIND_DEADLINE, True, day, day + timedelta(days=1), clock
 
 
+def _has_clock(row: dict, tz) -> bool:
+    """A real clock time: a timed slot, or a due date at minute precision."""
+    if parse_stored(row.get("scheduled_at"), tz)[0] == "dt":
+        return True
+    return (parse_stored(row.get("due_at"), tz)[0] == "dt"
+            and str(row.get("due_precision") or "").strip().lower() in PRECISE_PRECISIONS)
+
+
+def _chat_basis(row: dict, source_types: set, tz) -> str | None:
+    """Why a row that is not the owner's own task still belongs on the
+    calendar, or None. Only a conversation dates it: a group's request or
+    deadline, or an event someone else holds at a stated time."""
+    if not source_types & CHAT_SOURCES:
+        return None
+    if row.get("responsibility") == "SHARED":
+        return BASIS_GROUP
+    if row.get("responsibility") == "COUNTERPARTY" and _has_clock(row, tz):
+        return BASIS_OTHERS_EVENT
+    return None
+
+
 def _gmail_only_ids(rows, types_by_id, pairs_by_id) -> set:
     """Gmail evidence ids of the open rows the mail screen may have to judge."""
     ids: set = set()
@@ -417,7 +466,7 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
 
     rows = _load_commitments(events_con)
     types_by_id, pairs_by_id, echoed = _load_evidence(events_con)
-    raw_types = _load_raw_types(events_con)
+    raw_types, raw_confidence = _load_raw_facts(events_con)
 
     gmail_mode = sel_cfg["gmail_only"]
     mail_facts = None
@@ -451,9 +500,13 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
         if responsibility == "INFORMATIONAL":
             selection.skipped[cid] = R_INFORMATIONAL
             continue
+        chat_basis = None
         if responsibility not in ("SELF", "SHARED") or row.get("work_state") in NOT_OWNER_WORK_STATES:
-            selection.skipped[cid] = R_NOT_OWNER_TASK
-            continue
+            if sel_cfg["others_from_chat"]:
+                chat_basis = _chat_basis(row, source_types, tz)
+            if chat_basis is None:
+                selection.skipped[cid] = R_NOT_OWNER_TASK
+                continue
         if responsibility == "SHARED":
             if not sel_cfg["include_shared"]:
                 selection.skipped[cid] = R_SHARED_EXCLUDED
@@ -483,6 +536,11 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
             confidence = float(row.get("confidence") if row.get("confidence") is not None else 1.0)
         except (TypeError, ValueError):
             confidence = 0.0
+        if chat_basis is not None and cid in raw_confidence:
+            # The commitment's confidence here measures who owns it, which is
+            # unsettled by definition; whether the event is real is the
+            # extractor's call.
+            confidence = raw_confidence[cid]
         if confidence < float(sel_cfg["min_confidence"]):
             selection.skipped[cid] = R_LOW_CONFIDENCE
             continue
@@ -491,7 +549,12 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
             selection.skipped[cid] = R_EMPTY_TITLE
             continue
 
-        timing = _timing(row, raw_types.get(cid, set()), tz, default_duration)
+        types_for_timing = raw_types.get(cid, set())
+        if chat_basis == BASIS_OTHERS_EVENT:
+            # Someone else's event at a stated time: something to attend, not
+            # a deadline of the owner's.
+            types_for_timing = types_for_timing | APPOINTMENT_TYPES
+        timing = _timing(row, types_for_timing, tz, default_duration)
         if isinstance(timing, str):
             selection.skipped[cid] = timing
             continue
@@ -518,6 +581,7 @@ def select(events_con, *, cfg, now: datetime, index_con=None, gmail_con=None) ->
             counterparty=shown_counterparty(row.get("counterparty")),
             source_count=int(row.get("source_count") or 1),
             mail_basis=mail_basis,
+            chat_basis=chat_basis,
         )
         if by_title and _matches_existing(desired, by_title, tolerance):
             selection.skipped[cid] = R_MATCHES_EXISTING
@@ -581,6 +645,8 @@ def description_for(desired: Desired, prefix: str) -> str:
         lines.append(f"相手: {desired.counterparty}")
     if desired.mail_basis in ct_mail.BASIS_LABELS:
         lines.append(f"根拠: {ct_mail.BASIS_LABELS[desired.mail_basis]}")
+    if desired.chat_basis in CHAT_BASIS_LABELS:
+        lines.append(f"根拠: {CHAT_BASIS_LABELS[desired.chat_basis]}")
     lines.append(f"確定するならタイトル先頭の{prefix.strip()}を消し、不要ならこの予定を削除してください。"
                  "削除した仮登録は再登録しません。")
     lines.append(f"ref: {desired.commitment_id}")

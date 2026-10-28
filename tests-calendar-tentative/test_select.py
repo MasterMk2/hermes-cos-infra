@@ -175,6 +175,77 @@ class EligibilityTests(SelectionCase):
         self.assertEqual(self.select().skipped["low"], sel.R_LOW_CONFIDENCE)
 
 
+class OthersFromChatTests(SelectionCase):
+    """Dated things a conversation carried that are not the owner's own task.
+
+    Shapes taken from production (titles invented): the commitments layer
+    files a group's request as SHARED/BLOCKED at 0.4 and someone else's
+    announced event as COUNTERPARTY/WAITING; the extractor was sure of both.
+    """
+
+    CLOCK = {"due_at": "2026-10-07T21:00:00+09:00", "due_precision": "exact_datetime"}
+    DAY = {"due_at": "2026-10-09T00:00:00+09:00", "due_precision": "date"}
+
+    def test_a_group_deadline_from_chat_is_proposed_on_the_extractors_confidence(self):
+        self.ws.add_commitment("grp", "紹介文と写真の提出", responsibility="SHARED",
+                               work_state="BLOCKED", confidence=0.4, raw_type="request",
+                               raw_confidence=0.9, **self.DAY)
+        d = self.select().desired["grp"]
+        self.assertEqual(d.kind, sel.KIND_DEADLINE)
+        self.assertTrue(d.all_day)
+        self.assertEqual(d.chat_basis, sel.BASIS_GROUP)
+        body = sel.build_event_body(d, cfg=self.cfg)
+        self.assertEqual(body["summary"], "【仮】〆 紹介文と写真の提出")
+        self.assertIn("根拠: グループ宛ての依頼・締切", body["description"])
+
+    def test_someone_elses_event_at_a_clock_time_is_a_timed_entry(self):
+        self.ws.add_commitment("coop", "週末の合同練習会", responsibility="COUNTERPARTY",
+                               work_state="WAITING", raw_type="commitment",
+                               raw_confidence=0.9, **self.CLOCK)
+        d = self.select().desired["coop"]
+        self.assertEqual(d.kind, sel.KIND_APPOINTMENT)
+        self.assertFalse(d.all_day)
+        self.assertEqual(d.chat_basis, sel.BASIS_OTHERS_EVENT)
+        body = sel.build_event_body(d, cfg=self.cfg)
+        self.assertEqual(body["summary"], "【仮】週末の合同練習会")
+        self.assertEqual(body["start"]["dateTime"], "2026-10-07T21:00:00+09:00")
+        self.assertEqual(body["end"]["dateTime"], "2026-10-07T22:00:00+09:00")
+
+    def test_someone_elses_task_with_only_a_day_stays_theirs(self):
+        self.ws.add_commitment("cp", "場所のアナウンス", responsibility="COUNTERPARTY",
+                               work_state="WAITING", raw_type="commitment",
+                               raw_confidence=0.9, **self.DAY)
+        self.assertEqual(self.select().skipped["cp"], sel.R_NOT_OWNER_TASK)
+
+    def test_only_a_conversation_admits_it(self):
+        self.ws.add_commitment("mail", "キャンペーン締切", responsibility="SHARED",
+                               work_state="BLOCKED", sources=[("gmail", "m-1")],
+                               raw_type="request", raw_confidence=0.9, **self.DAY)
+        self.ws.add_commitment("mailev", "セミナー開催", responsibility="COUNTERPARTY",
+                               work_state="WAITING", sources=[("gmail", "m-2")],
+                               raw_type="commitment", raw_confidence=0.9, **self.CLOCK)
+        s = self.select(make_cfg(selection={"gmail_only": "all"}))
+        self.assertEqual(s.desired, {})
+        self.assertEqual(s.skipped["mail"], sel.R_NOT_OWNER_TASK)
+        self.assertEqual(s.skipped["mailev"], sel.R_NOT_OWNER_TASK)
+
+    def test_the_extractors_doubt_still_keeps_it_out(self):
+        self.ws.add_commitment("vague", "たぶん集まり", responsibility="COUNTERPARTY",
+                               work_state="WAITING", raw_type="commitment",
+                               raw_confidence=0.6, **self.CLOCK)
+        self.assertEqual(self.select().skipped["vague"], sel.R_LOW_CONFIDENCE)
+
+    def test_the_owners_own_waiting_items_and_the_switch_stay_out(self):
+        self.ws.add_commitment("wait", "返事待ち", work_state="WAITING", **self.CLOCK)
+        self.ws.add_commitment("grp", "提出", responsibility="SHARED", work_state="BLOCKED",
+                               raw_type="request", raw_confidence=0.9, **self.DAY)
+        s = self.select()
+        self.assertEqual(s.skipped["wait"], sel.R_NOT_OWNER_TASK)
+        self.assertIn("grp", s.desired)
+        s = self.select(make_cfg(selection={"others_from_chat": False}))
+        self.assertEqual(s.skipped["grp"], sel.R_NOT_OWNER_TASK)
+
+
 class ExistingEventTests(SelectionCase):
     def test_same_title_on_the_same_day_is_already_on_the_calendar(self):
         self.ws.add_commitment("c1", "アルバム 個人ページ入稿", due_at="2026-10-05T17:00:00+09:00",

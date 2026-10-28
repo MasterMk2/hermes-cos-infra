@@ -3,8 +3,9 @@
 #
 # Creates the service identity, the root-only credential directory, the code
 # and state tree, the virtualenv and the systemd units. It deliberately does
-# NOT authorize Google, create the calendar, edit the configuration, or enable
-# the timer: each of those is an owner decision, printed as a next step.
+# NOT authorize Google, edit the configuration, enable the timer or open the
+# chat request socket: each of those is an owner decision, printed as a next
+# step.
 #
 # THE IDENTITY
 #   hermestentative  --system, /usr/sbin/nologin, no home, own primary group,
@@ -12,6 +13,12 @@
 #     hermesreconcile   READ events.db (commitments)            required
 #     hermesproactive   CONNECT to the gateway's proactive socket  if present
 #   Never docker, sudo, adm, root, wheel or staff; checked after the change.
+#
+# THE CHAT REQUEST SOCKET
+#   /run/hermes-calendar-tentative/request.sock, group $REQUEST_GROUP (the
+#   account Hermes's chat agent runs as, hermesantigravity). Each connection
+#   runs hermes-calendar-tentative-request@ as hermestentative; the agent
+#   never gets the credential. Skipped when that group does not exist.
 #
 # USAGE
 #   sudo bash src/calendar-tentative/install-root.sh
@@ -27,10 +34,13 @@ EVENTS_DB=/srv/hermes/hermes-data/events/events.db
 UNIT_DIR=/etc/systemd/system
 SERVICE_UNIT="$UNIT_DIR/hermes-calendar-tentative.service"
 TIMER_UNIT="$UNIT_DIR/hermes-calendar-tentative.timer"
+REQUEST_SOCKET_UNIT="$UNIT_DIR/hermes-calendar-tentative-request.socket"
+REQUEST_SERVICE_UNIT="$UNIT_DIR/hermes-calendar-tentative-request@.service"
 
 SERVICE_USER=hermestentative
 RECONCILE_GROUP="${RECONCILE_GROUP:-hermesreconcile}"
 PROACTIVE_GROUP="${PROACTIVE_GROUP:-hermesproactive}"
+REQUEST_GROUP="${REQUEST_GROUP:-hermesantigravity}"
 FORBIDDEN_GROUPS="docker sudo adm root wheel staff"
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,14 +52,15 @@ fi
 
 if [ "${1:-}" = "--uninstall" ]; then
   systemctl disable --now hermes-calendar-tentative.timer 2>/dev/null || true
+  systemctl disable --now hermes-calendar-tentative-request.socket 2>/dev/null || true
   systemctl stop hermes-calendar-tentative.service 2>/dev/null || true
-  rm -f "$SERVICE_UNIT" "$TIMER_UNIT"
+  rm -f "$SERVICE_UNIT" "$TIMER_UNIT" "$REQUEST_SOCKET_UNIT" "$REQUEST_SERVICE_UNIT"
   systemctl daemon-reload
   if getent passwd "$SERVICE_USER" >/dev/null; then
     userdel "$SERVICE_USER"
   fi
   echo "Removed units and $SERVICE_USER. Left in place: $ROOT/state, $SECRET_DIR."
-  echo "The tentative calendar itself remains in Google Calendar; delete it there if unwanted."
+  echo "Entries already made stay on the primary calendar; search it for 【仮】 to remove them."
   exit 0
 fi
 if [ -n "${1:-}" ]; then
@@ -123,8 +134,21 @@ sed "s|@SUPPLEMENTARY_GROUPS@|$GROUPS_FOR_UNIT|" \
 install -m 0644 -o root -g root "$SERVICE_UNIT.tmp" "$SERVICE_UNIT"
 rm -f "$SERVICE_UNIT.tmp"
 install -m 0644 -o root -g root "$SRC/systemd/hermes-calendar-tentative.timer" "$TIMER_UNIT"
+REQUEST_UNITS=""
+if getent group "$REQUEST_GROUP" >/dev/null; then
+  sed "s|@REQUEST_GROUP@|$REQUEST_GROUP|" \
+    "$SRC/systemd/hermes-calendar-tentative-request.socket.in" > "$REQUEST_SOCKET_UNIT.tmp"
+  install -m 0644 -o root -g root "$REQUEST_SOCKET_UNIT.tmp" "$REQUEST_SOCKET_UNIT"
+  rm -f "$REQUEST_SOCKET_UNIT.tmp"
+  install -m 0644 -o root -g root "$SRC/systemd/hermes-calendar-tentative-request@.service" \
+    "$REQUEST_SERVICE_UNIT"
+  REQUEST_UNITS="$REQUEST_SOCKET_UNIT"
+else
+  echo "NOTE: group $REQUEST_GROUP not found (the chat agent's account); the chat"
+  echo "      request socket was not installed. Set REQUEST_GROUP to that account's group."
+fi
 systemctl daemon-reload
-systemd-analyze verify "$SERVICE_UNIT" "$TIMER_UNIT" || true
+systemd-analyze verify "$SERVICE_UNIT" "$TIMER_UNIT" $REQUEST_UNITS || true
 
 if sudo -u "$SERVICE_USER" test -r "$EVENTS_DB"; then
   echo "events.db         readable by $SERVICE_USER"
@@ -148,4 +172,7 @@ Installed. Nothing is authorized, created or scheduled yet. Next, as root:
       sudo -u $SERVICE_USER $ROOT/venv/bin/python $ROOT/app/ct_service.py --config $ROOT/config/config.yaml check
       sudo -u $SERVICE_USER $ROOT/venv/bin/python $ROOT/app/ct_service.py --config $ROOT/config/config.yaml plan
  5. Start:  systemctl enable --now hermes-calendar-tentative.timer
+ 6. Chat requests (optional): systemctl enable --now hermes-calendar-tentative-request.socket,
+    then register src/calendar-tentative/mcp/ct_request_mcp.py with the chat agent
+    (docs/CALENDAR-TENTATIVE.md, "チャットから頼む").
 NEXT

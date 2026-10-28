@@ -1,0 +1,25 @@
+# Hermes calendar tentative registration — chat requests.
+#
+# Hermes's chat agent asks here for one 【仮】 entry at a time (the
+# calendar_tentative MCP server, src/calendar-tentative/mcp). systemd starts
+# one hermes-calendar-tentative-request@ process per connection, as this
+# service's own account; the agent never holds the Google credential. Only
+# the socket group (the agent's account, rendered by install-root.sh) can
+# connect. Stopping this socket turns chat requests off; the timer is
+# unaffected.
+
+[Unit]
+Description=Hermes calendar tentative registration (chat request socket)
+RequiresMountsFor=/srv/hermes
+
+[Socket]
+ListenStream=/run/hermes-calendar-tentative/request.sock
+SocketUser=root
+SocketGroup=@REQUEST_GROUP@
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

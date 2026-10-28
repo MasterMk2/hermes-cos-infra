@@ -28,8 +28,13 @@ ahead claim and the hold it becomes when the answer is lost.
     FAILED       Google refused the insert `max_attempts` times.          final
 
 "final" means the engine takes no further action on its own. `repropose`
-(an explicit operator command) is the only way back, and it advances the
-generation so the retired event id is never reused.
+(an explicit operator command, or the owner asking for it again in chat) is
+the only way back, and it advances the generation so the retired event id is
+never reused.
+
+A row keyed `chat:<hash>` is an entry the owner asked for in chat
+(ct_request), not a commitment. It goes through the same states, but no
+commitment stands behind it: a run never drops, moves or withdraws it.
 """
 
 from __future__ import annotations
@@ -55,6 +60,13 @@ STATES = (PENDING, INSERTING, UNKNOWN, ACTIVE, CONFIRMED, REJECTED,
 FINAL_STATES = frozenset({CONFIRMED, REJECTED, USER_EDITED, WITHDRAWN, FAILED})
 #: States that occupy a slot on the tentative calendar (or may).
 LIVE_STATES = frozenset({INSERTING, UNKNOWN, ACTIVE})
+
+#: Row key prefix of entries asked for in chat. Commitment ids never contain ":".
+CHAT_PREFIX = "chat:"
+
+
+def is_chat(commitment_id) -> bool:
+    return str(commitment_id or "").startswith(CHAT_PREFIX)
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -312,6 +324,14 @@ def repropose(con, commitment_id: str, *, event_id_for) -> str | None:
         (generation, event_id, now_iso(), commitment_id),
     )
     return event_id
+
+
+def chat_requests_since(con, since_iso: str) -> int:
+    """Chat entries first reserved at or after `since_iso`."""
+    return con.execute(
+        "SELECT COUNT(*) FROM proposals WHERE commitment_id LIKE ? AND created_at >= ?",
+        (CHAT_PREFIX + "%", since_iso),
+    ).fetchone()[0]
 
 
 def mark_notified(con, commitment_ids, *, at: str | None = None) -> None:

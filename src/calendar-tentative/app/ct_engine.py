@@ -23,6 +23,11 @@ deleted entry is never re-created. Entries share the owner's primary
 calendar, so the engine only ever addresses ids it derived itself
 (`hermesct…`); withdrawal removes only such an entry the owner has not
 touched, and only one whose time has not passed.
+
+Entries the owner asked for in chat (`chat:` rows, ct_request) have no
+commitment behind them. A run settles and reconciles them like any other and
+inserts one a chat request could not, but never drops, moves or withdraws
+one: only the owner does that, on the calendar.
 """
 
 from __future__ import annotations
@@ -153,17 +158,18 @@ def plan(state_con, selection, *, cfg, now: datetime) -> RunReport:
     limits, beh = cfg.limits, cfg.behaviour
 
     creates = sorted(
-        (item for cid, item in items.items()
-         if cid not in rows or rows[cid]["state"] == store.PENDING),
-        key=lambda item: item.sort_key)
+        [(item.sort_key, item.line) for cid, item in items.items()
+         if cid not in rows or rows[cid]["state"] == store.PENDING]
+        + [(row["sort_key"], row["line"]) for cid, row in rows.items()
+           if store.is_chat(cid) and row["state"] == store.PENDING])
     live = sum(1 for r in rows.values() if r["state"] in store.LIVE_STATES)
     room = max(0, min(int(limits["max_creates_per_run"]), int(limits["max_active"]) - live))
-    report.plan["create"] = [item.line for item in creates[:room]]
+    report.plan["create"] = [line for _key, line in creates[:room]]
     report.plan["create_deferred"] = max(0, len(creates) - room)
 
     updates, withdrawals = [], []
     for cid, row in sorted(rows.items(), key=lambda kv: kv[1]["sort_key"]):
-        if row["state"] != store.ACTIVE:
+        if row["state"] != store.ACTIVE or store.is_chat(cid):
             continue
         reason = selection.reason_for(cid)
         if reason is None and beh["update_on_change"] and items[cid].revision != row["applied_revision"]:
@@ -182,8 +188,8 @@ def plan(state_con, selection, *, cfg, now: datetime) -> RunReport:
 # ---------------------------------------------------------------------- run
 
 
-def run(*, cfg, state_con, selection, client, now: datetime, notifier=None) -> RunReport:
-    """Apply one run against Google. `selection` comes from ct_select.select."""
+def bind_calendar(state_con, cfg) -> str:
+    """The configured calendar, once it is known to be this database's own."""
     cal = cfg.calendar_id
     if not cal:
         raise CalendarChanged("calendar.calendar_id is not configured")
@@ -195,6 +201,12 @@ def run(*, cfg, state_con, selection, client, now: datetime, notifier=None) -> R
     if not bound:
         store.set_meta(state_con, "calendar_id", cal)
         state_con.commit()
+    return cal
+
+
+def run(*, cfg, state_con, selection, client, now: datetime, notifier=None) -> RunReport:
+    """Apply one run against Google. `selection` comes from ct_select.select."""
+    cal = bind_calendar(state_con, cfg)
 
     report = RunReport(mode="apply", skipped=selection.counts(),
                        index_available=selection.index_available,
@@ -233,7 +245,7 @@ def _reserve(con, items: dict, selection, *, cal: str, report: RunReport) -> Non
             store.refresh_pending(con, cid, kind=item.desired.kind, body=item.body,
                                   revision=item.revision, sort_key=item.sort_key, line=item.line)
     for cid, row in rows.items():
-        if row["state"] == store.PENDING and cid not in items:
+        if row["state"] == store.PENDING and cid not in items and not store.is_chat(cid):
             # Nothing reached Google for this row (or Google proved it), so
             # forgetting it costs nothing and frees nothing that matters.
             store.drop_pending(con, cid)
@@ -330,7 +342,8 @@ def _maintain(con, client, items: dict, selection, *, cfg, cal: str, now: dateti
               report: RunReport) -> None:
     beh, limits = cfg.behaviour, cfg.limits
     updates = withdrawals = 0
-    active = sorted((r for r in store.all_proposals(con).values() if r["state"] == store.ACTIVE),
+    active = sorted((r for r in store.all_proposals(con).values()
+                     if r["state"] == store.ACTIVE and not store.is_chat(r["commitment_id"])),
                     key=lambda r: r["sort_key"])
     for row in active:
         cid = row["commitment_id"]
@@ -424,56 +437,62 @@ def _insert(con, client, items: dict, *, cfg, cal: str, report: RunReport) -> No
     rows = store.all_proposals(con)
     live = sum(1 for r in rows.values() if r["state"] in store.LIVE_STATES)
     pending = sorted((r for cid, r in rows.items()
-                      if r["state"] == store.PENDING and cid in items),
+                      if r["state"] == store.PENDING and (cid in items or store.is_chat(cid))),
                      key=lambda r: r["sort_key"])
     created = 0
     for index, row in enumerate(pending):
         if created >= int(limits["max_creates_per_run"]) or live >= int(limits["max_active"]):
             report.bump("create_deferred", len(pending) - index)
             break
-        cid = row["commitment_id"]
-        if store.is_retired(con, row["event_id"]):  # pragma: no cover - defensive
-            continue
-        if not store.transition(con, cid, store.INSERTING, expect=store.PENDING,
-                                count_attempt=True):
-            continue
-        con.commit()
-        body = _body(row)
-        resource = insert_resource(body, event_id=row["event_id"], commitment_id=cid)
-        try:
-            remote = client.insert_event(cal, resource)
-        except ApiError as exc:
-            if exc.status == 409:
-                # The id exists: an earlier insert of ours whose answer was
-                # lost. Read it back rather than guess.
-                try:
-                    existing = client.get_event(cal, row["event_id"])
-                except ApiError:
-                    store.transition(con, cid, store.UNKNOWN, error="duplicate_id_unverified")
-                    report.bump("held_unknown")
-                else:
-                    _settle_from_remote(con, store.get(con, cid), existing, report=report)
-            elif exc.not_applied:
-                # Only a refusal Google itself gave counts toward FAILED; an
-                # outage on our side (DNS, refused connection) never does.
-                attempts = int(store.get(con, cid)["attempts"])
-                final = exc.sent and attempts >= int(limits["max_attempts"])
-                store.transition(con, cid, store.FAILED if final else store.PENDING,
-                                 error=f"insert:{exc.status}:{exc.code}")
-                report.bump("create_failed")
-            else:
-                store.transition(con, cid, store.UNKNOWN, error=f"insert:{exc.status}:{exc.code}")
+        state, inserted = insert_one(con, client, row, cfg=cfg, cal=cal, report=report)
+        created += 1 if inserted else 0
+        live += 1 if state in store.LIVE_STATES else 0
+
+
+def insert_one(con, client, row, *, cfg, cal: str, report: RunReport) -> tuple:
+    """Insert one PENDING row: (state afterwards, whether this call created
+    it). The state is None when another process got to the row first."""
+    cid = row["commitment_id"]
+    if store.is_retired(con, row["event_id"]):  # pragma: no cover - defensive
+        return None, False
+    if not store.transition(con, cid, store.INSERTING, expect=store.PENDING,
+                            count_attempt=True):
+        return None, False
+    con.commit()
+    body = _body(row)
+    resource = insert_resource(body, event_id=row["event_id"], commitment_id=cid)
+    try:
+        remote = client.insert_event(cal, resource)
+    except ApiError as exc:
+        if exc.status == 409:
+            # The id exists: an earlier insert of ours whose answer was
+            # lost. Read it back rather than guess.
+            try:
+                existing = client.get_event(cal, row["event_id"])
+            except ApiError:
+                store.transition(con, cid, store.UNKNOWN, error="duplicate_id_unverified")
                 report.bump("held_unknown")
-            con.commit()
-            live += 1 if store.get(con, cid)["state"] in store.LIVE_STATES else 0
-            continue
-        store.transition(con, cid, store.ACTIVE, etag=remote.get("etag") or "",
-                         html_link=remote.get("htmlLink") or "",
-                         applied_revision=row["content_revision"], applied_body=body, sent=True)
+            else:
+                _settle_from_remote(con, store.get(con, cid), existing, report=report)
+        elif exc.not_applied:
+            # Only a refusal Google itself gave counts toward FAILED; an
+            # outage on our side (DNS, refused connection) never does.
+            attempts = int(store.get(con, cid)["attempts"])
+            final = exc.sent and attempts >= int(cfg.limits["max_attempts"])
+            store.transition(con, cid, store.FAILED if final else store.PENDING,
+                             error=f"insert:{exc.status}:{exc.code}")
+            report.bump("create_failed")
+        else:
+            store.transition(con, cid, store.UNKNOWN, error=f"insert:{exc.status}:{exc.code}")
+            report.bump("held_unknown")
         con.commit()
-        created += 1
-        live += 1
-        report.bump("created")
+        return store.get(con, cid)["state"], False
+    store.transition(con, cid, store.ACTIVE, etag=remote.get("etag") or "",
+                     html_link=remote.get("htmlLink") or "",
+                     applied_revision=row["content_revision"], applied_body=body, sent=True)
+    con.commit()
+    report.bump("created")
+    return store.ACTIVE, True
 
 
 def _notify(con, notifier, *, cfg, now: datetime) -> str | None:
