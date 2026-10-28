@@ -6,29 +6,42 @@
 # directory replaces hermes-data with a read-only tmpfs inside one unit's
 # namespace and binds back only the subdirectories that unit uses.
 #
-#   sudo bash install-hermes-data-binds-root.sh install   # probe, install drop-ins, test oneshot units
-#   sudo bash install-hermes-data-binds-root.sh restart   # restart long-running units and probe inside them
+#   sudo bash install-hermes-data-binds-root.sh install [unit...]   # probe, install drop-ins, test oneshot units
+#   sudo bash install-hermes-data-binds-root.sh restart [unit...]   # restart long-running units and probe inside them
 #   sudo bash install-hermes-data-binds-root.sh status
 #   sudo bash install-hermes-data-binds-root.sh rollback
 #
-# Prints access results and counts only; never message bodies or titles.
+# Naming units limits install and restart to them; the default is all of UNITS.
+# Prints access results and counts only; never message bodies, titles or tokens.
 #
-# hermes-classifier-broker is not covered. It reads the bridge bearer token
-# from /srv/hermes/hermes-data/config.yaml (0640, group hermesreconcile), so
-# hiding that file stopped it from starting (2026-10-28). It needs its own fix
-# first: read the token from where the bridge reads it, or bind config.yaml.
+# hermes-classifier-broker needs an event_broker.py that reads the bridge token
+# from the bridge's own files. An older one read it from
+# /srv/hermes/hermes-data/config.yaml, which the binds hide, and stopped
+# starting (2026-10-28). Its probe loads the token, so pre-validation fails
+# and nothing is installed while the older script is still deployed.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DROPIN=30-hermes-data-binds.conf
-UNITS=(hermes-morning-brief hermes-line-reconcile hermes-calendar hermes-antigravity)
-LONG_RUNNING=(hermes-calendar hermes-antigravity)
+UNITS=(hermes-morning-brief hermes-line-reconcile hermes-classifier-broker hermes-calendar hermes-antigravity)
+LONG_RUNNING=(hermes-classifier-broker hermes-calendar hermes-antigravity)
 PROBE=/run/hermes-data-binds-probe.py
 BACKUP_ROOT=/srv/hermes/backups
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
+
+in_units() { [[ " ${UNITS[*]} " == *" $1 "* ]]; }
+
+select_units() {  # unit... -> keep only those in UNITS and LONG_RUNNING
+  [ "$#" -gt 0 ] || return 0
+  local u long=()
+  for u in "$@"; do in_units "$u" || die "not a covered unit: $u"; done
+  for u in "${LONG_RUNNING[@]}"; do [[ " $* " == *" $u "* ]] && long+=("$u"); done
+  UNITS=("$@")
+  LONG_RUNNING=("${long[@]}")
+}
 
 write_probe() {
   cat > "$PROBE" <<'PY'
@@ -65,6 +78,11 @@ def rw(p): open(p, "r+b").close()
 def append(p):
     if not os.path.exists(p): raise FileNotFoundError(p)
     open(p, "ab").close()
+def broker_token():
+    # The broker's own loader, so this fails exactly when the broker would.
+    sys.path.insert(0, f"{H}/tools/events")
+    import event_broker
+    event_broker.load_bearer_token()
 CHECKS = {
   "hermes-morning-brief": [
     ("events.db read", lambda: sq(f"{H}/events/events.db", "commitments"), True),
@@ -81,6 +99,10 @@ CHECKS = {
     ("events.db open r+b", lambda: rw(f"{H}/events/events.db"), True),
     ("logs/line-reconcile.log append-open", lambda: append(f"{H}/logs/line-reconcile.log"), True),
     ("logs/line-refresh.log read", lambda: read(f"{H}/logs/line-refresh.log"), False),
+  ],
+  "hermes-classifier-broker": [
+    ("tools/events/event_broker.py read", lambda: read(f"{H}/tools/events/event_broker.py"), True),
+    ("bridge token loads (value not shown)", broker_token, True),
   ],
   "hermes-calendar": [
     ("events.db read", lambda: sq(f"{H}/events/events.db", "commitments"), True),
@@ -198,15 +220,19 @@ cmd_install() {
       && echo "  loaded: $u" || die "$u did not load $DROPIN"
   done
 
-  step "hermes-morning-brief: real unit sandbox, 'plan' (never delivers)"
-  run_unit_override hermes-morning-brief probe "/usr/bin/python3 -s $PROBE hermes-morning-brief" \
-    || die "morning-brief probe failed in the real unit. Rollback: sudo bash $0 rollback"
-  run_unit_override hermes-morning-brief plan "/srv/hermes/planning/venv/bin/python -m planning.cli --config /srv/hermes/planning/config.yaml plan" \
-    || die "morning-brief plan failed in the real unit. Rollback: sudo bash $0 rollback"
+  if in_units hermes-morning-brief; then
+    step "hermes-morning-brief: real unit sandbox, 'plan' (never delivers)"
+    run_unit_override hermes-morning-brief probe "/usr/bin/python3 -s $PROBE hermes-morning-brief" \
+      || die "morning-brief probe failed in the real unit. Rollback: sudo bash $0 rollback"
+    run_unit_override hermes-morning-brief plan "/srv/hermes/planning/venv/bin/python -m planning.cli --config /srv/hermes/planning/config.yaml plan" \
+      || die "morning-brief plan failed in the real unit. Rollback: sudo bash $0 rollback"
+  fi
 
-  step "hermes-line-reconcile: real unit sandbox, probe only (no reconcile run)"
-  run_unit_override hermes-line-reconcile probe "/usr/bin/python3 -s $PROBE hermes-line-reconcile" \
-    || die "line-reconcile probe failed in the real unit. Rollback: sudo bash $0 rollback"
+  if in_units hermes-line-reconcile; then
+    step "hermes-line-reconcile: real unit sandbox, probe only (no reconcile run)"
+    run_unit_override hermes-line-reconcile probe "/usr/bin/python3 -s $PROBE hermes-line-reconcile" \
+      || die "line-reconcile probe failed in the real unit. Rollback: sudo bash $0 rollback"
+  fi
 
   rm -f "$PROBE"
   step "done"
@@ -240,7 +266,9 @@ try:
 except Exception as e:
     print("  antigravity /health FAILED", type(e).__name__); raise SystemExit(1)
 PY
-  journalctl -u hermes-calendar.service --since "-2 min" -o cat --no-pager | cut -c1-160 | tail -n 6 | sed 's/^/  calendar: /'
+  if [[ " ${LONG_RUNNING[*]} " == *" hermes-calendar "* ]]; then
+    journalctl -u hermes-calendar.service --since "-2 min" -o cat --no-pager | cut -c1-160 | tail -n 6 | sed 's/^/  calendar: /'
+  fi
   rm -f "$PROBE"
   [ "$bad" -eq 0 ] && echo "RESTART OK" || die "a restart check failed; see above. Rollback: sudo bash $0 rollback"
 }
@@ -270,8 +298,8 @@ cmd_rollback() {
 }
 
 case "${1:-}" in
-  install)  cmd_install ;;
-  restart)  cmd_restart ;;
+  install)  select_units "${@:2}"; cmd_install ;;
+  restart)  select_units "${@:2}"; cmd_restart ;;
   status)   cmd_status ;;
   rollback) cmd_rollback ;;
   *) die "usage: $0 install|restart|status|rollback" ;;
