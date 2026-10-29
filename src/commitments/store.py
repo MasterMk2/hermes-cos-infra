@@ -142,6 +142,13 @@ def save_commitment(
         col_names = [col[0] for col in cur.description]
         row_dict = dict(zip(col_names, existing))
 
+        # A source replay cannot undo a completion established by later
+        # evidence. Explicit admin reopen still uses save_commitment normally.
+        if (reason in {"initial_backfill", "calendar_backfill"}
+                and row_dict.get("work_state") == WorkState.DONE.value):
+            cmt.work_state = WorkState.DONE.value
+            cmt.resolved_at = row_dict.get("resolved_at")
+
         for f in tracked:
             old_v = str(row_dict.get(f) or "")
             new_v = str(getattr(cmt, f) or "")

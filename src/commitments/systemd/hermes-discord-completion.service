@@ -1,0 +1,86 @@
+[Unit]
+Description=Hermes Discord evidence-based commitment completion
+Documentation=file:///srv/hermes/hermes-data/tools/commitments/discord_completion.py
+RequiresMountsFor=/srv/hermes
+# Conditions are evaluated by PID 1, so they work while hermes-data is 0700.
+ConditionPathExists=/srv/hermes/hermes-data/tools/commitments/discord_completion.py
+ConditionPathExists=/srv/hermes/hermes-data/events/events.db
+ConditionPathExists=/srv/hermes/knowledge/discord/messages.db
+
+[Service]
+Type=oneshot
+# Dedicated identity: no sudo/docker/adm, no membership in hermesreconcile,
+# and NO ACL on /srv/hermes/hermes-data itself. Write access is a named ACL on
+# events/ and events.db only; read access is a named ACL on the Discord archive.
+User=hermescompletion
+Group=hermescompletion
+
+# The Hermes agent re-tightens /srv/hermes/hermes-data to 0700 whenever it
+# saves an auth store, which masks every named ACL on that directory. Bind
+# mounts are resolved by PID 1, so the service never traverses hermes-data and
+# keeps working regardless of that mode. Mount points are created by
+# install-discord-completion-root.sh.
+BindPaths=/srv/hermes/hermes-data/events:/opt/hermes-discord-completion/events
+BindReadOnlyPaths=/srv/hermes/hermes-data/tools/commitments:/opt/hermes-discord-completion/lib/commitments
+WorkingDirectory=/opt/hermes-discord-completion/lib
+Environment=PYTHONPATH=/opt/hermes-discord-completion/lib
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Fail fast and visibly if the sandbox or ACLs do not grant what the run needs.
+# test(1) uses access(2), which honours ACLs and read-only mounts.
+ExecStartPre=/usr/bin/test -w /opt/hermes-discord-completion/events
+ExecStartPre=/usr/bin/test -w /opt/hermes-discord-completion/events/events.db
+ExecStartPre=/usr/bin/test -r /srv/hermes/knowledge/discord/messages.db
+ExecStart=/usr/bin/python3 -s -m commitments.discord_completion --events-db /opt/hermes-discord-completion/events/events.db --discord-db /srv/hermes/knowledge/discord/messages.db --apply scan
+TimeoutStartSec=5min
+UMask=0027
+Nice=10
+
+MemoryHigh=150M
+MemoryMax=250M
+CPUQuota=50%
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/opt/hermes-stack
+InaccessiblePaths=-/opt/hermes-premium-cli
+InaccessiblePaths=-/opt/hermes-coding-handoff
+InaccessiblePaths=-/srv/hermes/antigravity
+InaccessiblePaths=-/srv/hermes/gmail
+InaccessiblePaths=-/srv/hermes/gmail-event
+InaccessiblePaths=-/srv/hermes/calendar
+InaccessiblePaths=-/srv/hermes/channel-gateway
+InaccessiblePaths=-/srv/hermes/attention
+InaccessiblePaths=-/srv/hermes/github
+InaccessiblePaths=-/srv/hermes/backups
+
+ReadOnlyPaths=/srv/hermes/knowledge/discord

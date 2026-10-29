@@ -218,6 +218,37 @@ class TestCommitmentStore(unittest.TestCase):
         save_commitment(self.conn, cmt, reason="cancelled_meeting")
         self.assertEqual(get_commitment(self.conn, "cmt_cycle").work_state, WorkState.CANCELLED.value)
 
+    def test_source_backfill_cannot_reopen_evidence_based_completion(self):
+        cmt = Commitment(
+            commitment_id="cmt_finished",
+            title="Sample task",
+            responsibility=Responsibility.SELF.value,
+            work_state=WorkState.ACTIONABLE.value,
+        )
+        save_commitment(self.conn, cmt)
+        cmt.work_state = WorkState.DONE.value
+        cmt.resolved_at = "2026-09-06T14:00:00+00:00"
+        save_commitment(self.conn, cmt, reason="discord_reply_completion")
+
+        replay = Commitment(
+            commitment_id="cmt_finished",
+            title="Sample task",
+            responsibility=Responsibility.SELF.value,
+            work_state=WorkState.ACTIONABLE.value,
+        )
+        save_commitment(self.conn, replay, reason="initial_backfill")
+        saved = get_commitment(self.conn, "cmt_finished")
+        self.assertEqual(saved.work_state, WorkState.DONE.value)
+        self.assertEqual(saved.resolved_at, "2026-09-06T14:00:00+00:00")
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM commitment_history WHERE commitment_id=? "
+                "AND field='work_state' AND new_value='ACTIONABLE'",
+                ("cmt_finished",),
+            ).fetchone()[0],
+            0,
+        )
+
 
 class TestReconciliation(unittest.TestCase):
     """Test noise filtering, semantics classification, cross-source merge, and backfill."""

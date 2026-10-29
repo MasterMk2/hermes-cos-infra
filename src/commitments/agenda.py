@@ -113,10 +113,15 @@ def generate_agenda(
         # 1. Waiting-for
         if cmt.work_state == WorkState.WAITING.value or cmt.responsibility == Responsibility.COUNTERPARTY.value:
             waiting_items.append(c_dict)
+            continue
 
         # 2. Scheduled
         if cmt.scheduled_at:
             scheduled_items.append(c_dict)
+
+        # A group task or unknown assignee is not the owner's to-do list.
+        if cmt.responsibility != Responsibility.SELF.value:
+            continue
 
         # 3. Temporal classifications
         dt_due = parse_iso(cmt.due_at)
