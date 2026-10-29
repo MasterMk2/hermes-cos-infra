@@ -218,6 +218,37 @@ class TestCommitmentStore(unittest.TestCase):
         save_commitment(self.conn, cmt, reason="cancelled_meeting")
         self.assertEqual(get_commitment(self.conn, "cmt_cycle").work_state, WorkState.CANCELLED.value)
 
+    def test_source_backfill_cannot_reopen_evidence_based_completion(self):
+        cmt = Commitment(
+            commitment_id="cmt_finished",
+            title="Sample task",
+            responsibility=Responsibility.SELF.value,
+            work_state=WorkState.ACTIONABLE.value,
+        )
+        save_commitment(self.conn, cmt)
+        cmt.work_state = WorkState.DONE.value
+        cmt.resolved_at = "2026-09-06T14:00:00+00:00"
+        save_commitment(self.conn, cmt, reason="discord_reply_completion")
+
+        replay = Commitment(
+            commitment_id="cmt_finished",
+            title="Sample task",
+            responsibility=Responsibility.SELF.value,
+            work_state=WorkState.ACTIONABLE.value,
+        )
+        save_commitment(self.conn, replay, reason="initial_backfill")
+        saved = get_commitment(self.conn, "cmt_finished")
+        self.assertEqual(saved.work_state, WorkState.DONE.value)
+        self.assertEqual(saved.resolved_at, "2026-09-06T14:00:00+00:00")
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM commitment_history WHERE commitment_id=? "
+                "AND field='work_state' AND new_value='ACTIONABLE'",
+                ("cmt_finished",),
+            ).fetchone()[0],
+            0,
+        )
+
 
 class TestReconciliation(unittest.TestCase):
     """Test noise filtering, semantics classification, cross-source merge, and backfill."""
@@ -469,6 +500,48 @@ class TestAgendaProjection(unittest.TestCase):
         # Noise is not in overdue or today
         all_ids = [item["commitment_id"] for section in ["today", "soon", "overdue", "waiting_for"] for item in agenda[section]]
         self.assertNotIn("cmt_noise", all_ids)
+
+    def _save(self, cid, responsibility, work_state, created_at=None, due_at=None):
+        save_commitment(self.conn, Commitment(
+            commitment_id=cid, title=f"項目 {cid}", responsibility=responsibility,
+            work_state=work_state, created_at=created_at, due_at=due_at,
+        ))
+
+    def test_unassigned_group_request_is_not_waiting(self):
+        for cid, source in (("cmt_group", "discord"), ("cmt_mail", "gmail")):
+            self._save(cid, Responsibility.SHARED.value, WorkState.BLOCKED.value,
+                       created_at="2026-09-05T00:00:00+00:00")
+            add_evidence(self.conn, cid, CommitmentEvidence(
+                source_type=source, source_id=f"{source}:{cid}",
+                observed_at="2026-09-05T00:00:00+00:00"))
+        agenda = generate_agenda(self.conn, now=self.now, view="waiting")
+        self.assertEqual(agenda["summary"]["waiting_count"], 0)
+        # Gmail-only SHARED rows are noise to the planner, not requests.
+        self.assertEqual(agenda["summary"]["needs_review_count"], 1)
+
+    def test_old_waiting_without_a_date_ahead_is_only_counted(self):
+        self._save("cmt_old", Responsibility.COUNTERPARTY.value, WorkState.WAITING.value,
+                   created_at="2026-09-05T00:00:00+00:00")
+        # The source message is what ages a row, not when it was imported.
+        add_evidence(self.conn, "cmt_old", CommitmentEvidence(
+            source_type="line", source_id="line:old", observed_at="2026-07-20T09:00:00+09:00"))
+        self._save("cmt_dated", Responsibility.COUNTERPARTY.value, WorkState.WAITING.value,
+                   created_at="2026-07-20T00:00:00+00:00", due_at="2026-09-10T00:00:00+00:00")
+        self._save("cmt_group_old", Responsibility.SHARED.value, WorkState.BLOCKED.value,
+                   created_at="2026-08-10T00:00:00+00:00")
+        agenda = generate_agenda(self.conn, now=self.now, view="waiting")
+        self.assertEqual([i["commitment_id"] for i in agenda["waiting_for"]], ["cmt_dated"])
+        self.assertEqual(agenda["summary"]["aged_out_count"], 2)
+        self.assertEqual(agenda["summary"]["needs_review_count"], 0)
+
+    def test_finished_rows_do_not_crowd_out_undated_waiting(self):
+        for n in range(1100):
+            self._save(f"cmt_done_{n}", Responsibility.INFORMATIONAL.value,
+                       WorkState.DISMISSED.value, due_at="2026-08-01T00:00:00+00:00")
+        self._save("cmt_wait", Responsibility.COUNTERPARTY.value, WorkState.WAITING.value,
+                   created_at="2026-09-05T00:00:00+00:00")
+        agenda = generate_agenda(self.conn, now=self.now, view="waiting")
+        self.assertEqual(agenda["summary"]["waiting_count"], 1)
 
 
 class TestSecurityAndPromptInjection(unittest.TestCase):

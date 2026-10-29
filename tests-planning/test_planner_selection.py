@@ -257,16 +257,95 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(plan["counts"]["filtered_noise"]["total"], 0)
 
     def test_shared_without_a_deadline_needs_review_rather_than_a_task(self):
-        cid = fx.add_commitment(
+        fx.add_commitment(
             self.conn, title="担当が曖昧な依頼", responsibility="SHARED",
             evidence="discord",
         )
         plan = self.plan()
-        self.assertEqual(ids(plan, "waiting_for"), [cid])
-        self.assertEqual(
-            plan["waiting_for"][0]["reason_for_inclusion"], REASON_SHARED_NEEDS_REVIEW
+        self.assertEqual(all_ids(plan), [])
+        self.assertEqual(plan["counts"]["needs_review"], {"shown": 0, "total": 1})
+
+    # -- owner semantics v2: needs review and age --------------------------
+
+    def test_unassigned_group_request_is_not_waiting_for(self):
+        """SHARED + BLOCKED is what reconcile writes when it cannot tell who
+        was asked. It is a WAITING_WORK_STATE, but nobody waits on a reply."""
+        fx.add_commitment(
+            self.conn, title="誰かが資料を出す依頼", responsibility="SHARED",
+            work_state="BLOCKED", evidence="discord",
         )
-        self.assertEqual(ids(plan, "backlog"), [])
+        fx.add_commitment(
+            self.conn, title="期日つきの担当未定の依頼", responsibility="SHARED",
+            work_state="BLOCKED", due_at="2026-09-10T18:00:00+09:00",
+            evidence="line",
+        )
+        plan = self.plan()
+        self.assertEqual(all_ids(plan), [])
+        self.assertEqual(plan["counts"]["waiting_for"]["total"], 0)
+        self.assertEqual(plan["counts"]["needs_review"]["total"], 2)
+        self.assertEqual(plan["counts"]["aged_out"]["total"], 0)
+
+    def test_unassigned_group_request_is_only_counted_for_two_weeks(self):
+        fx.add_commitment(
+            self.conn, title="古い担当未定の依頼", responsibility="SHARED",
+            work_state="BLOCKED", created_at="2026-08-20T12:00:00+09:00",
+            evidence="discord",
+        )
+        plan = self.plan()
+        self.assertEqual(plan["counts"]["needs_review"]["total"], 0)
+        self.assertEqual(plan["counts"]["aged_out"]["total"], 1)
+
+    def test_old_waiting_leaves_the_brief_unless_a_date_is_still_ahead(self):
+        old = "2026-08-01T12:00:00+09:00"
+        undated = fx.add_commitment(
+            self.conn, title="一か月以上前の返事待ち", responsibility="COUNTERPARTY",
+            work_state="WAITING", created_at=old, evidence="line",
+        )
+        past_due = fx.add_commitment(
+            self.conn, title="期日が過ぎた古い返事待ち", responsibility="COUNTERPARTY",
+            work_state="WAITING", created_at=old,
+            due_at="2026-08-10T18:00:00+09:00", evidence="line",
+        )
+        due_ahead = fx.add_commitment(
+            self.conn, title="来週期日の古い返事待ち", responsibility="COUNTERPARTY",
+            work_state="WAITING", created_at=old,
+            due_at="2026-09-12T18:00:00+09:00", evidence="line",
+        )
+        recent_past_due = fx.add_commitment(
+            self.conn, title="期日が過ぎた最近の返事待ち", responsibility="COUNTERPARTY",
+            work_state="WAITING", created_at="2026-08-20T12:00:00+09:00",
+            due_at="2026-09-01T18:00:00+09:00", evidence="line",
+        )
+        plan = self.plan()
+        self.assertEqual(sorted(ids(plan, "waiting_for")), sorted([due_ahead, recent_past_due]))
+        self.assertNotIn(undated, all_ids(plan))
+        self.assertNotIn(past_due, all_ids(plan))
+        self.assertEqual(plan["counts"]["aged_out"]["total"], 2)
+
+    def test_age_is_measured_from_the_source_message_not_the_row(self):
+        """The nightly backfill rewrites updated_at, and the first backfill
+        stamped created_at long after the message; observed_at is the message."""
+        cid = fx.add_commitment(
+            self.conn, title="取り込みが遅れた返事待ち", responsibility="COUNTERPARTY",
+            work_state="WAITING", created_at="2026-09-07T00:00:00+09:00",
+            updated_at="2026-09-08T01:00:00+09:00", evidence=None,
+        )
+        fx.add_evidence(self.conn, cid, "line", f"line:{cid}",
+                        observed_at="2026-07-25T09:00:00+09:00")
+        plan = self.plan()
+        self.assertEqual(all_ids(plan), [])
+        self.assertEqual(plan["counts"]["aged_out"]["total"], 1)
+
+    def test_age_windows_are_configurable_and_default_when_absent(self):
+        cid = fx.add_commitment(
+            self.conn, title="古い返事待ち", responsibility="COUNTERPARTY",
+            work_state="WAITING", created_at="2026-08-01T12:00:00+09:00",
+            evidence="line",
+        )
+        # A config file written before these keys existed (the deployed one).
+        self.assertEqual(ids(self.plan(config={"windows": {"followup_days": 7}}), "waiting_for"), [])
+        widened = self.plan(config={"windows": {"waiting_max_age_days": 60}})
+        self.assertEqual(ids(widened, "waiting_for"), [cid])
 
     def test_shared_calendar_event_still_reaches_scheduled(self):
         """Coordinator ruling on AMENDMENT 1 C: a SHARED calendar slot is a
@@ -498,6 +577,11 @@ class SelectionTest(unittest.TestCase):
                           evidence=[("discord", "discord:shared-1")])
         fx.add_commitment(self.conn, title="共有の証跡B（長いほう）", commitment_id="cmt_dup_b",
                           evidence=[("discord", "discord:shared-1")])
+        fx.add_commitment(self.conn, title="担当未定の依頼", responsibility="SHARED",
+                          work_state="BLOCKED", evidence="discord")
+        fx.add_commitment(self.conn, title="古い返事待ち", responsibility="COUNTERPARTY",
+                          work_state="WAITING", created_at="2026-08-01T12:00:00+09:00",
+                          evidence="line")
 
         plan = self.plan()
         eligible = self.conn.execute(
@@ -511,9 +595,13 @@ class SelectionTest(unittest.TestCase):
         counted += plan["counts"]["deduplicated"]["total"]
         counted += plan["counts"]["not_categorised"]["total"]
         counted += plan["counts"]["unknown_work_state"]["total"]
+        counted += plan["counts"]["needs_review"]["total"]
+        counted += plan["counts"]["aged_out"]["total"]
         self.assertEqual(counted, eligible, plan["counts"])
         # And each new counter is actually exercised by this fixture.
         self.assertEqual(plan["counts"]["deduplicated"]["total"], 1)
+        self.assertEqual(plan["counts"]["needs_review"]["total"], 1)
+        self.assertEqual(plan["counts"]["aged_out"]["total"], 1)
         self.assertGreaterEqual(plan["counts"]["not_categorised"]["total"], 2)
         self.assertEqual(plan["counts"]["filtered_noise"]["total"], 1)
 
@@ -522,7 +610,7 @@ class SelectionTest(unittest.TestCase):
         fx.seed_realistic_day(self.conn)
         plan = self.plan()
         for name in ("deduplicated", "not_categorised", "filtered_noise",
-                     "unknown_work_state"):
+                     "unknown_work_state", "needs_review", "aged_out"):
             self.assertEqual(plan["counts"][name]["shown"], 0, name)
 
     def test_counts_total_is_before_the_cap(self):

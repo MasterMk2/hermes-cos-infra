@@ -59,7 +59,13 @@ def classify_event_semantics(row: sqlite3.Row) -> Tuple[str, str, float]:
     actor = row["actor"] or ""
     status = row["status"] or ""
     counterparty = row["counterparty"] or ""
-    classification_reason = row["classification_reason"] or ""
+    kind = row["type"] or ""
+    review = bool(row["needs_human_review"]) if "needs_human_review" in row.keys() else False
+
+    if status in {"resolved", "done", "closed"}:
+        return (Responsibility.SHARED.value, WorkState.DONE.value, 0.90)
+    if status in {"ignored", "cancelled"}:
+        return (Responsibility.SHARED.value, WorkState.CANCELLED.value, 0.90)
 
     # 1. Check noise/informational first
     if is_automated_noise(source_type, summary, counterparty):
@@ -69,31 +75,26 @@ def classify_event_semantics(row: sqlite3.Row) -> Tuple[str, str, float]:
     if status == "superseded":
         return (Responsibility.SHARED.value, WorkState.CANCELLED.value, 0.90)
 
-    # 3. Check LINE user outbound requests (waiting for counterparty response)
-    if source_type == "line" and actor == "user":
+    # Actor identifies the speaker, not the assignee. Only promises made by
+    # the owner establish ownership; a request made by the owner is waiting.
+    if actor == "unknown" or review:
+        return (Responsibility.SHARED.value, WorkState.BLOCKED.value, 0.40)
+    if actor == "user" and kind == "request":
         return (Responsibility.COUNTERPARTY.value, WorkState.WAITING.value, 0.85)
-
-    # 4. Check user commitments (user promised to do something)
-    if actor == "user":
+    if actor == "user" and kind in {"commitment", "deadline", "follow_up"}:
         return (Responsibility.SELF.value, WorkState.ACTIONABLE.value, 0.85)
+    if actor == "counterparty" and kind == "commitment":
+        return (Responsibility.COUNTERPARTY.value, WorkState.WAITING.value, 0.85)
 
     # 5. Check waiting-for in Discord/LINE
     # If summary indicates waiting for external input or another person's commitment
     if any(w in summary for w in ["返信待ち", "確認待ち", "連絡待ち", "返信予定", "連絡する約束", "作ると約束", "対応すると約束"]):
         return (Responsibility.COUNTERPARTY.value, WorkState.WAITING.value, 0.80)
 
-    # 6. Counterparty explicit request to user (actionable by user)
-    if any(req in summary for req in ["依頼", "要請", "送付", "提出", "作成", "確認を依頼"]):
-        # If it's a team broadcast or role recruitment
-        if any(team in summary for team in ["参加募集", "シフト調整", "募集"]):
-            return (Responsibility.SHARED.value, WorkState.ACTIONABLE.value, 0.80)
-        return (Responsibility.SELF.value, WorkState.ACTIONABLE.value, 0.85)
-
-    # Default fallback based on status
-    if status == "open":
-        return (Responsibility.SELF.value, WorkState.ACTIONABLE.value, 0.70)
-    elif status == "candidate":
-        return (Responsibility.SHARED.value, WorkState.ACTIONABLE.value, 0.60)
+    # Received requests can address somebody else in a group. Neither an
+    # imperative verb nor an open status proves that the owner is assigned.
+    if kind in {"request", "deadline", "follow_up"} or status in {"open", "candidate"}:
+        return (Responsibility.SHARED.value, WorkState.BLOCKED.value, 0.40)
 
     return (Responsibility.INFORMATIONAL.value, WorkState.DISMISSED.value, 0.50)
 

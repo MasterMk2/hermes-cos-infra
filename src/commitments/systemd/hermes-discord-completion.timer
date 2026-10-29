@@ -1,0 +1,14 @@
+[Unit]
+Description=Check attributable Discord completion replies hourly
+
+[Timer]
+# :07 keeps clear of the Discord event-tick (*/15) that also writes events.db,
+# and still runs before the 08:30 Morning Brief.
+OnCalendar=*-*-* *:07:00 Asia/Tokyo
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=hermes-discord-completion.service
+
+[Install]
+WantedBy=timers.target
