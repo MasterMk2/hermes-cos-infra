@@ -78,6 +78,11 @@ windows:
   next_up_hours: 72
   imminent_hours: 3
   followup_days: 7
+  # Measured from the source message. An older waiting row stays only while
+  # it has a date today or later; unassigned group requests (SHARED/BLOCKED)
+  # are only counted (counts.needs_review), never listed as 返事待ち.
+  waiting_max_age_days: 30
+  needs_review_days: 14
   conflict_default_duration_minutes: 60
   dense_window_minutes: 90
 

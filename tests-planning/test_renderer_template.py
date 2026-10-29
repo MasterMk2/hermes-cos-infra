@@ -91,7 +91,7 @@ def make_plan(*, date="2026-09-12", timezone_name="Asia/Tokyo", conflicts=None,
     # Same reason, for the two counters that close the arithmetic: with these,
     # the sum of every `total` is the eligible row count, so no row can leave
     # the planner uncounted.
-    for name in ("deduplicated", "not_categorised"):
+    for name in ("deduplicated", "not_categorised", "needs_review", "aged_out"):
         plan["counts"][name] = {"shown": 0, "total": int(totals.get(name, 0))}
     # `source_freshness` stays optional on purpose: the renderer must tolerate a
     # plan without it (it reads the block with `or {}`), and `busy_day_plan()`

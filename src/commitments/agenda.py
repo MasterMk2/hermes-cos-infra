@@ -2,7 +2,7 @@
 
 import sqlite3
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set, Tuple
 
 from .models import (
     Commitment,
@@ -14,6 +14,51 @@ from .models import (
 from .store import list_commitments
 
 JST = timezone(timedelta(hours=9))
+
+#: The planner's defaults (planning.plan_config `windows`); see NEEDS REVIEW
+#: and AGE in planning/planner.py. A waiting row, or an unassigned group
+#: request (SHARED + BLOCKED), older than this with no date ahead is only
+#: counted.
+WAITING_MAX_AGE_DAYS = 30
+NEEDS_REVIEW_DAYS = 14
+
+#: Loaded one state at a time: the table also holds every finished row, so a
+#: single capped query ordered by date cut off the undated active ones.
+ACTIVE_WORK_STATES = (
+    WorkState.ACTIONABLE.value,
+    WorkState.WAITING.value,
+    WorkState.SCHEDULED.value,
+    WorkState.BLOCKED.value,
+)
+ACTIVE_LOAD_LIMIT = 100000
+
+
+def _evidence_facts(conn: sqlite3.Connection) -> Tuple[Dict[str, datetime], Set[str]]:
+    """Per commitment: the earliest `origin` time (when the message was
+    written), and whether any evidence is not Gmail. The planner treats a
+    SHARED row with Gmail evidence only as noise, not as a request."""
+    origins: Dict[str, datetime] = {}
+    non_gmail: Set[str] = set()
+    rows = conn.execute(
+        "SELECT commitment_id, source_type, evidence_role, observed_at FROM commitment_evidence"
+    ).fetchall()
+    for commitment_id, source_type, role, observed_at in rows:
+        if source_type != "gmail":
+            non_gmail.add(commitment_id)
+        observed = parse_iso(observed_at) if role == "origin" else None
+        if observed is not None and (commitment_id not in origins or observed < origins[commitment_id]):
+            origins[commitment_id] = observed
+    return origins, non_gmail
+
+
+def _aged_out(cmt: Commitment, born: Optional[datetime], now: datetime, max_age_days: int) -> bool:
+    """Older than `max_age_days` and with no date left today or later."""
+    born = born or parse_iso(cmt.created_at)
+    if born is None or now - born <= timedelta(days=max_age_days):
+        return False
+    ahead = parse_iso(cmt.due_at) or parse_iso(cmt.scheduled_at)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return ahead is None or ahead < today_start
 
 
 def priority_score(cmt: Commitment, now: datetime) -> float:
@@ -69,6 +114,8 @@ def generate_agenda(
     window_days: int = 7,
     view: Optional[str] = None,
     limit_per_view: Optional[int] = None,
+    waiting_max_age_days: int = WAITING_MAX_AGE_DAYS,
+    needs_review_days: int = NEEDS_REVIEW_DAYS,
 ) -> Dict[str, Any]:
     """Generate Chief of Staff agenda projection across Today, Soon, Overdue, Waiting, and Scheduled."""
     eff_limit = limit_per_view if limit_per_view is not None else (10 if view else 2)
@@ -81,8 +128,12 @@ def generate_agenda(
     today_end = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=now.tzinfo)
     soon_end = now + timedelta(days=window_days)
 
-    # Load non-dismissed, non-done commitments
-    all_active = list_commitments(conn, limit=1000, now=now)
+    all_active: List[Commitment] = []
+    for state in ACTIVE_WORK_STATES:
+        all_active.extend(list_commitments(conn, work_state=state, limit=ACTIVE_LOAD_LIMIT, now=now))
+    origin_times, non_gmail = _evidence_facts(conn)
+    needs_review_count = 0
+    aged_out_count = 0
 
     today_items: List[Dict[str, Any]] = []
     soon_items: List[Dict[str, Any]] = []
@@ -110,10 +161,24 @@ def generate_agenda(
         if cmt.counterparty:
             c_dict["counterparty"] = cmt.counterparty
 
-        # 1. Waiting-for
-        if cmt.work_state == WorkState.WAITING.value or cmt.responsibility == Responsibility.COUNTERPARTY.value:
+        # 1. Waiting-for. An unassigned group request (SHARED + BLOCKED) is
+        # not a reply anybody waits for; it is only counted, as in the planner.
+        needs_review = (cmt.responsibility == Responsibility.SHARED.value
+                        and cmt.work_state == WorkState.BLOCKED.value)
+        waiting = not needs_review and (
+            cmt.work_state in (WorkState.WAITING.value, WorkState.BLOCKED.value)
+            or cmt.responsibility == Responsibility.COUNTERPARTY.value
+        )
+        if needs_review or waiting:
+            max_age = needs_review_days if needs_review else waiting_max_age_days
+            if _aged_out(cmt, origin_times.get(cmt.commitment_id), now, max_age):
+                aged_out_count += 1
+                continue
+        if waiting:
             waiting_items.append(c_dict)
             continue
+        if needs_review and cmt.commitment_id in non_gmail:
+            needs_review_count += 1
 
         # 2. Scheduled
         if cmt.scheduled_at:
@@ -152,6 +217,8 @@ def generate_agenda(
         "overdue_count": len(overdue_items),
         "waiting_count": len(waiting_items),
         "scheduled_count": len(scheduled_items),
+        "needs_review_count": needs_review_count,
+        "aged_out_count": aged_out_count,
     }
 
     view_norm = (view or "").strip().lower()

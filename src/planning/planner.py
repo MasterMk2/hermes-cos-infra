@@ -73,8 +73,9 @@ campaigns**. Those are mail subjects, not tasks. So::
 
         its evidence source_types intersect {discord, line, calendar}
 
-    A SHARED row with non-Gmail evidence that is not action-eligible goes to
-    `waiting_for` with reason_for_inclusion = "shared_needs_review".
+    A SHARED row with non-Gmail evidence that is not action-eligible is
+    counted in `counts.needs_review` and never rendered — see NEEDS REVIEW
+    below.
 
     Any row the evidence test alone excluded is counted in
     `counts.filtered_noise` and never rendered.
@@ -139,13 +140,34 @@ duplicate pairs, so skipping that order reports a phantom conflict.
 --------------------------------------------------------------------------
 BLOCKED (AMENDMENT 1 section D)
 --------------------------------------------------------------------------
-`BLOCKED` has 0 production rows but is a legal `CHECK` value, so a future
-reconcile change can start writing it at any time. It maps to `waiting_for` —
-semantically "I cannot act on this yet" is exactly the waiting contract of
-phase sections 14/15 — and never to `must_do` or `next_up`. It is never
+`BLOCKED` maps to `waiting_for` — semantically "I cannot act on this yet" is
+exactly the waiting contract of phase sections 14/15 — and never to `must_do`
+or `next_up`. The exception is `SHARED` + `BLOCKED`, below. It is never
 silently dropped. Any work_state this module does not recognise is counted in
 ``counts.unknown_work_state`` and logged at WARNING: silent data loss is the
 worst failure mode a planning layer has.
+
+--------------------------------------------------------------------------
+NEEDS REVIEW and AGE (owner semantics v2)
+--------------------------------------------------------------------------
+Owner semantics v2 in `commitments.reconcile` writes `SHARED` + `BLOCKED` for
+a request whose assignee it could not determine: mostly work asked of somebody
+else in a group chat. About 100 such rows a month arrive and nothing closes
+them, so listing them under 返事待ち grew that section to 194 of 292 rows by
+2026-10-30. They are not waiting for anybody's reply, so they are kept out of
+every category and counted in ``counts.needs_review`` instead, and only for
+`windows.needs_review_days` after the source message.
+
+Genuine waiting rows (`WAITING`, other `BLOCKED`) arrive at about 50 a month
+and are closed only by an explicit completion, so `waiting_for` grew too.
+A waiting row older than `windows.waiting_max_age_days` stays in the brief
+only while it still has a date today or later; otherwise it is counted in
+``counts.aged_out``. The same rule retires an old needs-review row.
+
+Age is measured from the earliest `origin` evidence `observed_at` (the source
+message), falling back to `created_at`. `updated_at` is unusable for this:
+the nightly backfill rewrites it on every row. Nothing here changes a stored
+state; every row stays reachable through `commitment_list`.
 
 --------------------------------------------------------------------------
 TIMEZONE (phase sections 54, 83)
@@ -266,7 +288,6 @@ from .plan_models import (
     REASON_DUE_WITHIN_72H,
     REASON_NO_DATE_BACKLOG,
     REASON_SCHEDULED_TODAY,
-    REASON_SHARED_NEEDS_REVIEW,
     REASON_WAITING,
     REASON_WAITING_FOLLOWUP,
     WARNING_DATA_FRESHNESS,
@@ -359,7 +380,7 @@ WHERE {_COMMITMENT_PREDICATE}
 # (phase section 74). The join keeps the 573 Gmail evidence rows belonging to
 # dismissed mail out of the result set.
 _EVIDENCE_SQL = """
-SELECT e.commitment_id, e.source_type, e.source_id
+SELECT e.commitment_id, e.source_type, e.source_id, e.evidence_role, e.observed_at
 FROM commitment_evidence e
 JOIN commitments c ON c.commitment_id = e.commitment_id
 WHERE c.work_state NOT IN ('DONE', 'CANCELLED', 'DISMISSED')
@@ -439,6 +460,9 @@ class _Candidate:
     all_day: bool = False
     created_dt: Optional[datetime] = None
     updated_dt: Optional[datetime] = None
+    #: Earliest `observed_at` among the `origin` evidence rows: when the
+    #: source message was written. See NEEDS REVIEW and AGE.
+    origin_dt: Optional[datetime] = None
 
     def covers(self, plan_date: date_cls) -> bool:
         """True when this row's scheduled span includes `plan_date`."""
@@ -519,16 +543,25 @@ def _load_candidates(conn, tzinfo, default_duration: timedelta) -> List[_Candida
 
     types_by_id: Dict[str, List[str]] = {}
     pairs_by_id: Dict[str, List[Tuple[str, str]]] = {}
+    origin_by_id: Dict[str, datetime] = {}
     cur.execute(_EVIDENCE_SQL)
-    for commitment_id, source_type, source_id in cur.fetchall():
+    for commitment_id, source_type, source_id, role, observed_at in cur.fetchall():
         types_by_id.setdefault(commitment_id, []).append(source_type)
         pairs_by_id.setdefault(commitment_id, []).append((source_type, source_id))
+        if role == "origin":
+            # Parsed, not compared as text: the column mixes +09:00 and +00:00.
+            _, observed = parse_stored(observed_at, tzinfo)
+            if observed is not None and (
+                commitment_id not in origin_by_id or observed < origin_by_id[commitment_id]
+            ):
+                origin_by_id[commitment_id] = observed
 
     candidates: List[_Candidate] = []
     for row in rows:
         cand = _derive(row, tzinfo, default_duration)
         cand.source_types = sorted(set(types_by_id.get(cand.commitment_id, [])))
         cand.source_pairs = sorted(set(pairs_by_id.get(cand.commitment_id, [])))
+        cand.origin_dt = origin_by_id.get(cand.commitment_id)
         candidates.append(cand)
     return candidates
 
@@ -735,6 +768,14 @@ class _Context:
     next_up_limit: datetime
     imminent_limit: datetime
     followup_delta: timedelta
+    waiting_max_age: timedelta
+    needs_review_max_age: timedelta
+
+
+#: `counts` keys for rows that `classify` keeps out of every category on
+#: purpose. See NEEDS REVIEW and AGE in the module docstring.
+HELD_NEEDS_REVIEW = "needs_review"
+HELD_AGED_OUT = "aged_out"
 
 
 def _effective_due(cand: _Candidate) -> Optional[datetime]:
@@ -749,6 +790,31 @@ def _overdue_days(cand: _Candidate, ctx: _Context) -> int:
     if due is None:
         return 0
     return max(0, (ctx.plan_date - due.date()).days)
+
+
+def _aged_out(cand: _Candidate, ctx: _Context, max_age: timedelta) -> bool:
+    """Older than `max_age` and with no date left today or later."""
+    born = cand.origin_dt or cand.created_dt
+    if born is None or (ctx.day_end_exclusive - born) <= max_age:
+        return False
+    ahead = _effective_due(cand) or cand.sched_start
+    return ahead is None or ahead < ctx.day_start
+
+
+def held_back(cand: _Candidate, ctx: _Context) -> Optional[str]:
+    """The `counts` key for a row that stays out of the brief, else None.
+
+    Only meaningful for a row that reached the waiting stage of `classify`;
+    `classify` calls it there, and `build_daily_plan` calls it again to count
+    a row `classify` left uncategorised.
+    """
+    if _shared_needs_review(cand):
+        if _aged_out(cand, ctx, ctx.needs_review_max_age):
+            return HELD_AGED_OUT
+        return HELD_NEEDS_REVIEW
+    if cand.work_state in WAITING_WORK_STATES and _aged_out(cand, ctx, ctx.waiting_max_age):
+        return HELD_AGED_OUT
+    return None
 
 
 def classify(cand: _Candidate, ctx: _Context) -> Tuple[Optional[Category], Optional[str]]:
@@ -774,6 +840,11 @@ def classify(cand: _Candidate, ctx: _Context) -> Tuple[Optional[Category], Optio
         if ctx.day_end_exclusive <= due <= ctx.next_up_limit:
             return (Category.NEXT_UP, REASON_DUE_WITHIN_72H)
 
+    # Before the waiting branch: SHARED + BLOCKED is a WAITING_WORK_STATE, but
+    # an undetermined assignee is not a reply anybody is waiting for.
+    if held_back(cand, ctx) is not None:
+        return (None, None)
+
     if cand.work_state in WAITING_WORK_STATES:
         idle_from = cand.updated_dt or cand.created_dt
         # Measured to the end of the plan day, not to the wall clock: a brief
@@ -783,9 +854,6 @@ def classify(cand: _Candidate, ctx: _Context) -> Tuple[Optional[Category], Optio
         if idle_from is not None and (ctx.day_end_exclusive - idle_from) > ctx.followup_delta:
             return (Category.WAITING_FOR, REASON_WAITING_FOLLOWUP)
         return (Category.WAITING_FOR, REASON_WAITING)
-
-    if _shared_needs_review(cand):
-        return (Category.WAITING_FOR, REASON_SHARED_NEEDS_REVIEW)
 
     if deadline_eligible and actionable and cand.due_at is None and cand.scheduled_at is None:
         return (Category.BACKLOG, REASON_NO_DATE_BACKLOG)
@@ -1146,6 +1214,8 @@ def build_daily_plan(
         next_up_limit=day_end_exclusive + timedelta(hours=float(windows["next_up_hours"])),
         imminent_limit=as_of + timedelta(hours=float(windows["imminent_hours"])),
         followup_delta=timedelta(days=float(windows["followup_days"])),
+        waiting_max_age=timedelta(days=float(windows["waiting_max_age_days"])),
+        needs_review_max_age=timedelta(days=float(windows["needs_review_days"])),
     )
 
     default_duration = timedelta(minutes=float(windows["conflict_default_duration_minutes"]))
@@ -1179,13 +1249,17 @@ def build_daily_plan(
 
     buckets: Dict[Category, List[Tuple[_Candidate, str]]] = {c: [] for c in Category}
     not_categorised = 0
+    held: Dict[str, int] = {HELD_NEEDS_REVIEW: 0, HELD_AGED_OUT: 0}
     for cand in survivors:
         category, reason = classify(cand, ctx)
         if category is None or reason is None:
+            held_key = held_back(cand, ctx)
             # RULING 1's other half: a row the evidence rule — and only the
             # evidence rule — kept out of every category is noise, and is
             # counted rather than dropped in silence.
-            if _excluded_by_evidence(cand):
+            if held_key is not None:
+                held[held_key] += 1
+            elif _excluded_by_evidence(cand):
                 filtered_noise += 1
             else:
                 not_categorised += 1
@@ -1244,6 +1318,8 @@ def build_daily_plan(
     # the arithmetic closes.
     plan["counts"]["deduplicated"] = {"shown": 0, "total": collapsed}
     plan["counts"]["not_categorised"] = {"shown": 0, "total": not_categorised}
+    for key, total in held.items():
+        plan["counts"][key] = {"shown": 0, "total": total}
 
     if freshness is None:
         freshness = freshness_module.collect(cfg, now=now_local)

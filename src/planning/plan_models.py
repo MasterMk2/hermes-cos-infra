@@ -69,6 +69,9 @@ REASON_DUE_WITHIN_72H = "due_within_72h"
 REASON_WAITING = "waiting"
 REASON_WAITING_FOLLOWUP = "waiting_followup"
 REASON_NO_DATE_BACKLOG = "no_date_backlog"
+#: No longer emitted: such rows are counted in `counts.needs_review` instead
+#: (planner docstring, NEEDS REVIEW and AGE). Kept so a plan persisted by an
+#: earlier version still validates.
 REASON_SHARED_NEEDS_REVIEW = "shared_needs_review"
 
 #: The fixed members. `overdue_<N>d` is the one parameterised member and is
@@ -291,6 +294,10 @@ COUNTS_KEYS: tuple = (
     # row can leave the planner uncounted.
     "deduplicated",
     "not_categorised",
+    # Rows kept out of the brief on purpose (planner docstring, NEEDS REVIEW
+    # and AGE): an unassigned group request, and a waiting row past its age.
+    "needs_review",
+    "aged_out",
 )
 
 WARNING_DATA_FRESHNESS = "data_freshness_warning"

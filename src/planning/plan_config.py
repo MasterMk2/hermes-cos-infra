@@ -88,6 +88,11 @@ DEFAULTS: Dict[str, Any] = {
         "next_up_hours": 72,
         "imminent_hours": 3,
         "followup_days": 7,
+        # Age limits measured from the source message; see NEEDS REVIEW and
+        # AGE in planner.py. 14 days matches the 2026-10-30 manual cleanup
+        # rule for unassigned requests.
+        "waiting_max_age_days": 30,
+        "needs_review_days": 14,
         # Production has 0 rows with a NULL scheduled_end_at (I2-PROFILE.md
         # section E.2); this is a defensive fallback, not the primary path.
         "conflict_default_duration_minutes": 60,
