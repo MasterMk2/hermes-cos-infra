@@ -38,6 +38,7 @@ attention-engine.service (User=<PI_USER>)
 2. **インデックス公開面の厳格化**:
    - /srv/hermes/gmail/index/ は 2750 hermesgmail:hermesreconcile。
    - index.db および status.json は 0440 hermesgmail:hermesreconcile。
+   - 差分更新版の gm_index.py では、index.db は index-a.db / index-b.db（どちらも 0440）の一方を指すシンボリックリンク。変更は読み手が使っていない側へ差分で書き、書き終えてからリンクを切り替える。読み手は書き込みのロックを待たない。全件の作り直しは、差分で追えないときと、夜 4 時台の圧縮だけ。
    - 一般ユーザーや無権限プロセスからは完全遮断（PermissionError）。
    - Hermes Docker コンテナは /opt/gmail に read-only マウントされ、書き込み試行は OSError: [Errno 30] Read-only file system で拒絶される。
 3. **カレンダー照合境界**:

@@ -195,6 +195,9 @@ def render_health(row, clock) -> tuple:
     meta = _meta(row)
     service = row["source_id"]
     if row["signal_type"] == "health_recovered":
+        if meta.get("still_open"):
+            # Part of the service recovered while an announced problem stays.
+            return ("一部復旧しました", _lines(f"{service}: {row['summary']}"))
         return ("復旧しました",
                 _lines(f"{service} は復旧しました。",
                        f"（{meta.get('reason', '')} の状態が解消）"
@@ -291,6 +294,8 @@ def digest_line(row, clock) -> str:
     if kind == "health_degraded":
         return f"・障害: {row['source_id']} — {summary}"
     if kind == "health_recovered":
+        if _meta(row).get("still_open"):
+            return f"・一部復旧: {row['source_id']} — {summary}"
         return f"・復旧: {row['source_id']}"
     return f"・{summary}"
 

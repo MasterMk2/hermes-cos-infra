@@ -107,8 +107,8 @@ class EngineCase(unittest.TestCase):
 
     def add_event(self, **over):
         row = {
-            "event_id": "evt_1", "type": "request", "summary": "資料を提出する",
-            "actor": "counterparty", "counterparty": "だれか", "status": "open",
+            "event_id": "evt_1", "type": "commitment", "summary": "資料を提出する",
+            "actor": "user", "counterparty": "だれか", "status": "open",
             "actionability": 0.9, "importance": 0.8, "urgency": 0.9,
             "confidence": 0.9,
             "occurred_at": fx.ago(self.clock, hours=1),

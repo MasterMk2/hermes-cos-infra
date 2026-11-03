@@ -340,6 +340,9 @@ def test_resuming_unsent_batch_does_not_regenerate_answer(tmp_path):
     current=recover(restarted,row)
     async def no_regeneration(*a,**kw): raise AssertionError('immutable batch must be reused')
     restarted.hermes.ask_async=no_regeneration
+    def no_new_run(*a,**kw): raise AssertionError('immutable batch must be reused')
+    restarted.hermes.start_run=no_new_run
+    restarted.hermes.get_run=no_new_run
     run(restarted.process(current))
     assert restarted.session.calls[0]['body']['messages']==[{'type':'text','text':'original answer'}]
 

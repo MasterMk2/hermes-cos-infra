@@ -57,7 +57,7 @@ class HermesRejected(Exception):
 
 
 class HermesResult:
-    __slots__ = ("status", "text", "run_id", "usage", "replayed")
+    __slots__ = ("status", "text", "run_id", "usage", "replayed", "elapsed")
 
     def __init__(self, status, text, run_id, usage=None, replayed=False):
         self.status = status
@@ -65,6 +65,8 @@ class HermesResult:
         self.run_id = run_id
         self.usage = usage or {}
         self.replayed = replayed
+        # Seconds from the run's recorded start to its end; logged, not shown.
+        self.elapsed = None
 
     @property
     def ok(self) -> bool:
@@ -83,15 +85,20 @@ def idempotency_key(gateway_request_id: str) -> str:
 
 
 def build_run_body(envelope: TrustedEnvelope, user_text: str, *,
-                   session_id: str, model: str) -> dict:
+                   session_id: str, model: str,
+                   coding_handoff: bool = False) -> dict:
     """The complete request. Every value is the gateway's own.
 
     Note the shape of the seam: `instructions` is rendered from the envelope
     dataclass, `input` is the raw user text, and there is no third field into
     which anything else could be merged.
+
+    `coding_handoff` selects which capability sentence the envelope carries. It
+    is a gateway configuration value, never anything derived from the message.
     """
     return {
-        "instructions": render_envelope_system_message(envelope),
+        "instructions": render_envelope_system_message(
+            envelope, coding_handoff=coding_handoff),
         "input": str(user_text or ""),
         "session_id": session_id,
         "model": model,
@@ -103,17 +110,22 @@ class HermesClient:
 
     def __init__(self, base_url: str, api_key: str, *, model: str = "hermes-agent",
                  poll_interval: float = 2.0, absolute_timeout: float = 240.0,
-                 connect_timeout: float = 30.0):
+                 connect_timeout: float = 30.0,
+                 coding_handoff: bool = False):
         self.base_url = base_url.rstrip("/")
         self._api_key = api_key
         self.model = model
+        # Which capability sentence every envelope carries (J.1). Set once from
+        # configuration; there is no per-request override, deliberately.
+        self.coding_handoff = bool(coding_handoff)
         self.poll_interval = poll_interval
         self.absolute_timeout = absolute_timeout
         self.connect_timeout = connect_timeout
 
     # -- transport -----------------------------------------------------
 
-    def _request(self, method: str, path: str, body=None, headers=None):
+    def _request(self, method: str, path: str, body=None, headers=None, *,
+                 timeout: float | None = None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(self.base_url + path, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self._api_key}")
@@ -122,7 +134,7 @@ class HermesClient:
         for k, v in (headers or {}).items():
             req.add_header(k, v)
         try:
-            with urllib.request.urlopen(req, timeout=self.connect_timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout or self.connect_timeout) as r:
                 raw = r.read().decode("utf-8") or "{}"
                 return r.status, json.loads(raw)
         except urllib.error.HTTPError as exc:
@@ -147,7 +159,8 @@ class HermesClient:
         """Returns (run_id, replayed). Raises on a refusal that a retry
         cannot fix."""
         body = build_run_body(envelope, user_text, session_id=session_id,
-                              model=self.model)
+                              model=self.model,
+                              coding_handoff=self.coding_handoff)
         status, payload = self._request(
             "POST", "/v1/runs", body,
             {"Idempotency-Key": idempotency_key(request_id)},
@@ -168,8 +181,10 @@ class HermesClient:
             raise HermesUnavailable(f"http {status}")
         raise HermesRejected(f"http {status}")
 
-    def get_run(self, run_id: str) -> dict:
-        status, payload = self._request("GET", f"/v1/runs/{run_id}")
+    def get_run(self, run_id: str, *, timeout: float | None = None) -> dict:
+        """One status read. `timeout` bounds this GET alone, so a wedged API
+        cannot hold a waiting worker past its own deadline checks."""
+        status, payload = self._request("GET", f"/v1/runs/{run_id}", timeout=timeout)
         if status == 200:
             return payload
         if status == 404:
@@ -181,9 +196,10 @@ class HermesClient:
     def poll(self, run_id: str, *, deadline: float | None = None) -> HermesResult:
         """Block until the run settles or the absolute deadline passes.
 
-        A timeout leaves the run alone: it may still be running, and the
-        answer can be collected on a later attempt because the run id is
-        recorded against the request.
+        A synchronous helper for tools and tests. The gateway's worker does
+        not use it: it waits in `Gateway._await_run`, which persists the run
+        id first, renews its claim, survives a restart by resuming the same
+        run, and measures the deadline from the run's recorded start.
         """
         deadline = deadline or (time.monotonic() + self.absolute_timeout)
         last = {}

@@ -1,0 +1,106 @@
+[Unit]
+Description=Hermes Coding Handoff Broker (channel -> supervised coding job)
+After=network-online.target
+Wants=network-online.target
+# The job database this broker writes lives on the USB disk. Starting before it
+# mounts would create an empty ledger beside the real one, and an empty ledger
+# is one that has never seen an authorization — so every redelivered message
+# would become a second job.
+RequiresMountsFor=@JOBS_DIR@
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The identity is not invented by this package. It is the account that already
+# owns the job database and the coding bridge socket, resolved at install time
+# and rendered here. A new service user would need an ACL on a 0700 directory
+# and a 0660 socket that the bridge recreates on every restart — a grant that
+# silently stops working the first time the bridge is restarted. Reusing the
+# existing owner gives the broker exactly the access the supervisor already
+# has, and not one path more.
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@STATE_DIR@
+
+ExecStart=/usr/bin/python3 -u @APP_DIR@/handoff_server.py @CONFIG_FILE@
+
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The supervisor's own socket discovery falls back to a literal path that is
+# only correct inside the Hermes container. This process is not in it, so it
+# states where the bridge actually is rather than letting that list guess.
+Environment=HERMES_CODING_BRIDGE_SOCK=@BRIDGE_SOCKET@
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=coding-handoff
+
+# --- Hardening ------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+# tmpfs rather than true: the coding bridge may live under the operator's home
+# on this host, and `true` would make its socket invisible to a service that
+# must connect to it. The exact paths needed are bound back in below; nothing
+# else under /home is visible.
+ProtectHome=tmpfs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# Loopback HTTP inbound from the gateway, and a Unix socket outbound to the
+# coding bridge. Nothing else: this service never reaches the network.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=localhost
+IPAddressDeny=any
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+MemoryMax=256M
+TasksMax=64
+
+# Exactly what the broker touches, resolved from the live host.
+#
+# BindPaths re-expose paths that ProtectHome=tmpfs would otherwise hide;
+# ReadWritePaths make them writable under ProtectSystem=strict. Connecting to
+# a Unix socket needs write permission on the socket inode, which is why the
+# socket's directory is read-write rather than read-only.
+BindPaths=@JOBS_DIR@
+BindPaths=@BRIDGE_SOCKET_DIR@
+BindReadOnlyPaths=@BRIDGE_CONFIG@
+# The job layer imports `security_patterns` from the directory *above*
+# jobs/ (supervisor.py inserts `parent.parent` on sys.path), so the parent has
+# to be readable or every dispatch fails at import time.
+BindReadOnlyPaths=@JOBS_PARENT@
+# The repositories themselves. Readiness is observed by stat-ing the checkout
+# and running `git rev-parse --verify HEAD` against it, and on this host those
+# live under the operator's home — which ProtectHome=tmpfs hides. Without
+# these binds every registered project reports `repository_path_missing` and
+# nothing can ever be dispatched. Resolved from the bridge registry at install
+# time; read-only, because the broker only ever looks.
+@REPO_BINDS@
+ReadWritePaths=@STATE_DIR@ @JOBS_DIR@ @BRIDGE_SOCKET_DIR@
+# app/, config/ and specs/ are absent from ReadWritePaths on purpose: the
+# service must not be able to rewrite its own code, widen its own registry or
+# edit the specification it is about to hand to a worker.
+ReadOnlyPaths=@APP_DIR@ @CONFIG_DIR@ @SPEC_DIR@
+
+# The broker must never read the assistant's configuration or the gateway's
+# credentials. It needs the job layer and the specifications, and nothing else.
+InaccessiblePaths=@GATEWAY_DIR@
+
+[Install]
+WantedBy=multi-user.target

@@ -131,6 +131,95 @@ class TestOwnerDmIsQueued(DiscordAdapterTestCase):
         await self.bot.on_message(fake_message(content="ping"))
         self.assertEqual(self.counts().get("QUEUED"), 1)
 
+    async def test_the_database_work_runs_off_the_event_loop(self):
+        # On the loop it would stall discord.py's gateway heartbeat whenever
+        # the USB disk is slow.
+        import threading
+        loop_thread = threading.get_ident()
+        seen = []
+        original = gw_discord.store.record_inbound
+
+        def spy(con, canonical):
+            seen.append(threading.get_ident())
+            return original(con, canonical)
+
+        gw_discord.store.record_inbound = spy
+        try:
+            await self.bot._handle(fake_message(content="テストです"))
+        finally:
+            gw_discord.store.record_inbound = original
+        self.assertEqual(len(seen), 1)
+        self.assertNotEqual(seen[0], loop_thread)
+        self.assertEqual(self.counts().get("QUEUED"), 1)
+
+    async def test_two_quick_dms_are_recorded_in_the_order_they_arrived(self):
+        # With the database work in a thread, nothing ordered two DMs' commits:
+        # the second could be queued, claimed and answered before the first.
+        import asyncio
+        import threading
+        import time
+        events, original = [], self.bot._record
+
+        def slow_first(canonical):
+            mid = canonical.platform_message_id
+            events.append(("start", mid))
+            if not events[:-1]:
+                time.sleep(0.2)   # the first DM's write is slow (a USB stall)
+            try:
+                return original(canonical)
+            finally:
+                events.append(("end", mid))
+
+        self.bot._record = slow_first
+        first = asyncio.create_task(self.bot._handle(fake_message(content="一通目", message_id=1)))
+        second = asyncio.create_task(self.bot._handle(fake_message(content="二通目", message_id=2)))
+        await asyncio.gather(first, second)
+        self.assertEqual(events, [("start", "1"), ("end", "1"), ("start", "2"), ("end", "2")])
+        con = open_db(self.db_path)
+        try:
+            row = store.claim_next(con, max_active=2)
+            con.commit()
+        finally:
+            con.close()
+        self.assertEqual(row["text"], "一通目")
+
+    async def test_a_dm_queued_at_shutdown_is_still_recorded(self):
+        # Second review: DMs parked behind an intake lock were cancelled at
+        # shutdown before they were written, and Discord does not redeliver.
+        import asyncio
+        import time
+        original = self.bot._record
+
+        def slow(canonical):
+            time.sleep(0.2)
+            return original(canonical)
+
+        self.bot._record = slow
+        tasks = [asyncio.create_task(self.bot._handle(
+            fake_message(content=f"{i}通目", message_id=10 + i))) for i in range(3)]
+        await asyncio.sleep(0.05)
+        for t in tasks:
+            t.cancel()      # what asyncio.run does to leftover tasks on exit
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(self.bot._intake.shutdown, wait=True)
+        self.assertEqual(self.counts().get("QUEUED"), 3)
+
+    async def test_typing_pulse_is_best_effort(self):
+        class Channel:
+            def __init__(self, error=None):
+                self.error, self.calls = error, 0
+
+            async def typing(self):
+                self.calls += 1
+                if self.error:
+                    raise self.error
+
+        ok, broken = Channel(), Channel(RuntimeError("synthetic"))
+        self.bot.get_channel = lambda cid: ok if cid == 1 else broken
+        self.assertTrue(await self.bot.typing_once("1"))
+        self.assertFalse(await self.bot.typing_once("2"))
+        self.assertEqual((ok.calls, broken.calls), (1, 1))
+
     async def test_the_text_survives(self):
         await self.bot._handle(fake_message(content="明日の予定は？"))
         con = open_db(self.db_path)

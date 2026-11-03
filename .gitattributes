@@ -21,3 +21,7 @@ Dockerfile  text eol=lf
 *.timer     text eol=lf
 *.timer.in  text eol=lf
 *.in        text eol=lf
+
+# Phase J.1: systemd drop-ins are units too. A .conf under a *.service.d/
+# directory with CRLF fails to parse exactly like a .service would.
+*.conf      text eol=lf
