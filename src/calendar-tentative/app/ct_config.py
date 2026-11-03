@@ -80,6 +80,10 @@ DEFAULT_SELECTION = {
     # Discord, LINE or Calendar also mentions is unaffected by this setting.
     "gmail_only": "people",
     "match_tolerance_minutes": 5,
+    # Also what a Discord/LINE conversation dated but did not make the
+    # owner's own task: a group's request or deadline, and an event someone
+    # else holds at a clock time (ct_select._chat_basis).
+    "others_from_chat": True,
 }
 DEFAULT_LIMITS = {
     "max_creates_per_run": 10,
@@ -87,6 +91,9 @@ DEFAULT_LIMITS = {
     "max_withdrawals_per_run": 10,
     "max_active": 100,
     "max_attempts": 5,
+    # Entries the owner may ask for in chat per rolling 24 hours (ct_request).
+    # 0 turns chat requests off; `list` still answers.
+    "max_chat_requests_per_day": 20,
 }
 DEFAULT_BEHAVIOUR = {
     "mode": MODE_APPLY,
@@ -243,12 +250,14 @@ def parse_config(data, *, path: str = "<memory>") -> Config:
     if sel["gmail_only"] not in GMAIL_ONLY_MODES:
         raise ConfigError(f"selection.gmail_only must be one of {', '.join(GMAIL_ONLY_MODES)}")
     _int(sel["match_tolerance_minutes"], "selection.match_tolerance_minutes", 0, 1440)
+    _bool(sel["others_from_chat"], "selection.others_from_chat")
 
     lim = merged["limits"]
     for key in ("max_creates_per_run", "max_updates_per_run", "max_withdrawals_per_run"):
         _int(lim[key], f"limits.{key}", 0, 500)
     _int(lim["max_active"], "limits.max_active", 0, 2000)
     _int(lim["max_attempts"], "limits.max_attempts", 1, 50)
+    _int(lim["max_chat_requests_per_day"], "limits.max_chat_requests_per_day", 0, 200)
 
     beh = merged["behaviour"]
     if beh["mode"] not in (MODE_APPLY, MODE_DRY_RUN):

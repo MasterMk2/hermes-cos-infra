@@ -4,7 +4,8 @@
 # unified in events.db) that is the owner's own dated work and is not yet on
 # a calendar becomes a TENTATIVE event on your primary calendar, its title
 # starting with 【仮】. Accept one by removing 【仮】 from the title; reject one
-# by deleting it. A deleted entry is never re-created.
+# by deleting it. A deleted entry is never re-created. You can also ask Hermes
+# in chat to add one (hermes-calendar-tentative-request.socket).
 
 paths:
   state_db: /srv/hermes/calendar-tentative/state/tentative.db
@@ -57,6 +58,11 @@ selection:
   # A real event with the same normalized title this close in time (or on
   # the same day, for all-day entries) counts as "already on the calendar".
   match_tolerance_minutes: 5
+  # Also what a Discord/LINE conversation dated but did not make your own
+  # task: a group's request or deadline (any state), and an event someone
+  # else holds at a clock time (a timed entry). The extractor's confidence
+  # in the event decides, since who owns it is unsettled by definition.
+  others_from_chat: true
 
 limits:
   max_creates_per_run: 10
@@ -66,6 +72,9 @@ limits:
   max_active: 100
   # Google refusing an insert this many times makes the entry FAILED.
   max_attempts: 5
+  # Entries Hermes may add when you ask in chat, per rolling 24 hours.
+  # 0 turns chat requests off (listing still works).
+  max_chat_requests_per_day: 20
 
 behaviour:
   # apply | dry_run. In dry_run the timer only counts what it would do.
