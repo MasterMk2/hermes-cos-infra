@@ -149,6 +149,7 @@ class Engine:
 
     def _scan_body(self, con, counters) -> None:
         clock = self.clock
+        counters['suppressed'] += att_events.retire_non_owner_backlog(con)
         initialized_at, baseline_done = store.first_run_state(con)
         recovery = self._downtime_recovery(con)
 

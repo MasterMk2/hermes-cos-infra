@@ -125,6 +125,9 @@ class Probe:
     #: as "healthy" would silently close a real outage (section 140).
     inconclusive: bool = False
     facts: dict = field(default_factory=dict)
+    #: Reasons whose open episodes a healthy verdict must leave open: the
+    #: service is otherwise fine, but this problem has not been shown fixed.
+    hold_reasons: tuple = ()
 
 
 def _age(value, now) -> float | None:
@@ -179,6 +182,16 @@ def probe_gateway(cfg, clock, gateway) -> Probe:
             return Probe(SVC_GATEWAY, False, "hermes_failing",
                          f"last success {live.get('last_hermes_success_at')}",
                          facts=facts)
+        # The failure has aged out of the window, but Hermes has still not
+        # answered anything since. That is "nobody asked", not "it works":
+        # falling through to ok here announced 「gateway は復旧しました」 on
+        # 2026-10-27 exactly one hour after the last failure, with Hermes
+        # still failing. The gateway is otherwise healthy, so its other
+        # episodes close as usual; only hermes_failing stays open, silent,
+        # until a real success closes it with a truthful recovery.
+        return Probe(SVC_GATEWAY, True,
+                     detail="no hermes success since the last failure",
+                     facts=facts, hold_reasons=("hermes_failing",))
 
     return Probe(SVC_GATEWAY, True, facts=facts)
 
@@ -545,23 +558,43 @@ def signals_from_probes(con, probes, cfg, clock) -> list:
             continue
 
         # Healthy. Close whatever was open, and announce only what was told.
-        for closed in store.close_episodes(con, probe.service, now=now_s):
+        # A held reason stays open only once it was announced: one the owner
+        # never heard of closes silently, as before, so a failure days later
+        # opens a fresh episode with its own grace instead of inheriting an
+        # age of days and alerting at once.
+        held = tuple(r for r in probe.hold_reasons
+                     if any(e["reason"] == r and e["notified_at"]
+                            for e in store.open_episodes(con, probe.service)))
+        for closed in store.close_episodes(con, probe.service,
+                                           keep_reasons=held, now=now_s):
             if not closed["notified_at"] or closed["recovery_notified_at"]:
                 continue
             if not cfg.health.get("recovery_notifications", True):
                 continue
+            meta = {"episode_id": closed["episode_id"],
+                    "reason": closed["reason"],
+                    "was_degraded_since": closed["first_degraded_at"]}
+            if held:
+                # Not 「gateway は復旧しました」: an announced problem is still
+                # open, and saying the whole service recovered is the false
+                # message of 2026-10-27.
+                summary = (f"{JAPANESE_REASON.get(closed['reason'], closed['reason'])}"
+                           f" は解消しました（"
+                           + "、".join(JAPANESE_REASON.get(r, r) for r in held)
+                           + " は継続中）")
+                meta["still_open"] = list(held)
+            else:
+                summary = f"{probe.service} は復旧しました"
             signals.append(make_signal(
                 source_type=SOURCE_HEALTH, source_id=probe.service,
                 signal_type=SIG_HEALTH_RECOVERED,
                 created_at=now_s,
                 subject=probe.service,
-                summary=f"{probe.service} は復旧しました",
+                summary=summary,
                 key_parts=("health", probe.service, "recovered",
                            closed["episode_id"]),
                 entity_key=f"health:{probe.service}",
                 severity="INFO", confidence=1.0, actionability=0.1,
-                metadata={"episode_id": closed["episode_id"],
-                          "reason": closed["reason"],
-                          "was_degraded_since": closed["first_degraded_at"]},
+                metadata=meta,
             ))
     return signals

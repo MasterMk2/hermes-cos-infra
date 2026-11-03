@@ -100,6 +100,7 @@ QUESTION_RE = event_extract.QUESTION_RE
 JST = event_extract.JST
 CLASSIFIER_VERSION = event_extract.CLASSIFIER_VERSION
 CLASSIFY_PARALLEL = event_extract.CLASSIFY_PARALLEL
+FAILURE_STREAK_LIMIT = event_extract.FAILURE_STREAK_LIMIT
 MAX_CANDIDATES_PER_RUN = event_extract.MAX_CANDIDATES_PER_RUN
 
 DB = Path("/srv/hermes/hermes-data/events/events.db")
@@ -477,6 +478,15 @@ def mark_processed(con, source_id, sent_at_ms, result, content_hash):
     )
 
 
+def record_failure(con, cand, failed_attempts):
+    """Do NOT lose the candidate: count the strike, retry next run, park it
+    as abandoned after 3 so it cannot burn calls forever."""
+    attempts = failed_attempts.get(cand["source_id"], 0) + 1
+    result = f"abandoned:{attempts}" if attempts >= 3 else f"failed:{attempts}"
+    mark_processed(con, cand["source_id"], cand["sent_at_ms"], result, cand["content_hash"])
+    log(f"classification deferred for {cand['source_id']} (attempt {attempts}, {result})")
+
+
 def history(con, event_id, field, old_value, new_value, at=None):
     con.execute(
         "INSERT INTO event_history (event_id, changed_at, field, old_value, new_value, actor) "
@@ -639,16 +649,19 @@ def classify_wave(wave):
     event_extract.classify_one is looked up on the module at call time, so the
     Discord prompt rebound in main() is the one it sends — and so a test can
     substitute it without any real LLM call happening.
+
+    Returns (results by source_id, whether the classifier was unavailable).
     """
-    results = {}
+    results, unavailable = {}, False
     with ThreadPoolExecutor(max_workers=CLASSIFY_PARALLEL) as ex:
         futures = {ex.submit(event_extract.classify_one, c): c for c in wave}
         for fut, c in futures.items():
             try:
                 results[c["source_id"]] = fut.result()
             except Exception as exc:
+                unavailable |= isinstance(exc, event_extract.ClassifierUnavailable)
                 log(f"classification failed for {c['source_id']}: {exc}")
-    return results
+    return results, unavailable
 
 
 def main():
@@ -746,6 +759,7 @@ def main():
 
     llm_ok = True
     idx = 0
+    failures_in_a_row = 0
     while idx < len(candidates):
         if metrics["llm_calls"] >= args.max_llm_calls:
             log("max llm calls reached; deferring rest")
@@ -755,32 +769,35 @@ def main():
         if not wave:
             break
         try:
-            results = classify_wave(wave)
+            results, unavailable = classify_wave(wave)
         finally:
             idx += len(wave)
         metrics["llm_calls"] += len(wave)
-        if not results:
-            # Whole wave failed (provider/container outage): no ledger change,
-            # no strike increment — plain retry on the next run.
+        if unavailable:
+            # The broker or the bridge did not answer at all (provider or
+            # container outage): no ledger change, no strike — plain retry on
+            # the next run.
             llm_ok = False
-            log("whole wave failed; stopping run (candidates left unprocessed)")
+            log("classifier unavailable; stopping run (candidates left unprocessed)")
             break
         for c in wave:
             r = results.get(c["source_id"])
             if r is None:
-                # Do NOT lose the candidate: count the strike, retry next run,
-                # park it as abandoned after 3 so it cannot burn calls forever.
-                attempts = failed_attempts.get(c["source_id"], 0) + 1
-                result = f"abandoned:{attempts}" if attempts >= 3 else f"failed:{attempts}"
-                mark_processed(con, c["source_id"], c["sent_at_ms"], result, c["content_hash"])
-                log(f"classification deferred for {c['source_id']} (attempt {attempts}, {result})")
+                record_failure(con, c, failed_attempts)
+                failures_in_a_row += 1
                 continue
+            failures_in_a_row = 0
             if not isinstance(r, dict) or not r.get("is_event"):
                 mark_processed(con, c["source_id"], c["sent_at_ms"], "no_event", c["content_hash"])
                 continue
             outcome = write_event(con, c, r, owner_id, metrics)
             mark_processed(con, c["source_id"], c["sent_at_ms"], outcome, c["content_hash"])
         con.commit()
+        if failures_in_a_row >= FAILURE_STREAK_LIMIT:
+            llm_ok = False
+            log(f"{failures_in_a_row} classifications failed in a row; "
+                "stopping run (candidates left unprocessed)")
+            break
 
     if llm_ok:
         # Deterministic bookkeeping. Deferred candidates are deliberately left

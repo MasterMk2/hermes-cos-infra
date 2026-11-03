@@ -45,7 +45,7 @@ SCHEMA_VERSION = 1
 #: Bumped whenever a decision rule changes, and written onto every decision
 #: row. "Why did it notify me in September?" is answerable only if the rules
 #: that were in force are identifiable (sections 77, 79).
-POLICY_VERSION = "g2.1"
+POLICY_VERSION = "g2.2-owner"
 
 DECISIONS = ("NOTIFY_NOW", "DEFER", "DIGEST", "SUPPRESS")
 

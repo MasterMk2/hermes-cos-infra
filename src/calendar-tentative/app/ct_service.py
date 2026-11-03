@@ -11,6 +11,9 @@
     ct_service.py repropose <commitment_id>
                               let a rejected/withdrawn/failed entry be
                               proposed again, under a new event id.
+    ct_service.py request     one chat request (ct_request): a JSON line on
+                              stdin, a JSON line on stdout. Run per
+                              connection by the request socket unit.
 
 Exit 78 (EX_CONFIG) is "configured to do nothing" and pairs with
 RestartPreventExitStatus=78, as in the other Hermes units.
@@ -26,11 +29,13 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import ct_engine
 import ct_mail
+import ct_request
 import ct_select
 import ct_store as store
 from ct_config import ConfigError, load_config
@@ -70,17 +75,23 @@ def open_index(cfg):
 
 
 @contextlib.contextmanager
-def run_lock(state_db: str):
-    """One run at a time: a manual run cannot race the timer's."""
+def run_lock(state_db: str, *, wait_seconds: float = 0.0):
+    """One run at a time: a manual run cannot race the timer's. A chat
+    request waits a little for a run to finish rather than give up at once."""
     directory = Path(state_db).parent
     directory.mkdir(parents=True, exist_ok=True)
     handle = open(directory / ".run.lock", "a+")
+    deadline = time.monotonic() + wait_seconds
     try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.5)
         yield True
     finally:
         handle.close()
@@ -292,6 +303,78 @@ def cmd_repropose(cfg, commitment_id: str) -> int:
     return EXIT_OK
 
 
+#: How long a chat request waits for a timer run to release the lock.
+REQUEST_LOCK_WAIT_SECONDS = 20.0
+
+
+def _client(cfg):
+    return TentativeCalendarClient(OAuthCredentials.from_directory(cfg.credential_dir))
+
+
+def serve_request(cfg, now, data: dict, *, client_factory=_client) -> dict:
+    """Carry out one parsed chat request. Raises ct_request.RequestError."""
+    path = cfg.paths["state_db"]
+    if data["op"] == "list":
+        if not os.path.exists(path):
+            return {"ok": True, "entries": [], "more": 0}
+        con = open_readonly(path)
+        try:
+            return ct_request.list_entries(con, cfg=cfg, now=now)
+        finally:
+            con.close()
+
+    if int(cfg.limits["max_chat_requests_per_day"]) == 0:
+        raise ct_request.RequestError("disabled", "チャットからの仮登録は止めてあります。")
+    desired, note = ct_request.parse_add(data, cfg=cfg, now=now)
+    if cfg.dry_run:
+        return {"ok": True, "state": "dry_run", "entry": ct_select.line_for(desired),
+                "message": "試運転中なので、カレンダーには入れていません。"}
+    with run_lock(path, wait_seconds=REQUEST_LOCK_WAIT_SECONDS) as locked:
+        client = None
+        if locked:
+            try:
+                client = client_factory(cfg)
+            except CredentialUnavailable as exc:
+                log.error("credential unavailable: %s", exc)
+                raise ct_request.RequestError(
+                    "unavailable", "カレンダーへの書き込みの準備ができていません。") from None
+        con = store.open_db(path)
+        index = open_index(cfg)
+        try:
+            return ct_request.add(con, desired, note, cfg=cfg, now=now, client=client,
+                                  index_con=index)
+        except ApiError as exc:
+            log.warning("chat request: google %s:%s", exc.status, exc.code)
+            return {"ok": False, "error": "google_unavailable",
+                    "entry": ct_select.line_for(desired),
+                    "message": "Google に届きませんでした。受け付けた分は 15 分以内にもう一度入れます。"}
+        finally:
+            con.close()
+            if index is not None:
+                index.close()
+
+
+def cmd_request(cfg, now, *, stdin=None, stdout=None, client_factory=_client) -> int:
+    stdin = stdin if stdin is not None else sys.stdin.buffer
+    stdout = stdout if stdout is not None else sys.stdout.buffer
+    raw = stdin.readline(ct_request.MAX_REQUEST_BYTES + 1)
+    try:
+        data = ct_request.parse_request(raw)
+        reply = serve_request(cfg, now, data, client_factory=client_factory)
+        log.info("chat request op=%s outcome=%s", data["op"],
+                 reply.get("state") or reply.get("error") or "ok")
+    except ct_request.RequestError as exc:
+        reply = exc.reply()
+        log.info("chat request refused: %s", exc.code)
+    except ct_engine.CalendarChanged as exc:
+        log.error("%s", exc)
+        reply = {"ok": False, "error": "unavailable",
+                 "message": "カレンダーへの書き込みの準備ができていません。"}
+    stdout.write(json.dumps(reply, ensure_ascii=False).encode("utf-8") + b"\n")
+    stdout.flush()
+    return EXIT_OK
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Hermes calendar tentative registration")
     parser.add_argument("--config", default=None)
@@ -304,6 +387,7 @@ def main(argv=None) -> int:
     sub.add_parser("check")
     rep = sub.add_parser("repropose")
     rep.add_argument("commitment_id")
+    sub.add_parser("request")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO),
@@ -325,6 +409,8 @@ def main(argv=None) -> int:
         return cmd_check(cfg)
     if command == "repropose":
         return cmd_repropose(cfg, args.commitment_id)
+    if command == "request":
+        return cmd_request(cfg, now)
     return cmd_run(cfg, now, force_dry_run=getattr(args, "dry_run", False))
 
 

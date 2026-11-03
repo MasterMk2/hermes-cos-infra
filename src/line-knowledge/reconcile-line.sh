@@ -77,7 +77,10 @@ if [[ -f "$EVENT_EXTRACT" ]]; then
     PREV_STATE_MTIME=$(stat -c %Y "$STATE_FILE" 2>/dev/null || echo 0)
   fi
 
-  if python3 "$EVENT_EXTRACT" --max-candidates 100 --max-llm-calls 12 >> "$LOG" 2>&1; then
+  # The unit stops this whole script at 10 minutes. No new classification
+  # starts after 240 s; the last one may run 165 s more, and stage 2 has taken
+  # up to 91 s, which leaves about a minute to spare.
+  if python3 "$EVENT_EXTRACT" --max-candidates 100 --max-llm-calls 12 --max-seconds 240 >> "$LOG" 2>&1; then
     T_EXTRACT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     log "stage 1: event extraction ok"
     if [[ -f "$STATE_FILE" ]]; then

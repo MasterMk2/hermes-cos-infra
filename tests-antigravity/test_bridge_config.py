@@ -36,6 +36,29 @@ class TestBridgeConfig(unittest.TestCase):
             self.assertFalse(cfg.allow_delegated_mcp)
             self.assertEqual(cfg.auth_token, "secret-test-token-123")
 
+    def _load_yaml(self, text):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bridge.yaml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return load_config(path)
+
+    def test_cli_concurrency_defaults_and_overrides(self):
+        cfg = self._load_yaml("timeout_seconds: 600\n")
+        self.assertEqual(cfg.max_concurrent_cli, 2)
+        self.assertEqual(cfg.cli_queue_wait_seconds, 90)
+        cfg = self._load_yaml("max_concurrent_cli: 1\ncli_queue_wait_seconds: 30\n")
+        self.assertEqual(cfg.max_concurrent_cli, 1)
+        self.assertEqual(cfg.cli_queue_wait_seconds, 30)
+
+    def test_cli_concurrency_out_of_range_is_rejected(self):
+        for text in ("max_concurrent_cli: 0\n", "max_concurrent_cli: 9\n",
+                     "cli_queue_wait_seconds: -1\n", "cli_queue_wait_seconds: 601\n"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    self._load_yaml(text)
+
 
 if __name__ == "__main__":
     unittest.main()

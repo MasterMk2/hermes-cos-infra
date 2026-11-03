@@ -1,0 +1,81 @@
+# Hermes calendar tentative registration — one chat request per connection.
+#
+# Started by hermes-calendar-tentative-request.socket (Accept=yes) with the
+# connection as stdin/stdout: one JSON line in, one JSON line out
+# (ct_service.py request). It holds the same single-scope refresh token as
+# the timer's service and makes at most one 【仮】 entry per request; it
+# reads no commitments and no mail, only its own state and H.1's snapshot.
+
+[Unit]
+Description=Hermes calendar tentative registration (one chat request)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/hermes
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+User=hermestentative
+Group=hermestentative
+WorkingDirectory=/srv/hermes/calendar-tentative
+
+LoadCredential=client-id:/etc/hermes-secrets/google-calendar-tentative/client-id
+LoadCredential=client-secret:/etc/hermes-secrets/google-calendar-tentative/client-secret
+LoadCredential=refresh-token:/etc/hermes-secrets/google-calendar-tentative/refresh-token
+
+ExecStart=/srv/hermes/calendar-tentative/venv/bin/python /srv/hermes/calendar-tentative/app/ct_service.py --config /srv/hermes/calendar-tentative/config/config.yaml request
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+SyslogIdentifier=hermes-calendar-tentative-request
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TZ=Asia/Tokyo
+# The agent's tool gives up after 60 s.
+RuntimeMaxSec=75
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+# TCP for googleapis.com; AF_UNIX for the connection it was handed.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=120M
+TasksMax=16
+
+# The only writable place: its own state.
+ReadWritePaths=/srv/hermes/calendar-tentative/state
+# H.1's snapshot, to avoid adding what the calendar already has.
+ReadOnlyPaths=-/srv/hermes/calendar/index
+
+InaccessiblePaths=-/etc/hermes-secrets
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+InaccessiblePaths=-/srv/hermes/docker
+InaccessiblePaths=-/srv/hermes/hermes-data
+InaccessiblePaths=-/srv/hermes/channel-gateway
+InaccessiblePaths=-/srv/hermes/calendar/state
+InaccessiblePaths=-/srv/hermes/gmail
+InaccessiblePaths=-/srv/hermes/gmail-event
+InaccessiblePaths=-/srv/hermes/github
+InaccessiblePaths=-/srv/hermes/attention
+InaccessiblePaths=-/srv/hermes/antigravity
+InaccessiblePaths=-/srv/hermes/coding-worker

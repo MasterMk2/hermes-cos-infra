@@ -122,6 +122,20 @@ class TestHealthText(unittest.TestCase):
         self.assertIn("復旧", body)
         self.assertLess(len(body), 120)
 
+    def test_a_partial_recovery_does_not_claim_the_service_recovered(self):
+        con = fx.db()
+        row = sig(con, source_type="health", source_id="gateway",
+                  signal_type="health_recovered", severity="INFO",
+                  summary="Discord Interface Bot が切断されています は解消しました"
+                          "（Hermes が応答を返せていません は継続中）",
+                  metadata={"reason": "discord_disconnected",
+                            "still_open": ["hermes_failing"]})
+        subject, body = render.render(row, CLOCK)
+        self.assertNotIn("gateway は復旧しました", body)
+        self.assertIn("継続中", body)
+        line = render.digest_line(row, CLOCK)
+        self.assertTrue(line.startswith("・一部復旧: gateway"), line)
+
 
 class TestShape(unittest.TestCase):
     def test_a_multi_line_body_keeps_its_line_breaks(self):

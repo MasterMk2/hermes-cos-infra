@@ -28,6 +28,7 @@ Message text is stored because a queue that cannot replay is not durable.
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -99,6 +100,25 @@ def get_inbound(con: sqlite3.Connection, request_id: str):
     ).fetchone()
 
 
+def recent_owner_inputs(con: sqlite3.Connection, message: CanonicalMessage):
+    """Bounded routing context from this sender's authenticated input only.
+
+    History can identify a project for a read or a fresh proposal. It never
+    supplies an approval. Excluding later receipts also makes queue replay
+    independent of messages which arrived after the current turn.
+    """
+    current = get_inbound(con, message.gateway_request_id)
+    cutoff = current["received_at"] if current else message.received_at
+    return [row[0] for row in con.execute(
+        "SELECT text FROM inbound_messages WHERE conversation_id=?"
+        " AND platform=? AND platform_user_id=? AND authz_subject=?"
+        " AND gateway_request_id<>?"
+        " AND julianday(received_at) BETWEEN julianday(?)-1 AND julianday(?)"
+        " ORDER BY received_at DESC, rowid DESC LIMIT 32",
+        (message.conversation_id, message.platform, message.platform_user_id,
+         SUBJECT_OWNER, message.gateway_request_id, cutoff, cutoff))]
+
+
 def set_state(con: sqlite3.Connection, request_id: str, state: str, *,
               error=None, run_id=None) -> None:
     now = _now()
@@ -121,6 +141,43 @@ def enqueue(con: sqlite3.Connection, request_id: str) -> None:
     set_state(con, request_id, "QUEUED")
 
 
+def note_run_started(con: sqlite3.Connection, request_id: str, run_id: str) -> bool:
+    """Record the Hermes run this request is waiting on, before waiting.
+
+    Committed before the first poll, so a restart resumes the same run rather
+    than starting another or losing the answer. `run_started_at` keeps its
+    first value: the deadline belongs to the run, not to whichever process is
+    watching it. Refreshes the claim too. False means this worker no longer
+    owns the request (recovered or settled elsewhere) and must not deliver.
+    """
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    now = _now()
+    cur = con.execute(
+        "UPDATE inbound_messages SET hermes_run_id = ?, run_started_at ="
+        " COALESCE(run_started_at, ?), claimed_at = ?, updated_at = ?"
+        " WHERE gateway_request_id = ? AND state = 'PROCESSING'",
+        (str(run_id), now, now, now, request_id),
+    )
+    return cur.rowcount == 1
+
+
+def touch_claim(con: sqlite3.Connection, request_id: str) -> bool:
+    """Heartbeat for a live wait. Keeps `recover_stale` from reclaiming it.
+
+    A wait on Hermes can outlast PROCESSING_LEASE_SECONDS; a worker that is
+    still watching its run renews the lease instead. False means the claim
+    is gone and the caller must stop without delivering anything.
+    """
+    now = _now()
+    cur = con.execute(
+        "UPDATE inbound_messages SET claimed_at = ?, updated_at = ?"
+        " WHERE gateway_request_id = ? AND state = 'PROCESSING'",
+        (now, now, request_id),
+    )
+    return cur.rowcount == 1
+
+
 def claim_next(con: sqlite3.Connection, *, max_active: int) -> sqlite3.Row | None:
     """Take the next message that may be worked on, or None.
 
@@ -129,6 +186,10 @@ def claim_next(con: sqlite3.Connection, *, max_active: int) -> sqlite3.Row | Non
     keeps a conversation's answers in order — a second message from the same
     chat waits rather than racing the first (sections 61, 62, 119).
     """
+    # Count, choose and claim under one write lock. With more than one worker
+    # a deferred transaction would let two of them read the same QUEUED row.
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
     active = con.execute(
         "SELECT COUNT(*) FROM inbound_messages WHERE state = 'PROCESSING'"
     ).fetchone()[0]
@@ -147,13 +208,16 @@ def claim_next(con: sqlite3.Connection, *, max_active: int) -> sqlite3.Row | Non
         return None
 
     now = _now()
-    con.execute(
+    cur = con.execute(
         "UPDATE inbound_messages SET state='PROCESSING', claimed_at=?, "
         "attempts = attempts + 1, updated_at=? WHERE gateway_request_id=? "
         "AND state='QUEUED'",
         (now, now, row["gateway_request_id"]),
     )
-    if con.total_changes == 0:
+    # `con.total_changes` counts every change on this connection since it
+    # opened — including open_db's own meta write — so it was never 0 here
+    # and could not detect a lost race. The statement's own count can.
+    if cur.rowcount != 1:
         return None
     con.execute(
         "INSERT INTO conversation_state (conversation_id, platform, active_request_id,"
@@ -179,8 +243,29 @@ def release_conversation(con: sqlite3.Connection, conversation_id: str) -> None:
     )
 
 
+CLEAN_SHUTDOWN_KEY = "clean_shutdown_at"
+
+
+def note_clean_shutdown(con: sqlite3.Connection) -> None:
+    """The process stopped on purpose, its waits left PROCESSING with their runs."""
+    stamp(con, CLEAN_SHUTDOWN_KEY)
+
+
+def take_clean_shutdown(con: sqlite3.Connection) -> bool:
+    """Whether the previous process stopped cleanly. Consumes the marker.
+
+    A process that was killed (OOM, SIGKILL, a crash) never writes it, so
+    whatever it was doing counts as a failed attempt: a request that kills
+    the gateway every time it is resumed still ends at max_attempts.
+    """
+    row = con.execute("SELECT value FROM metrics WHERE key = ?",
+                      (CLEAN_SHUTDOWN_KEY,)).fetchone()
+    con.execute("DELETE FROM metrics WHERE key = ?", (CLEAN_SHUTDOWN_KEY,))
+    return row is not None
+
+
 def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LEASE_SECONDS,
-                  max_attempts: int = 3) -> dict:
+                  max_attempts: int = 3, refund_resumable: bool = False) -> dict:
     """Return abandoned claims to the queue (section 118).
 
     Discord replies resume only a confirmed prefix plus a proven-unsent tail.
@@ -188,7 +273,10 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
     All confirmed chunks settle the request without regenerating or sending.
     LINE batches follow the same hold rule, but never resume a partial batch
     or change a started reply into a push. A request without uncertain
-    delivery is bounded by max_attempts.
+    delivery is bounded by max_attempts. With refund_resumable (startup,
+    after a clean shutdown only), a row that already has a Hermes run gets
+    back the attempt its interrupted claim used: a deliberate restart is not
+    a failed try.
     """
     # Select and recover under the same write lock as chunk claims. Otherwise
     # a live caller can refresh the lease between selection and invalidation.
@@ -200,7 +288,8 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
         con.execute("UPDATE inbound_messages SET updated_at=updated_at WHERE 0")
     cutoff = _iso_minus(lease_seconds)
     rows = con.execute(
-        "SELECT gateway_request_id, attempts, conversation_id, platform FROM inbound_messages"
+        "SELECT gateway_request_id, attempts, conversation_id, platform, hermes_run_id"
+        " FROM inbound_messages"
         " WHERE state = 'PROCESSING' AND (claimed_at IS NULL OR claimed_at < ?)",
         (cutoff,),
     ).fetchall()
@@ -223,7 +312,12 @@ def recover_stale(con: sqlite3.Connection, *, lease_seconds: int = PROCESSING_LE
                 # Unknown is held even when the request exhausted its budget.
                 reply_unknown += 1
                 continue
-        if int(r["attempts"] or 0) >= max_attempts:
+        attempts = int(r["attempts"] or 0)
+        if refund_resumable and r["hermes_run_id"] and attempts > 0:
+            attempts -= 1
+            con.execute("UPDATE inbound_messages SET attempts = ? WHERE gateway_request_id = ?",
+                        (attempts, r["gateway_request_id"]))
+        if attempts >= max_attempts:
             set_state(con, r["gateway_request_id"], "FAILED", error="max_attempts")
             failed += 1
         else:
@@ -932,3 +1026,116 @@ def load_quota_cache(con: sqlite3.Connection):
     return con.execute(
         "SELECT * FROM line_quota_cache WHERE id = 1"
     ).fetchone()
+
+
+# --------------------------------------------------- coding handoff (J.1)
+#
+# One live proposal per conversation. Everything here is about making "the
+# owner said yes" mean one specific thing, exactly once.
+
+
+def new_proposal_token() -> str:
+    """Six upper-case hex characters. Short enough to retype on a phone,
+    unguessable enough that it cannot be hit by accident in ordinary text."""
+    return secrets.token_hex(3).upper()
+
+
+def select_proposal_project(con: sqlite3.Connection, conversation_id: str,
+                            project_key: str) -> bool:
+    """A new project withdraws an old unspent proposal, even if not ready."""
+    row = get_proposal(con, conversation_id)
+    if row is None or row["project_key"] == project_key:
+        return True
+    changed = con.execute(
+        "DELETE FROM coding_handoff_proposals WHERE conversation_id=?"
+        " AND project_key<>? AND pending_authorization_id IS NULL",
+        (conversation_id, project_key))
+    return changed.rowcount == 1
+
+
+def put_proposal(con: sqlite3.Connection, *, conversation_id: str,
+                 project_key: str, token: str, scope_digest: str,
+                 origin_request_id: str, spec_revision: int = 0,
+                 spec_sha256: str = "") -> bool:
+    """Record (or replace) the scope this conversation has been shown.
+
+    Replacing is right: showing a second scope withdraws the first. Leaving
+    both answerable would make 「実行して」 ambiguous, and an ambiguous
+    authorization is not one.
+    """
+    cur = con.execute(
+        "INSERT INTO coding_handoff_proposals (conversation_id, project_key,"
+        " token, scope_digest, spec_revision, spec_sha256, origin_request_id,"
+        " created_at) VALUES (?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(conversation_id) DO UPDATE SET"
+        "   project_key=excluded.project_key, token=excluded.token,"
+        "   scope_digest=excluded.scope_digest,"
+        "   spec_revision=excluded.spec_revision,"
+        "   spec_sha256=excluded.spec_sha256,"
+        "   origin_request_id=excluded.origin_request_id,"
+        "   created_at=excluded.created_at, consumed_at=NULL, consumed_by=NULL"
+        " WHERE coding_handoff_proposals.pending_authorization_id IS NULL",
+        (conversation_id, project_key, token, scope_digest, int(spec_revision or 0),
+         spec_sha256 or None, origin_request_id, _now()),
+    )
+    return cur.rowcount == 1
+
+
+def mark_authorization_pending(con: sqlite3.Connection, conversation_id: str,
+                               authorization_id: str) -> None:
+    """Record that this authorization was sent and its outcome is not known.
+
+    Written *before* the request leaves. If the reply never arrives, this is
+    the only thing that ties a later message in this conversation back to the
+    authorization that may already have created a job — and it is what lets a
+    retry reuse the same id instead of minting a second one.
+    """
+    con.execute(
+        "UPDATE coding_handoff_proposals SET pending_authorization_id = ?,"
+        " pending_at = ? WHERE conversation_id = ?",
+        (authorization_id, _now(), conversation_id),
+    )
+
+
+def clear_authorization_pending(con: sqlite3.Connection,
+                                conversation_id: str,
+                                authorization_id: str = None) -> None:
+    """A definite answer arrived; there is nothing left to resolve."""
+    con.execute(
+        "UPDATE coding_handoff_proposals SET pending_authorization_id = NULL,"
+        " pending_at = NULL WHERE conversation_id = ?"
+        " AND (? IS NULL OR pending_authorization_id = ?)",
+        (conversation_id, authorization_id, authorization_id),
+    )
+
+
+def get_proposal(con: sqlite3.Connection, conversation_id: str):
+    return con.execute(
+        "SELECT * FROM coding_handoff_proposals WHERE conversation_id = ?",
+        (conversation_id,),
+    ).fetchone()
+
+
+def consume_proposal(con: sqlite3.Connection, conversation_id: str,
+                     request_id: str, *, project_key: str = None,
+                     scope_digest: str = None, mark_pending: bool = False) -> bool:
+    """Claim the proposal for exactly one inbound message.
+
+    Returns True for the message that wins the claim, and also for a *replay*
+    of that same message — a redelivered webhook carries the same
+    `gateway_request_id`, and refusing it would leave the owner with no answer
+    for a job that was in fact created. Every other message gets False.
+    """
+    cur = con.execute(
+        "UPDATE coding_handoff_proposals SET consumed_at = ?, consumed_by = ?,"
+        " pending_authorization_id = CASE WHEN ? THEN ? ELSE pending_authorization_id END,"
+        " pending_at = CASE WHEN ? THEN ? ELSE pending_at END"
+        " WHERE conversation_id = ?"
+        "   AND (consumed_at IS NULL OR consumed_by = ?)"
+        "   AND (? IS NULL OR project_key = ?)"
+        "   AND (? IS NULL OR scope_digest = ?)",
+        (_now(), request_id, mark_pending, request_id, mark_pending, _now(),
+         conversation_id, request_id, project_key, project_key,
+         scope_digest, scope_digest),
+    )
+    return cur.rowcount == 1
